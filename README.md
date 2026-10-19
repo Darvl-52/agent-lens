@@ -201,8 +201,10 @@ pressed by a key shows the key before its label (`g refresh`), and the last row 
    ways to settle it, offered by the model for all the points at once, and a field for your own;
    picking one opens the next point, `change` and `clear` take it back. `a` sends what you decided
    to the session as your prompt: Claude writes it into the change's files and asks you where a
-   decision contradicts the spec. Once his turn has changed the spec, the brief is made again by
-   itself, and the tab shows what is left.
+   decision contradicts the spec. `d`, `Claude decides all`, sends every point not decided yet:
+   Claude takes the answer the change and the code argue for, writes it in with its reason, and
+   asks you about a point it cannot settle alone. Once his turn has changed the spec, the brief is
+   made again by itself, and the tab shows what is left.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
    the session as your prompt, `do` on a task sends that one: Claude reads the change, does the
    task alone, runs its check if it names one, and ticks it. A task sent is marked so until it is

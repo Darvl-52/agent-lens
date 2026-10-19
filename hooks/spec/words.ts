@@ -79,6 +79,9 @@ const EN = {
   noOptions: 'No options offered: write your own.',
   sent: 'sent to Claude',
   apply: (n: number) => `write ${n} into the spec`,
+  decideAll: (n: number) => `Claude decides all (${n})`,
+  byClaude: 'Claude decides',
+  decideAllSent: (n: number) => `${n === 1 ? 'The point went' : `${n} points went`} to Claude to decide.`,
   refreshing: 'Claude is writing the decisions in: the brief is made again once the spec changes.',
   noTasks: 'This change has no tasks.md, or no tasks in it.',
   allDone: 'All tasks are done.',
@@ -168,6 +171,8 @@ No more than 350 words.`,
   closePrompt: (change: string, file: string, cases: readonly { id: string; title: string; mark: TestCase['mark']; file?: string }[]) =>
     `Close these test cases of the OpenSpec change "${change}" (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.file ?? 'the file its line names'})` : c.mark === 'manual' ? ' (Manual)' : ' (no mark yet)'}`).join('\n')}\n\nRead each case whole, its steps and what it covers, and the change's specs. For a case marked Automated, write the test its steps describe in the file its Automated line names, its id in the test's name and tags as the other tests there have them, run it and make it pass; where it fails on a bug the spec rules out, fix the code, and where the spec itself is in doubt, ask me. For a case marked Manual, automate it where that can be done, and mark it Automated; where it cannot, say why. For a case with no mark, decide which it is first and write the mark into test-cases.md. Touch nothing the cases do not need, and end by saying which cases are closed and which are not.`,
   // Sent to the session as the person's own prompt: Claude edits the change's files.
+  decideAllPrompt: (change: string, dir: string, points: readonly string[]) =>
+    `Decide these open points of the OpenSpec change "${change}" (${dir}) yourself:\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nFirst read proposal.md, design.md, tasks.md and the change's specs, and the project's code where a point turns on it. For each point take the answer the change and the code argue for best, write it where it belongs (proposal.md, design.md, the specs, tasks.md) with its reason in a sentence, and take it out of the open questions and assumptions. Where a point cannot be settled without me (a product choice, a cost, something no file says), leave it open and ask me about it at the end. Touch nothing else, and end with a line per point: what you decided, or what you need from me.`,
   applyPrompt: (change: string, dir: string, items: { point: string; answer: string }[]) =>
     `I have settled open points of the OpenSpec change "${change}" (${dir}). Write the decisions into its files — proposal.md, design.md, the specs and tasks.md, wherever each belongs — and drop what is settled from the open questions and assumptions. Change nothing else. Where a decision contradicts the spec, or it is unclear how to write it, ask me before editing.\n\n${items.map((d, i) => `${i + 1}. ${d.point}\n   Decision: ${d.answer}`).join('\n')}`,
 }
@@ -243,6 +248,9 @@ const RU: typeof EN = {
   noOptions: 'Вариантов нет — напиши своё.',
   sent: 'отправлено Claude',
   apply: n => `внести в спеку (${n})`,
+  decideAll: n => `Claude решит все (${n})`,
+  byClaude: 'решает Claude',
+  decideAllSent: n => `Отправлено Claude на решение: ${n}.`,
   refreshing: 'Claude вносит решения: выжимка обновится сама, когда спека изменится.',
   noTasks: 'В изменении нет tasks.md или в нём нет задач.',
   allDone: 'Все задачи сделаны.',
@@ -327,6 +335,8 @@ const RU: typeof EN = {
     `Сделай задачу ${key} из изменения OpenSpec «${change}» (${dir}): «${text}». Сначала прочитай tasks.md (и шапку с правилами), proposal.md, design.md и specs изменения. Сделай только эту задачу, выполни её проверку, если она указана, и отметь задачу в tasks.md как выполненную. Если спека мешает сделать задачу или в ней чего-то не хватает, спроси меня, прежде чем решать самому.`,
   closePrompt: (change, file, cases) =>
     `Закрой эти тест-кейсы изменения OpenSpec «${change}» (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.file ?? 'файл из его строки'})` : c.mark === 'manual' ? ' (Manual)' : ' (без пометки)'}`).join('\n')}\n\nПрочитай каждый кейс целиком, его шаги и что он покрывает, и specs изменения. Для кейса с Automated напиши тест по его шагам в файле из строки Automated, с id кейса в названии и тегах теста, как у остальных тестов там, прогони его и добейся зелёного; если он падает на ошибке, которую спека исключает, поправь код, а если под вопросом сама спека, спроси меня. Кейс с Manual автоматизируй, если это возможно, и поменяй пометку на Automated; если нельзя, объясни почему. Для кейса без пометки сначала реши, какой он, и впиши пометку в test-cases.md. Не трогай ничего, что кейсам не нужно, и в конце скажи, какие кейсы закрыты, а какие нет.`,
+  decideAllPrompt: (change, dir, points) =>
+    `Реши сам эти открытые пункты изменения OpenSpec «${change}» (${dir}):\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nСначала прочитай proposal.md, design.md, tasks.md и specs изменения, а где пункт упирается в код проекта, и код. Для каждого пункта выбери ответ, за который больше говорят изменение и код, впиши его туда, где ему место (proposal.md, design.md, specs, tasks.md), с причиной в одном предложении, и убери пункт из открытых вопросов и допущений. Если пункт без меня не решить (продуктовый выбор, деньги, то, чего нет ни в одном файле), оставь его открытым и спроси меня о нём в конце. Больше ничего не трогай и в конце напиши по строке на пункт: что решил или что тебе нужно от меня.`,
   applyPrompt: (change, dir, items) =>
     `Я решил открытые пункты изменения OpenSpec «${change}» (${dir}). Внеси решения в его файлы — proposal.md, design.md, specs и tasks.md, туда, где каждому место, — и убери решённое из открытых вопросов и допущений. Остального не трогай. Если решение противоречит спеке или неясно, как его записать, спроси меня, прежде чем править.\n\n${items.map((d, i) => `${i + 1}. ${d.point}\n   Решение: ${d.answer}`).join('\n')}`,
 }

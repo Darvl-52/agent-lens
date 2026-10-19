@@ -428,6 +428,31 @@ async function unsettle($: EngineInterface, index: number) {
 
 // The decisions settled and not yet sent go to the session as the person's prompt: Claude writes
 // them into the change's files, which makes the brief stale, and the next one is made from those.
+// Every point not decided yet goes to the session for Claude to decide: it writes each answer
+// into the change's files, or asks where it cannot decide alone, and the brief is made again from
+// those. The points show as Claude's to decide until then.
+async function decideAll($: EngineInterface) {
+  const lens = await read($, lensAtom)
+  const brief = await read($, briefAtom)
+  if (!lens || !brief) return
+  const w = await wordsIn($)
+  const verdicts = (await decidingOf($, brief)).verdicts
+  const open = brief.decisions.flatMap((point, i) => (verdicts[i] ? [] : [{ i, point }]))
+  if (open.length === 0) return
+  const r = await $.prompt.submit({ text: w.decideAllPrompt(lens.current, join(lens.root, 'changes', lens.current), open.map(x => x.point)), asUser: true })
+  if (r.drop !== undefined) {
+    await fail($, w.notSent(r.drop))
+    return
+  }
+  await update($, refreshingAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint }))
+  await changeDeciding($, d => ({
+    ...d,
+    open: null,
+    verdicts: { ...d.verdicts, ...Object.fromEntries(open.map(x => [String(x.i), { answer: w.byClaude, isSent: true }])) },
+  }))
+  await $.ui.toast(w.decideAllSent(open.length))
+}
+
 async function applyDecisions($: EngineInterface) {
   const lens = await read($, lensAtom)
   const brief = await read($, briefAtom)
@@ -896,6 +921,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             <Box flexDirection="row" gap={1}>
               <Text color={undecided > 0 ? 'warning' : 'success'}>{w.decidedOf(decisions.length - undecided, decisions.length)}</Text>
               {toApply > 0 ? keyed('apply', w.apply(toApply), 'a', run(() => applyDecisions($)), { variant: 'primary' }) : null}
+              {undecided > 0 ? keyed('decide-all', w.decideAll(undecided), 'd', run(() => decideAll($)), toApply > 0 ? {} : { variant: 'primary' }) : null}
             </Box>
             <Text dimColor>{w.decideNote}</Text>
             {decisions.map((d, i) => {

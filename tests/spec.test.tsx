@@ -775,3 +775,35 @@ test('the Tests tab: each case and whether its test is there; picked ones, or al
   expect(await pane.find({ key: 'close-all' })).toBeUndefined()
   await pane.unmount()
 })
+
+test('Claude decides all the points left, one decided by hand aside, and the brief is made again once the spec moves', async ($, on) => {
+  const { asked, spec, settle, setReply, submitted, toasts, put, turn } = await project($, on, { door: DOOR })
+  await spec()
+  await settle()
+  setReply(e => (e.prompt.includes('JSON') ? '```json\n[["At midnight", "After a week"], ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN))
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  expect(await pane.find({ key: 'decide-all' })).toMatchObject({ props: { label: 'Claude decides all (2)', hotkey: 'd', variant: 'primary' } })
+  await pane.press({ key: 'decide-0' })
+  await pane.press({ key: 'option-0-1' })
+  expect(await pane.find({ key: 'decide-all' })).toMatchObject({ props: { label: 'Claude decides all (1)' } })
+
+  await pane.press({ key: 'decide-all' })
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]).toMatchObject({ asUser: true })
+  expect(submitted[0]!.text).toMatch(/^Decide these open points of the OpenSpec change "door" \(\/proj\/openspec\/changes\/door\) yourself:\n\n1\. Who may revoke \(proposal\.md\)\n\nFirst read/)
+  expect(toasts.at(-1)).toBe('The point went to Claude to decide.')
+  expect(await pane.find({ type: 'Text', text: /^  → Claude decides · sent to Claude$/ })).toBeDefined()
+  expect(await pane.find({ key: 'decide-all' })).toBeUndefined()
+  // The one decided by hand still waits to be written in.
+  expect(await pane.find({ key: 'apply' })).toMatchObject({ props: { label: 'write 1 into the spec' } })
+  expect(await bandText($)).toBe('◆ door · 1 not in the spec · tasks 1/2 · tests 1 auto, 1 manual')
+
+  // Claude writes it into the spec: the brief is made again from it.
+  const briefs = asked.filter(a => !a.prompt.includes('JSON')).length
+  put('door', 'proposal.md', '# Proposal\n\nLet managers grant door access. Only the manager may revoke it.\n')
+  await turn()
+  await settle()
+  expect(asked.filter(a => !a.prompt.includes('JSON'))).toHaveLength(briefs + 1)
+  await pane.unmount()
+})
