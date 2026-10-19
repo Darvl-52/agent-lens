@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Hook, MatchedHook } from 'claude-code'
 
-import type { Brief, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
+import type { Brief, Busy, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn, restoreLang } from '../core/lang'
 import { specSkill } from '../router/catalog'
@@ -45,6 +45,7 @@ const pickedCasesAtom = atom({ plugin: 'agent-lens', key: 'spec.pickedCases' } a
 const checkedAtom = atom({ plugin: 'agent-lens', key: 'spec.checked' } as const, null)
 const archiveAtom = atom({ plugin: 'agent-lens', key: 'spec.archive' } as const, null)
 const busyAtom = atom({ plugin: 'agent-lens', key: 'spec.busy' } as const, null)
+const queuedAtom = atom({ plugin: 'agent-lens', key: 'spec.queued' } as const, [] as Busy[])
 const errorAtom = atom({ plugin: 'agent-lens', key: 'spec.error' } as const, null)
 const failedAtom = atom({ plugin: 'agent-lens', key: 'spec.failed' } as const, null)
 const tabAtom = atom({ plugin: 'agent-lens', key: 'spec.tab' } as const, 'brief')
@@ -70,6 +71,13 @@ let scanning: Promise<void> | undefined
 let isScanStale = false
 // The change and fingerprint `openspec validate` is running on, so a scan does not start it twice.
 let checking = ''
+// The pane's model calls run one at a time, so a question asked during the brief reads the change
+// from its cache: each waits its turn, and one asked again while it waits is the same call.
+let queue: Promise<void> = Promise.resolve()
+const waiting = new Map<string, Promise<void>>()
+let jobs = 0
+// The brief being made and the version it reads: asked for that version again, it is the same call.
+let briefing: { fingerprint: string; done: Promise<void> } | undefined
 
 async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]
@@ -299,6 +307,40 @@ async function clearError($: EngineInterface) {
   await update($, failedAtom, () => null)
 }
 
+// A call starting puts away its own last failure, and a refused prompt's, not another call's.
+async function clearErrorOf($: EngineInterface, job: Busy) {
+  const failed = await read($, failedAtom)
+  if (failed === null || failed.what === job) await clearError($)
+}
+
+// `fn` runs once the calls before it are done, shown as `job` meanwhile; `key` names the call, so
+// one asked for while the same waits is not run twice.
+function inTurn($: EngineInterface, job: Busy, key: string, fn: () => Promise<void>): Promise<void> {
+  const same = waiting.get(key)
+  if (same) return same
+  jobs++
+  const queued = update($, queuedAtom, q => [...q, job])
+  const run = queue.then(async () => {
+    waiting.delete(key)
+    try {
+      await queued
+      await update($, queuedAtom, q => {
+        const i = q.indexOf(job)
+        return i < 0 ? q : [...q.slice(0, i), ...q.slice(i + 1)]
+      })
+      await update($, busyAtom, () => job)
+      await clearErrorOf($, job)
+      await fn()
+    } finally {
+      jobs--
+      await update($, busyAtom, () => null)
+    }
+  })
+  waiting.set(key, run)
+  queue = run.catch(() => {})
+  return run
+}
+
 async function retry($: EngineInterface) {
   const failed = await read($, failedAtom)
   await clearError($)
@@ -308,45 +350,56 @@ async function retry($: EngineInterface) {
   else if (failed?.what === 'answer' && failed.question !== undefined) await ask($, failed.question)
 }
 
-async function makeBrief($: EngineInterface) {
+// The brief of the change as it is when its turn comes; asked for while one of that version is being
+// made, it is that one.
+async function makeBrief($: EngineInterface): Promise<void> {
   const lens = await read($, lensAtom)
-  if (!lens || (await read($, busyAtom)) !== null) return
+  if (lens && briefing?.fingerprint === lens.fingerprint && !waiting.has('brief')) return briefing.done
+  const run: Promise<void> = inTurn($, 'brief', 'brief', async () => {
+    const now = await read($, lensAtom)
+    if (!now) return
+    briefing = { fingerprint: now.fingerprint, done: run }
+    try {
+      await briefOf($, now)
+    } finally {
+      briefing = undefined
+    }
+  })
+  return run
+}
+
+async function briefOf($: EngineInterface, lens: Lens) {
+  // Decisions sent for an older version are in the files the brief is made from now.
+  const refreshing = await read($, refreshingAtom)
+  if (refreshing?.change === lens.current && refreshing.fingerprint !== lens.fingerprint) await update($, refreshingAtom, () => null)
   const w = await wordsIn($)
   const lang = await langIn($)
   const text = specText(lens.current, files)
-  await update($, busyAtom, () => 'brief')
-  await clearError($)
-  try {
-    const r = await $.model.complete({
-      model: MODEL,
-      system: w.system,
-      // The change first and marked, so a question asked soon after reads it from the cache.
-      prompt: [{ text, cache: true }, { text: w.briefPrompt(lens.current) }],
-      maxTokens: 3000,
-      timeoutMs: TIMEOUT_MS,
-    })
-    if (!r.isAnswered) {
-      await fail($, w.failed(whyNot(w, r)), { what: 'brief' })
-      return
-    }
-    const brief: Brief = { fingerprint: lens.fingerprint, ...splitBrief(r.text, w.decideHeading, w.none), at: await $.clock.now() }
-    await $.store.set(briefKey(lens.root, lang, lens.current), brief)
-    // The pane may have moved on to another change, or language, while the model read.
-    if ((await read($, lensAtom))?.current === lens.current && (await langIn($)) === lang) await update($, briefAtom, () => brief)
-  } finally {
-    await update($, busyAtom, () => null)
+  const r = await $.model.complete({
+    model: MODEL,
+    system: w.system,
+    // The change first and marked, so a question asked soon after reads it from the cache.
+    prompt: [{ text, cache: true }, { text: w.briefPrompt(lens.current) }],
+    maxTokens: 3000,
+    timeoutMs: TIMEOUT_MS,
+  })
+  if (!r.isAnswered) {
+    await fail($, w.failed(whyNot(w, r)), { what: 'brief' })
+    return
   }
+  const brief: Brief = { fingerprint: lens.fingerprint, ...splitBrief(r.text, w.decideHeading, w.none), at: await $.clock.now() }
+  await $.store.set(briefKey(lens.root, lang, lens.current), brief)
+  // The pane may have moved on to another change, or language, while the model read.
+  if ((await read($, lensAtom))?.current === lens.current && (await langIn($)) === lang) await update($, briefAtom, () => brief)
 }
 
-async function explainChanges($: EngineInterface) {
-  const lens = await read($, lensAtom)
-  if (!lens || lens.deltas.length === 0 || (await read($, busyAtom)) !== null) return
-  const seen = (await $.store.get(seenKey(lens.root, lens.current)).catch(() => undefined)) as Files | undefined
-  if (!seen) return
-  const w = await wordsIn($)
-  await update($, busyAtom, () => 'explain')
-  await clearError($)
-  try {
+function explainChanges($: EngineInterface) {
+  return inTurn($, 'explain', 'explain', async () => {
+    const lens = await read($, lensAtom)
+    if (!lens || lens.deltas.length === 0) return
+    const seen = (await $.store.get(seenKey(lens.root, lens.current)).catch(() => undefined)) as Files | undefined
+    if (!seen) return
+    const w = await wordsIn($)
     const r = await $.model.complete({
       model: MODEL,
       system: w.system,
@@ -356,9 +409,7 @@ async function explainChanges($: EngineInterface) {
     })
     if (r.isAnswered) await update($, explainAtom, () => r.text)
     else await fail($, w.failed(whyNot(w, r)), { what: 'explain' })
-  } finally {
-    await update($, busyAtom, () => null)
-  }
+  })
 }
 
 // The Decide tab's work on `brief`: what was kept for it, else a fresh start.
@@ -375,32 +426,31 @@ async function changeDeciding($: EngineInterface, fn: (d: Deciding, brief: Brief
 }
 
 // The model's options for every decision at once, asked for when the first one is opened.
-async function makeOptions($: EngineInterface) {
-  const lens = await read($, lensAtom)
-  const brief = await read($, briefAtom)
-  if (!lens || !brief || brief.options || brief.decisions.length === 0 || (await read($, busyAtom)) !== null) return
+function makeOptions($: EngineInterface) {
+  return inTurn($, 'options', 'options', async () => {
+    const lens = await read($, lensAtom)
+    const brief = await read($, briefAtom)
+    if (lens && brief && !brief.options && brief.decisions.length > 0) await optionsOf($, lens, brief)
+  })
+}
+
+async function optionsOf($: EngineInterface, lens: Lens, brief: Brief) {
   const w = await wordsIn($)
   const lang = await langIn($)
-  await update($, busyAtom, () => 'options')
-  await clearError($)
-  try {
-    const r = await $.model.complete({
-      model: MODEL,
-      system: w.system,
-      prompt: [{ text: specText(lens.current, files), cache: true }, { text: w.optionsPrompt(brief.decisions) }],
-      maxTokens: 1500,
-      timeoutMs: TIMEOUT_MS,
-    })
-    if (!r.isAnswered) {
-      await fail($, w.failed(whyNot(w, r)), { what: 'options' })
-      return
-    }
-    const withOptions: Brief = { ...brief, options: parseOptions(r.text, brief.decisions.length) }
-    await $.store.set(briefKey(lens.root, lang, lens.current), withOptions)
-    if ((await read($, briefAtom))?.at === brief.at) await update($, briefAtom, () => withOptions)
-  } finally {
-    await update($, busyAtom, () => null)
+  const r = await $.model.complete({
+    model: MODEL,
+    system: w.system,
+    prompt: [{ text: specText(lens.current, files), cache: true }, { text: w.optionsPrompt(brief.decisions) }],
+    maxTokens: 1500,
+    timeoutMs: TIMEOUT_MS,
+  })
+  if (!r.isAnswered) {
+    await fail($, w.failed(whyNot(w, r)), { what: 'options' })
+    return
   }
+  const withOptions: Brief = { ...brief, options: parseOptions(r.text, brief.decisions.length) }
+  await $.store.set(briefKey(lens.root, lang, lens.current), withOptions)
+  if ((await read($, briefAtom))?.at === brief.at) await update($, briefAtom, () => withOptions)
 }
 
 async function toggleDecision($: EngineInterface, index: number) {
@@ -448,9 +498,42 @@ async function decideAll($: EngineInterface) {
   await changeDeciding($, d => ({
     ...d,
     open: null,
-    verdicts: { ...d.verdicts, ...Object.fromEntries(open.map(x => [String(x.i), { answer: w.byClaude, isSent: true }])) },
+    verdicts: { ...d.verdicts, ...Object.fromEntries(open.map(x => [String(x.i), { answer: w.byClaude, isSent: true, isByClaude: true }])) },
   }))
   await $.ui.toast(w.decideAllSent(open.length))
+}
+
+// The decisions sent go to Claude again as they were: those settled here to write in, the rest to
+// decide.
+async function resendDecisions($: EngineInterface) {
+  const lens = await read($, lensAtom)
+  const brief = await read($, briefAtom)
+  if (!lens || !brief) return
+  const w = await wordsIn($)
+  const verdicts = (await decidingOf($, brief)).verdicts
+  const sent = brief.decisions.flatMap((point, i) => (verdicts[i]?.isSent ? [{ point, ...verdicts[i] }] : []))
+  if (sent.length === 0) return
+  const dir = join(lens.root, 'changes', lens.current)
+  const settled = sent.filter(x => !x.isByClaude)
+  const left = sent.filter(x => x.isByClaude).map(x => x.point)
+  const text = [...(settled.length > 0 ? [w.applyPrompt(lens.current, dir, settled)] : []), ...(left.length > 0 ? [w.decideAllPrompt(lens.current, dir, left)] : [])].join('\n\n')
+  const r = await $.prompt.submit({ text, asUser: true })
+  if (r.drop !== undefined) {
+    await fail($, w.notSent(r.drop))
+    return
+  }
+  await update($, refreshingAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint }))
+  await $.ui.toast(w.resent(sent.length))
+}
+
+// The decisions sent come back to the pane: a point left to Claude is open again, an answer settled
+// here waits to be written in, and either can be changed.
+async function reopenDecisions($: EngineInterface) {
+  await update($, refreshingAtom, () => null)
+  await changeDeciding($, d => ({
+    ...d,
+    verdicts: Object.fromEntries(Object.entries(d.verdicts).flatMap(([i, v]) => (v.isByClaude ? [] : [[i, { ...v, isSent: false }]]))),
+  }))
 }
 
 async function applyDecisions($: EngineInterface) {
@@ -497,7 +580,7 @@ async function doTask($: EngineInterface, task: Task) {
     await fail($, w.notSent(r.drop))
     return
   }
-  await update($, sentTasksAtom, sent => [...sent, `${lens.current}:${key}`])
+  await update($, sentTasksAtom, sent => [...new Set([...sent, `${lens.current}:${key}`])])
   await $.ui.toast(w.taskSentToast(key))
 }
 
@@ -593,14 +676,15 @@ async function archiveChange($: EngineInterface) {
 }
 
 // After a turn the row follows what agents ticked and rewrote; a spec that moved on from the
-// decisions sent gets its brief made again, so the Decide tab shows what is left.
+// decisions sent gets its brief made again, so the Decide tab shows what is left. One still where
+// it was says so, and the decisions can be sent again or changed.
 async function afterTurn($: EngineInterface) {
   await scan($)
   const lens = await read($, lensAtom)
   const refreshing = await read($, refreshingAtom)
-  if (!lens || !refreshing || refreshing.change !== lens.current || refreshing.fingerprint === lens.fingerprint) return
-  await update($, refreshingAtom, () => null)
-  await makeBrief($)
+  if (!lens || !refreshing || refreshing.change !== lens.current) return
+  if (refreshing.fingerprint === lens.fingerprint) await update($, refreshingAtom, r => (r === null ? r : { ...r, isUnchanged: true }))
+  else await makeBrief($)
 }
 
 // The change in view as the review reads it beside a diff: its name, the tasks not ticked yet,
@@ -625,14 +709,13 @@ async function markRead($: EngineInterface) {
 }
 
 async function ask($: EngineInterface, question: string) {
-  const lens = await read($, lensAtom)
   const q = question.trim()
-  if (!lens || q === '' || (await read($, busyAtom)) !== null) return
-  const w = await wordsIn($)
-  await update($, busyAtom, () => 'answer')
-  await clearError($)
-  await update($, answerAtom, () => null)
-  try {
+  if (q === '') return
+  await inTurn($, 'answer', `answer:${q}`, async () => {
+    const lens = await read($, lensAtom)
+    if (!lens) return
+    const w = await wordsIn($)
+    await update($, answerAtom, () => null)
     const r = await $.model.complete({
       model: MODEL,
       system: w.system,
@@ -642,9 +725,7 @@ async function ask($: EngineInterface, question: string) {
     })
     if (r.isAnswered) await update($, answerAtom, () => ({ question: q, text: r.text }))
     else await fail($, w.failed(whyNot(w, r)), { what: 'answer', question: q })
-  } finally {
-    await update($, busyAtom, () => null)
-  }
+  })
 }
 
 // Opens the pane on the change in view. A change opened here for the first time is taken as read
@@ -719,6 +800,11 @@ export async function forgetSaid($: EngineInterface) {
 
 export async function startSpec($: EngineInterface, isInteractive: boolean) {
   await restoreLang($)
+  // A reload drops the calls the old code was making, while the session's values still show them.
+  if (jobs === 0) {
+    await update($, busyAtom, () => null)
+    await update($, queuedAtom, () => [])
+  }
   await registerCommand($)
   if (isInteractive) await scan($).catch(() => {})
 }
@@ -827,6 +913,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const tab = await read($, tabAtom)
   const brief = await read($, briefAtom)
   const busy = await read($, busyAtom)
+  const queued = (await read($, queuedAtom)) ?? []
   const error = await read($, errorAtom)
   const failed = await read($, failedAtom)
   const s = await statusOf($, lens)
@@ -922,7 +1009,11 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     )
   } else if (tab === 'decide') {
     const toApply = Object.values(deciding?.verdicts ?? {}).filter(v => !v.isSent).length
-    const isRefreshing = (await read($, refreshingAtom))?.change === lens.current && busy !== 'brief'
+    // Shown while the spec is at the version the decisions went to; once it moves on, the brief is
+    // made again and says the rest.
+    const refreshing = await read($, refreshingAtom)
+    const isRefreshing = refreshing?.change === lens.current && refreshing.fingerprint === lens.fingerprint && busy !== 'brief'
+    const hasSent = Object.values(deciding?.verdicts ?? {}).some(v => v.isSent)
     body = (
       <Box flexDirection="column" gap={1}>
         {staleRow}
@@ -990,7 +1081,17 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             })}
           </Box>
         )}
-        {isRefreshing ? <Text color="warning">{w.refreshing}</Text> : null}
+        {isRefreshing && refreshing.isUnchanged && hasSent ? (
+          <Box flexDirection="column">
+            <Text color="warning">{`⚠ ${w.notWritten}`}</Text>
+            <Box flexDirection="row" gap={1}>
+              {keyed('resend', w.sendAgain, 'w', run(() => resendDecisions($)), { variant: 'primary' })}
+              <Button key="reopen" label={w.reopen} dimColor onPress={run(() => reopenDecisions($))} />
+            </Box>
+          </Box>
+        ) : isRefreshing ? (
+          <Text color="warning">{`◌ ${w.refreshing}`}</Text>
+        ) : null}
       </Box>
     )
   } else if (tab === 'tasks') {
@@ -1017,7 +1118,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           {ready.isOffered ? (
             <Box flexDirection="column" marginTop={1}>
               {ready.archive?.isSent ? (
-                <Text color="success">{w.archiveSent}</Text>
+                <Box flexDirection="row" gap={1}>
+                  <Text color="success">{w.archiveSent}</Text>
+                  {ready.isReady ? <Button key="archive-again" label={w.sendAgain} dimColor onPress={run(() => archiveChange($))} /> : null}
+                </Box>
               ) : !ready.isReady ? (
                 <Box flexDirection="column">
                   <Text color="warning">{w.beforeArchive}</Text>
@@ -1058,7 +1162,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                   </Text>
                 </Box>
                 {t.isDone ? null : isSent(t) ? (
-                  <Text color="warning">{w.taskSent}</Text>
+                  <Box flexDirection="row" gap={1} flexShrink={0}>
+                    <Text color="warning">{w.taskSent}</Text>
+                    <Button key={`again-${i}`} label={w.sendAgain} dimColor onPress={run(() => doTask($, t))} />
+                  </Box>
                 ) : (
                   <Button key={`task-${i}`} label={w.doTask} dimColor onPress={run(() => doTask($, t))} />
                 )}
@@ -1233,7 +1340,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           <Input key="question" placeholder={w.askPlaceholder} submitLabel={w.ask} autoFocus onSubmit={value => void ask($, value).catch(() => {})} />
         ) : null}
         {/* Ready questions until one is asked: nothing to think up to start. */}
-        {answer || busy === 'answer' ? null : (
+        {answer || busy === 'answer' || queued.includes('answer') ? null : (
           <Box flexDirection="column" marginTop={1}>
             <Text dimColor>{w.trySuggestions}</Text>
             {w.suggestions.map((q, i) => (
@@ -1281,6 +1388,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
       </Box>
       {/* What the model is doing and what went wrong, above every tab: seen wherever one is. */}
       {busy && busy !== 'options' ? <Text color="warning">{`◌ ${w.busy[busy]}`}</Text> : null}
+      {queued.length > 0 ? <Text color="warning">{`  ${w.queued(queued)}`}</Text> : null}
       {error ? (
         <Box flexDirection="row" gap={1}>
           <Box flexShrink={1}>

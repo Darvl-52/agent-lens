@@ -238,8 +238,11 @@ const project = async (
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
-  on('model.complete', ($, e) => {
+  // How long the model takes to answer, on the mocked clock.
+  let delay = 0
+  on('model.complete', async ($, e) => {
     asked.push(e)
+    if (delay > 0) await clock.sleep(delay)
     const text = reply(e)
     return text === null
       ? { value: { isAnswered: false as const, reason: 'api-error' as const, status: 529, error: 'overloaded' as const, usage: USAGE } }
@@ -280,7 +283,7 @@ const project = async (
     await $.tool.call({ tool: 'Write', file_path: `/proj/openspec/changes/${change}/${file}`, content: text })
   }
   const turn = () => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, setReply: (r: typeof reply) => (reply = r) }
+  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms) }
 }
 
 // The text of a found element and everything under it.
@@ -495,6 +498,11 @@ test('a task goes to Claude from the Tasks tab, the next one first', async ($, o
   expect(await pane.find({ type: 'Text', text: /^→ 1\.2 Cover it with e2e$/ })).toBeDefined()
   expect(await pane.find({ key: 'task-1' })).toBeUndefined()
   expect(await pane.find({ key: 'do-next' })).toBeUndefined()
+  // Not done after all: it goes again as it went.
+  await pane.press({ key: 'again-1' })
+  expect(submitted).toHaveLength(2)
+  expect(submitted[1]!.text).toBe(submitted[0]!.text)
+  expect(toasts.at(-1)).toBe('Task 1.2 went to Claude.')
   // Claude ticks it.
   put('door', 'tasks.md', TASKS.replace('- [ ] 1.2', '- [x] 1.2'))
   await turn()
@@ -574,6 +582,10 @@ test('a change with every task ticked, a clean check and nothing to decide goes 
   expect(submitted[0]!.text).toMatch(/^Archive the OpenSpec change "door" \(\/proj\/openspec\/changes\/door\)\. Where the project has its own skill/)
   expect(toasts).toEqual(['Sent to Claude to archive.'])
   expect(await pane.find({ type: 'Text', text: /^Sent to Claude to archive\.$/ })).toBeDefined()
+  // Still here after the turn: it goes again.
+  await pane.press({ key: 'archive-again' })
+  expect(submitted).toHaveLength(2)
+  expect(submitted[1]!.text).toBe(submitted[0]!.text)
   await pane.unmount()
   expect(await bandText($)).not.toMatch(/ready to archive/)
 })
@@ -831,5 +843,80 @@ test('a scenario no test case covers is in the Tests tab, and goes to Claude to 
   )
   expect(await pane.find({ type: 'Text', text: /^→ sent$/ })).toBeDefined()
   expect(await pane.find({ key: 'close-all' })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('decisions a turn did not write in are offered again, or come back to be changed', async ($, on) => {
+  const { spec, settle, setReply, submitted, toasts, turn } = await project($, on, { door: DOOR })
+  await spec()
+  await settle()
+  setReply(e => (e.prompt.includes('JSON') ? '```json\n[["At midnight", "After a week"], ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN))
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  await pane.press({ key: 'decide-0' })
+  await pane.press({ key: 'option-0-1' })
+  await pane.press({ key: 'apply' })
+  await pane.press({ key: 'decide-all' })
+  expect(submitted).toHaveLength(2)
+  expect(await pane.find({ type: 'Text', text: /^◌ Claude is writing the decisions in/ })).toBeDefined()
+  expect(await pane.find({ key: 'resend' })).toBeUndefined()
+
+  // The turn ends with the spec as it was: no waiting on it any more.
+  await turn()
+  await settle()
+  expect(await pane.find({ type: 'Text', text: /^◌ Claude is writing/ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /^⚠ Claude ended the turn with the spec as it was/ })).toBeDefined()
+  expect(await pane.find({ key: 'resend' })).toMatchObject({ props: { label: 'send again', hotkey: 'w', variant: 'primary' } })
+
+  // Both go again: the one settled here to write in, the one left to Claude to decide.
+  await pane.press({ key: 'resend' })
+  expect(submitted).toHaveLength(3)
+  expect(submitted[2]!.text).toMatch(/^I have settled open points[\s\S]*1\. Pick the expiry \(design\.md\)\n   Decision: After a week\n\nDecide these open points[\s\S]*1\. Who may revoke \(proposal\.md\)\n/)
+  expect(toasts.at(-1)).toBe('2 points went to Claude again.')
+  expect(await pane.find({ type: 'Text', text: /^◌ Claude is writing the decisions in/ })).toBeDefined()
+
+  // Or they come back: the point left to Claude is open again, the answer waits to be written in.
+  await turn()
+  await settle()
+  await pane.press({ key: 'reopen' })
+  expect(await pane.find({ type: 'Text', text: /^⚠ Claude ended the turn/ })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /^  → After a week$/ })).toBeDefined()
+  expect(await pane.find({ key: 'decide-1' })).toMatchObject({ props: { label: 'decide' } })
+  expect(await pane.find({ key: 'apply' })).toMatchObject({ props: { label: 'write 1 into the spec' } })
+  expect(await bandText($)).toBe('◆ door · 1 to decide · 1 not in the spec · tasks 1/2 · tests 1 auto, 1 manual')
+  await pane.unmount()
+})
+
+test('model calls asked for while one runs wait their turn, each shown, and none is lost', async ($, on) => {
+  const { asked, spec, setReply, setDelay, clock } = await project($, on, { door: DOOR })
+  setDelay(1000)
+  setReply(e => (e.prompt.includes('Question:') ? 'It is revoked at once (design.md, Grant).' : null))
+  await spec()
+  await clock.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await pane.find({ type: 'Text', text: /^◌ Making the brief/ })).toBeDefined()
+  await pane.press({ key: 'tab-ask' })
+  await pane.press({ key: 'suggest-0' })
+  await pane.input({ key: 'question', text: 'Who revokes?' })
+  await pane.input({ key: 'question', text: 'Who revokes?' })
+  expect(await pane.find({ type: 'Text', text: /^  next: your question, your question$/ })).toBeDefined()
+  expect(await pane.find({ key: 'suggest-0' })).toBeUndefined()
+  // Opened again while the brief of this version is being made: the same brief, not another.
+  await spec()
+  expect(asked).toHaveLength(1)
+  await pane.press({ key: 'tab-ask' })
+
+  await clock.advance(1000)
+  expect(asked).toHaveLength(2)
+  expect(await pane.find({ type: 'Text', text: /^◌ Looking for the answer/ })).toBeDefined()
+  await clock.advance(1000)
+  await clock.advance(1000)
+  expect(asked.map(a => a.prompt.match(/Question: (.*)/)?.[1])).toEqual([undefined, 'What could go wrong?', 'Who revokes?'])
+  expect(await pane.find({ type: 'Markdown', text: /revoked at once/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^◌ / })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /next:/ })).toBeUndefined()
+  // The brief's failure stays offered: the answers after it do not put it away.
+  expect(await pane.find({ type: 'Text', text: /^✗ The model gave no answer/ })).toBeDefined()
+  expect(await pane.find({ key: 'retry' })).toBeDefined()
   await pane.unmount()
 })

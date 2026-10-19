@@ -1,4 +1,4 @@
-import type { Lang, Progress, Tests, TestCase } from '../../types/spec'
+import type { Busy, Lang, Progress, Tests, TestCase } from '../../types/spec'
 
 // Russian plural: 1 задача, 2 задачи, 5 задач.
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -43,6 +43,7 @@ const EN = {
     answer: 'Looking for the answer in the change…',
     options: 'Finding ways to settle each point…',
   },
+  queued: (jobs: readonly Busy[]) => `next: ${jobs.map(j => ({ brief: 'the brief', explain: 'what changed', answer: 'your question', options: 'the options' })[j]).join(', ')}`,
   failed: (why: string) => `The model gave no answer: ${why}.`,
   why: {
     rate_limit: 'the rate limit is reached, try again in a minute',
@@ -82,6 +83,10 @@ const EN = {
   byClaude: 'Claude decides',
   decideAllSent: (n: number) => `${n === 1 ? 'The point went' : `${n} points went`} to Claude to decide.`,
   refreshing: 'Claude is writing the decisions in: the brief is made again once the spec changes.',
+  notWritten: 'Claude ended the turn with the spec as it was: the decisions are not in it yet.',
+  sendAgain: 'send again',
+  reopen: 'change the answers',
+  resent: (n: number) => `${n === 1 ? 'The point went' : `${n} points went`} to Claude again.`,
   noTasks: 'This change has no tasks.md, or no tasks in it.',
   allDone: 'All tasks are done.',
   tasksDone: (p: Progress) => `${p.done} of ${p.total} done`,
@@ -215,6 +220,7 @@ const RU: typeof EN = {
     answer: 'Ищу ответ в изменении…',
     options: 'Подбираю варианты для каждого пункта…',
   },
+  queued: jobs => `дальше: ${jobs.map(j => ({ brief: 'выжимка', explain: 'что изменилось', answer: 'твой вопрос', options: 'варианты' })[j]).join(', ')}`,
   failed: why => `Модель не ответила: ${why}.`,
   why: {
     rate_limit: 'исчерпан лимит запросов, попробуй через минуту',
@@ -254,6 +260,10 @@ const RU: typeof EN = {
   byClaude: 'решает Claude',
   decideAllSent: n => `Отправлено Claude на решение: ${n}.`,
   refreshing: 'Claude вносит решения: выжимка обновится сама, когда спека изменится.',
+  notWritten: 'Claude закончил ход, а спека не изменилась: решений в ней пока нет.',
+  sendAgain: 'отправить снова',
+  reopen: 'изменить ответы',
+  resent: n => `Снова отправлено Claude: ${n}.`,
   noTasks: 'В изменении нет tasks.md или в нём нет задач.',
   allDone: 'Все задачи сделаны.',
   tasksDone: p => `сделано ${p.done} из ${p.total}`,

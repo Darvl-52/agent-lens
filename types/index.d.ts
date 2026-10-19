@@ -148,8 +148,9 @@ export type SpecLens = {
 // ways the model offers to settle each decision, in their order.
 export type SpecBrief = { fingerprint: string; summary: string; decisions: string[]; at: number; options?: string[][] }
 
-// What the person settled of one decision, and whether it went to Claude to write into the spec.
-export type SpecVerdict = { answer: string; isSent: boolean }
+// What the person settled of one decision, and whether it went to Claude to write into the spec;
+// `isByClaude` where the person left it for Claude to decide.
+export type SpecVerdict = { answer: string; isSent: boolean; isByClaude?: boolean }
 
 // The Decide tab's work on one brief (`at` is the brief's): the decision open, if any, and the
 // verdicts by the decision's index. A new brief starts it over.
@@ -257,8 +258,8 @@ declare module 'claude-code' {
       'spec.answer': SpecAnswer | null
       'spec.deciding': SpecDeciding | null
       // Decisions sent to Claude for this change, at this fingerprint: once the spec moves on from
-      // it, the brief is made again.
-      'spec.refreshing': { change: string; fingerprint: string } | null
+      // it, the brief is made again. `isUnchanged` once a turn ended with the spec still at it.
+      'spec.refreshing': { change: string; fingerprint: string; isUnchanged?: boolean } | null
       // The tasks sent to Claude this session, as `<change>:<task key>`.
       'spec.sentTasks': string[]
       // The test cases sent to Claude to close this session, and those picked in the pane to send,
@@ -268,8 +269,9 @@ declare module 'claude-code' {
       'spec.checked': SpecChecked | null
       // The change whose archiving waits for a second press, and the one sent to Claude to archive.
       'spec.archive': { change: string; isSent: boolean } | null
-      // What the model is working on, shown while it reads.
+      // What the model is working on, shown while it reads, and the calls waiting their turn.
       'spec.busy': SpecBusy | null
+      'spec.queued': SpecBusy[]
       'spec.error': string | null
       // The model call that failed, so the error offers to run it again; null where there is
       // nothing to retry (a prompt the session refused).

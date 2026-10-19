@@ -188,6 +188,8 @@ yellow where that holds a problem.
 at the bottom switches between the active ones (your pick is kept). The change and its `◆` head
 the pane; under them seven tabs, `1`–`7`, each with a count of what is in it to look at. A button
 pressed by a key shows the key before its label (`g refresh`), and the last row says the keys.
+The model reads for one tab at a time: what you ask for while it reads (a question during the
+brief, say) waits its turn, and the pane says what comes next.
 
 1. **Brief.** The gist, what is out of scope, the key decisions with their reasons, the risks.
    Made by the model when you open a change whose brief is missing or older than the change, and
@@ -203,15 +205,17 @@ pressed by a key shows the key before its label (`g refresh`), and the last row 
    to the session as your prompt: Claude writes it into the change's files and asks you where a
    decision contradicts the spec. `d`, `Claude decides all`, sends every point not decided yet:
    Claude takes the answer the change and the code argue for, writes it in with its reason, and
-   asks you about a point it cannot settle alone. Once his turn has changed the spec, the brief is
-   made again by itself, and the tab shows what is left.
+   asks you about a point it cannot settle alone. Once Claude's turn has changed the spec, the brief
+   is made again by itself, and the tab shows what is left. A turn that ends with the spec as it was
+   says so: `w` sends the decisions again, `change the answers` brings them back to the tab.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
    the session as your prompt, `do` on a task sends that one: Claude reads the change, does the
    task alone, runs its check if it names one, and ticks it. A task sent is marked so until it is
-   ticked, and the next one skips it. Once every task is ticked the tab opens with what still stands
-   between the change and its archive, or with `archive`: a second press sends it to the session,
-   and Claude archives it the project's way (its archive skill or command, else `openspec archive`)
-   and says what changed in the main specs.
+   ticked, and the next one skips it; `send again` sends it once more. Once every task is ticked
+   the tab opens with what still stands between the change and its archive, or with `archive`: a
+   second press sends it to the session, and Claude archives it the project's way (its archive
+   skill or command, else `openspec archive`) and says what changed in the main specs. While the
+   change is still there, `send again` sends the archiving once more.
 5. **Tests.** Each test case of `test-cases.md` and where it stands: `✓ has a test` (the file its
    `Automated:` line names, under the project or a repository in it, holds a test with the case's
    id: `TC-01`, not `TC-010`), `● no test`, `◇ manual`, `✗ unmarked`. Press a case to pick it,
