@@ -1,0 +1,226 @@
+import type { CommandInfo } from 'claude-code'
+
+import type { Change, Mode, Pick, Rule, Setup, Skill } from '../../types/router'
+
+export const NO_SETUP: Setup = { rules: [], hints: {}, ignored: [] }
+
+// At most this many skills for one prompt: two that both fit happen (a spec and a test-first build),
+// more is a guess.
+export const MAX_PICKS = 2
+
+// The skills the Skill tool can run: the person's and the project's own (`user`), and a plugin's, named
+// `<plugin>:<skill>`. A command a mod registers (`$.command.register`) is a plugin's too but carries no
+// plugin prefix, and the model cannot run it; built-ins and MCP prompts are not skills.
+export function catalogOf(commands: readonly CommandInfo[], ignored: readonly string[]): Skill[] {
+  return commands
+    .filter(c => c.source === 'user' || (c.source === 'plugin' && c.name.includes(':')))
+    .filter(c => !ignored.includes(c.name))
+    .map(c => ({ name: c.name, description: c.description }))
+}
+
+// The skill a name the person typed means: the name itself, else the one skill whose name ends in
+// `:<name>` (`tdd` for `mattpocock-skills:tdd`); undefined where none or several do.
+export function resolve(name: string, skills: readonly Skill[]): string | undefined {
+  const wanted = name.trim().replace(/^\//, '')
+  if (skills.some(s => s.name === wanted)) return wanted
+  const tails = skills.filter(s => s.name.endsWith(`:${wanted}`))
+
+  return tails.length === 1 ? tails[0]?.name : undefined
+}
+
+export const shortOf = (name: string) => name.slice(name.lastIndexOf(':') + 1)
+
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// A rule's `when` as a regex: `/…/flags` as written, else the words matched at the start of a word in
+// any case, so `тест` also finds `тесты` and `test` finds `tests` but not `latest`.
+export function patternOf(when: string): RegExp | undefined {
+  const literal = /^\/(.+)\/([a-z]*)$/.exec(when.trim())
+  try {
+    if (literal) {
+      const [, source = '', flags = ''] = literal
+
+      return new RegExp(source, flags.includes('i') ? flags : `${flags}i`)
+    }
+    const words = when.trim().split(/\s+/).map(escape).join('\\s+')
+
+    return words === '' ? undefined : new RegExp(`(?:^|[^\\p{L}\\p{N}_])${words}`, 'iu')
+  } catch {
+    return undefined
+  }
+}
+
+// The skills the person's rules pick for a prompt, in the rules' order, each once.
+export function ruleHits(text: string, rules: readonly Rule[], skills: readonly Skill[]): Pick[] {
+  const picks: Pick[] = []
+  for (const rule of rules) {
+    if (picks.length >= MAX_PICKS || picks.some(p => p.skill === rule.skill)) continue
+    if (!skills.some(s => s.name === rule.skill)) continue
+    const hit = rule.when.find(when => patternOf(when)?.test(text))
+    if (hit !== undefined) picks.push({ skill: rule.skill, why: `rule: ${hit}`, by: 'rule', ...(rule.args ? { args: rule.args } : {}) })
+  }
+
+  return picks
+}
+
+// Whether the prompt already names a skill (`/tdd`, `mattpocock-skills:tdd`): the person chose, and
+// Claude reads the name as well as the router would. A bare name (`docs`, `pdf`) counts only with its
+// slash, as it is also a plain word.
+export function namesSkill(text: string, skills: readonly Skill[]): boolean {
+  return skills.some(
+    s =>
+      (s.name.includes(':') && text.includes(s.name)) ||
+      new RegExp(`(?:^|\\s)/${escape(shortOf(s.name))}(?![\\w:-])`).test(text),
+  )
+}
+
+// Whether a prompt says too little to route on: a nod, a yes, a word or two. Rules still run on it.
+export function isTerse(text: string): boolean {
+  const trimmed = text.trim()
+
+  return trimmed.length < 25 && trimmed.split(/\s+/).length < 3
+}
+
+// The rules, hints and skills left out, from the store and from the project's file merged: the
+// project's rules first, its hint over the person's for the same skill.
+export function merge(own: Setup, project: Setup): Setup {
+  return {
+    rules: [...project.rules, ...own.rules],
+    hints: { ...own.hints, ...project.hints },
+    ignored: [...new Set([...own.ignored, ...project.ignored])],
+  }
+}
+
+// A setup as read from JSON someone wrote by hand: what has the right shape is kept, the rest dropped.
+export function setupOf(value: unknown): Setup {
+  if (typeof value !== 'object' || value === null) return NO_SETUP
+  const v = value as Record<string, unknown>
+  const strings = (x: unknown) => (Array.isArray(x) ? x.filter((s): s is string => typeof s === 'string') : [])
+  const rules = (Array.isArray(v.rules) ? v.rules : []).flatMap((r): Rule[] => {
+    if (typeof r !== 'object' || r === null) return []
+    const { skill, when, args } = r as Record<string, unknown>
+    const words = typeof when === 'string' ? [when] : strings(when)
+    if (typeof skill !== 'string' || words.length === 0) return []
+
+    return [{ skill, when: words, ...(typeof args === 'string' && args !== '' ? { args } : {}) }]
+  })
+  const hints = Object.fromEntries(
+    Object.entries(typeof v.hints === 'object' && v.hints !== null ? v.hints : {}).filter(([, h]) => typeof h === 'string'),
+  ) as Record<string, string>
+
+  return { rules, hints, ignored: strings(v.ignored) }
+}
+
+// A setup's skill names as the person typed them (`tdd`) put as the catalog has them, where one skill
+// answers to the name; the rest stay as typed and match nothing until such a skill is installed.
+export function resolveSetup(setup: Setup, skills: readonly Skill[]): Setup {
+  const full = (name: string) => resolve(name, skills) ?? name
+
+  return {
+    rules: setup.rules.map(r => ({ ...r, skill: full(r.skill) })),
+    hints: Object.fromEntries(Object.entries(setup.hints).map(([name, hint]) => [full(name), hint])),
+    ignored: setup.ignored.map(full),
+  }
+}
+
+// What the model is told it does: one stable block, so its cache holds across prompts.
+export const SYSTEM = `You route a developer's request in Claude Code to the skills that fit it. A skill is a set of instructions Claude loads before doing a kind of work.
+
+Pick a skill only when it clearly fits the main thing the request asks for. Pick none for small talk, a question answered in a few lines, a yes or no, or a follow-up to the work already under way, unless the request starts a different kind of work. Never pick a skill listed as already loaded. Pick at most ${MAX_PICKS}.
+
+Where the project uses OpenSpec and the request is about one of its changes, name the change in "args" for a skill that works on a change.
+
+Reply with JSON alone: {"picks":[{"skill":"<exact name from the list>","why":"<under 12 words>","args":"<optional>"}]}. No picks: {"picks":[]}.`
+
+export type Context = {
+  skills: readonly Skill[]
+  hints: Record<string, string>
+  loaded: readonly string[]
+  changes: readonly Change[] | null
+  previous?: string
+  answer?: string
+}
+
+// The request as the model reads it: the skills (the long part, the same from prompt to prompt, so it
+// opens the message and is cached), then what is going on, then the request.
+export function promptOf(text: string, c: Context): { skills: string; rest: string } {
+  const skills = c.skills
+    .map(s => `- ${s.name}: ${s.description}${c.hints[s.name] ? ` [The developer says: use it ${c.hints[s.name]}]` : ''}`)
+    .join('\n')
+  const changes =
+    c.changes === null
+      ? ''
+      : c.changes.length === 0
+        ? 'The project uses OpenSpec; no change is in progress.\n\n'
+        : `The project uses OpenSpec. Changes in progress (tasks done/total): ${c.changes.map(ch => `${ch.name} (${ch.done}/${ch.total})`).join(', ')}.\n\n`
+  const loaded = c.loaded.length > 0 ? `Already loaded: ${c.loaded.join(', ')}.\n\n` : ''
+  const before = [
+    c.previous ? `The developer's previous request:\n<previous>\n${c.previous}\n</previous>` : '',
+    c.answer ? `The end of Claude's last answer:\n<answer>\n${c.answer}\n</answer>` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+
+  return {
+    skills: `Skills:\n${skills}`,
+    rest: `${changes}${loaded}${before ? `${before}\n\n` : ''}The request to route:\n<request>\n${text}\n</request>`,
+  }
+}
+
+// The picks in a reply: the first JSON object in it, each pick naming a skill on the list, each once,
+// at most MAX_PICKS; undefined where the reply holds no such object.
+export function parseReply(reply: string, skills: readonly Skill[]): Pick[] | undefined {
+  const start = reply.indexOf('{')
+  const end = reply.lastIndexOf('}')
+  if (start < 0 || end < start) return undefined
+  let value: unknown
+  try {
+    value = JSON.parse(reply.slice(start, end + 1))
+  } catch {
+    return undefined
+  }
+  const raw = (value as { picks?: unknown })?.picks
+  if (!Array.isArray(raw)) return undefined
+  const picks: Pick[] = []
+  for (const p of raw) {
+    if (typeof p !== 'object' || p === null) continue
+    const { skill, why, args } = p as Record<string, unknown>
+    const name = typeof skill === 'string' ? resolve(skill, skills) : undefined
+    if (name === undefined || picks.some(x => x.skill === name)) continue
+    picks.push({
+      skill: name,
+      why: typeof why === 'string' ? why.slice(0, 160) : '',
+      by: 'model',
+      ...(typeof args === 'string' && args.trim() !== '' ? { args: args.trim() } : {}),
+    })
+  }
+
+  return picks.slice(0, MAX_PICKS)
+}
+
+// What Claude reads beside the prompt: in `auto`, load the skill first; in `suggest`, the skill may fit.
+// Either way Claude can say it does not fit and go on.
+export function directiveOf(mode: Exclude<Mode, 'off'>, picks: readonly Pick[]): string {
+  const line = (p: Pick) =>
+    `- \`${p.skill}\`${p.args ? ` with args \`${p.args}\`` : ''}${p.why ? `: ${p.why.replace(/^rule: /, 'the developer set it for prompts that say ')}` : ''}`
+  const list = picks.map(line).join('\n')
+
+  return mode === 'auto'
+    ? `[skill-router] This request fits the skill${picks.length > 1 ? 's' : ''} below. Before you start, load ${picks.length > 1 ? 'each' : 'it'} with the Skill tool and follow it:\n${list}\nWhere one plainly does not fit once you read it, say so in a line and go on without it.`
+    : `[skill-router] This skill may fit the request; load it with the Skill tool if it does:\n${list}`
+}
+
+// The tasks of a `tasks.md`: ticked ones out of all of them.
+export function progressOf(text: string): { done: number; total: number } {
+  const boxes = text.match(/^\s*[-*]\s+\[[ xX]\]/gm) ?? []
+
+  return { done: boxes.filter(b => /\[[xX]\]/.test(b)).length, total: boxes.length }
+}
+
+// A path inside a folder the engine named, joined with the separator the folder already uses; a root
+// (`/`, `C:\`) stays a root.
+export function join(dir: string, name: string): string {
+  const sep = dir.includes('\\') && !dir.includes('/') ? '\\' : '/'
+
+  return `${dir.replace(/[\\/]+$/, '')}${sep}${name}`
+}

@@ -1,0 +1,58 @@
+{
+  "name": "agent-lens",
+  "version": "0.1.0",
+  "description": "Work with the agent in one place: each edit checked against your CLAUDE.md as it is made and each turn's diff reviewed (/changes); the OpenSpec change read for you (/spec); the skill each prompt needs loaded for it (/router).",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Darvl-52"
+  },
+  "repository": "https://github.com/Darvl-52/agent-lens",
+  "license": "MIT",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "The language of every part and of what its model answers: en or ru; /changes lang, /spec lang and /router lang override it",
+      "default": "en",
+      "options": [
+        "en",
+        "ru"
+      ]
+    },
+    "live": {
+      "type": "string",
+      "title": "Rules while Claude edits",
+      "description": "warn: check each edit against CLAUDE.md as it lands and tell Claude what it broke; block: check it before it lands and refuse it; off: leave the rules to the review after the turn",
+      "default": "warn",
+      "options": [
+        "warn",
+        "block",
+        "off"
+      ]
+    },
+    "liveModel": {
+      "type": "string",
+      "title": "Model for the edit check",
+      "description": "The model that checks each edit against the rules: an alias like haiku or a full model id",
+      "default": "haiku"
+    },
+    "includeUserRules": {
+      "type": "boolean",
+      "title": "Include ~/.claude/CLAUDE.md",
+      "description": "Also check edits and reviews against your personal CLAUDE.md",
+      "default": false
+    },
+    "routerUseModel": {
+      "type": "boolean",
+      "title": "Route with a model",
+      "description": "Where none of your rules fits, ask a small model which skill fits the prompt (about a second per prompt)",
+      "default": true
+    },
+    "routerModel": {
+      "type": "string",
+      "title": "Model for routing",
+      "description": "The model that picks the skill: an alias like haiku or a full model id",
+      "default": "haiku"
+    }
+  }
+}

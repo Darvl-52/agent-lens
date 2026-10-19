@@ -1,0 +1,276 @@
+// The language every part speaks and its model answers in.
+export type Lang = 'en' | 'ru'
+
+// The review of what the agent changed.
+
+// One line of a hunk: added, removed, or context around them.
+export type ReviewLine = { kind: '+' | '-' | ' '; text: string }
+
+// A run of changed lines with the context around them, where it starts in the old and the new
+// file. `id` hashes the file and the lines, so it stays the same while they do.
+export type ReviewHunk = { id: string; oldStart: number; newStart: number; lines: ReviewLine[] }
+
+// Where a file is shown: the repository it is in, named from the project folder (`__front`, `''`
+// for the project's own), its path in it, and the two joined, which names it to the model.
+export type ReviewWhere = { group: string; rel: string; shown: string }
+
+// What changed in one file. `path` is absolute, in its one spelling (`canonical`: on Windows `\`
+// and the drive upper-cased), as the engine and git both name it.
+export type ReviewFileDiff = ReviewWhere & { path: string; isNew: boolean; isDeleted: boolean; added: number; removed: number; hunks: ReviewHunk[] }
+
+// The diff in view: what the last turn with edits changed, all the session changed, or what is
+// uncommitted in every repository it touched.
+export type ReviewMode = 'turn' | 'session' | 'uncommitted'
+
+// One shell command the agent ran in a turn: the command, the end of what it printed, and whether
+// it failed. What it did (a push, an install, a file outside the repository) is in no diff.
+export type ReviewShellRun = { command: string; output: string; isError: boolean }
+
+export type ReviewDiff = {
+  mode: ReviewMode
+  files: ReviewFileDiff[]
+  // What was asked for: the prompt of the turn, of every turn of the session for the others.
+  request: string
+  // A turn's own: the session's prompts before it, which a change may answer too, and the shell
+  // commands run in it. Absent from a diff an older version kept.
+  earlier?: string[]
+  shell?: ReviewShellRun[]
+  // Hashes every hunk: what a review, an explanation or a walkthrough is kept against.
+  fingerprint: string
+  at: number
+}
+
+// One thing the review found. `severity`: a likely bug, a project rule broken, or a note worth a
+// look (leftover debugging, a change outside the request, a test missing).
+export type ReviewFinding = { id: string; file: string; line?: number; severity: 'bug' | 'rule' | 'note'; text: string; rule?: string }
+
+// How each edit is checked against the project's rules as it is made: `warn` lets it land and
+// tells Claude what it broke, `block` refuses it before it lands, `off` leaves it to the review.
+export type ReviewLive = 'warn' | 'block' | 'off'
+
+// A project rule an edit broke, caught as the edit was made, as a finding on the file at `path`.
+// `evidence` is the offending text, kept only where the edit wrote it as the check quoted it, so
+// whether it is still in the file can be told. `state`: told to Claude while the turn runs, still
+// in the file once it ended, gone from it, or the edit refused before it landed.
+export type ReviewCaughtRule = ReviewFinding & { path: string; evidence?: string; state: 'told' | 'open' | 'fixed' | 'refused' }
+
+export type ReviewAnswer = { question: string; text: string }
+
+export type ReviewTab = 'changes' | 'findings' | 'walkthrough' | 'ask'
+
+export type ReviewLang = 'en' | 'ru'
+
+// What the mod's own model calls cost this session, as the API counted it: the calls, the input
+// tokens, those of them the prompt cache served, and the output tokens, thinking included.
+export type ReviewSpent = { calls: number; input: number; cached: number; output: number }
+
+// What the model is working on, each shown while it runs.
+export type ReviewBusy = 'review' | 'notes' | 'walkthrough' | 'answer'
+
+// The OpenSpec change in view.
+
+// Ticked tasks of `tasks.md` out of all of them.
+export type SpecProgress = { done: number; total: number }
+
+// One task of `tasks.md`: its number (`2.3`) where it has one, its text, whether it is ticked,
+// and the heading it sits under.
+export type SpecTask = { id: string | null; text: string; isDone: boolean; section: string | null }
+
+// The test cases of `test-cases.md`: how many there are, how many say `Automated:` or `Manual:`,
+// and, where the file marks its cases at all, the ids of those that say neither.
+export type SpecTests = { cases: number; automated: number; manual: number; unmarked: string[] }
+
+// One requirement a delta spec adds, changes, removes or renames, with its scenarios' names.
+export type SpecRequirement = {
+  // The capability: the spec's folder under `specs/`, `employee-fe/door-access`.
+  capability: string
+  op: 'added' | 'modified' | 'removed' | 'renamed'
+  name: string
+  // A renamed requirement's old name.
+  from?: string
+  scenarios: string[]
+  // Its scenarios no test case covers, where `test-cases.md` says what each case covers.
+  uncovered?: string[]
+  // Where the main spec disagrees: it already has an added requirement, or lacks one the change
+  // modifies, removes or renames.
+  mismatch?: 'exists' | 'missing'
+}
+
+// Another active change whose specs touch a capability this one does, and the requirements both
+// name there.
+export type SpecOverlap = { change: string; capability: string; shared: string[] }
+
+// One finding of `openspec validate --strict`.
+export type SpecIssue = { level: 'ERROR' | 'WARNING' | 'INFO'; path: string; message: string }
+
+// What `openspec validate` said of a change at a fingerprint; `issues` null where the CLI could not
+// be run.
+export type SpecChecked = { change: string; fingerprint: string; issues: SpecIssue[] | null }
+
+// What one file of a change gained and lost since it was last read.
+export type SpecDelta = { file: string; added: number; removed: number }
+
+// The OpenSpec change in view, read from disk: drawn above the prompt and in the pane.
+export type SpecLens = {
+  // The project's `openspec` folder.
+  root: string
+  // The active changes, the latest edited first.
+  changes: string[]
+  current: string
+  tasks: SpecProgress
+  taskList: SpecTask[]
+  tests: SpecTests
+  requirements: SpecRequirement[]
+  // The capabilities the change brings that `openspec/specs` does not have yet.
+  newCapabilities: string[]
+  overlaps: SpecOverlap[]
+  // Changes with the change's text, so a brief knows when it is stale.
+  fingerprint: string
+  // Whether this change was ever read here: until then there is nothing to compare with.
+  isSeen: boolean
+  deltas: SpecDelta[]
+}
+
+// The model's brief of a change, kept per change in the store; `options`, once asked for, the
+// ways the model offers to settle each decision, in their order.
+export type SpecBrief = { fingerprint: string; summary: string; decisions: string[]; at: number; options?: string[][] }
+
+// What the person settled of one decision, and whether it went to Claude to write into the spec.
+export type SpecVerdict = { answer: string; isSent: boolean }
+
+// The Decide tab's work on one brief (`at` is the brief's): the decision open, if any, and the
+// verdicts by the decision's index. A new brief starts it over.
+export type SpecDeciding = { at: number; open: number | null; verdicts: Record<string, SpecVerdict> }
+
+export type SpecAnswer = { question: string; text: string }
+
+// What the model is working on.
+export type SpecBusy = 'brief' | 'explain' | 'answer' | 'options'
+
+// A model call that gave no answer: which one, and the question where it was one.
+export type SpecFailed = { what: SpecBusy; question?: string }
+
+export type SpecTab = 'brief' | 'changes' | 'decide' | 'tasks' | 'spec' | 'ask'
+
+// The language the mod speaks and the model answers in.
+export type SpecLang = 'en' | 'ru'
+
+// Which skill each prompt gets.
+
+// How the router acts on a pick: `auto` tells Claude to load the skill, `suggest` tells Claude it may
+// fit and leaves the call to it, `off` routes nothing.
+export type RouterMode = 'auto' | 'suggest' | 'off'
+
+export type RouterLang = 'en' | 'ru'
+
+// The pane's tabs: what was picked lately, the rules, every skill, every decision.
+export type RouterTab = 'overview' | 'rules' | 'skills' | 'history'
+
+// A skill the router may pick: the name the Skill tool runs it by, and the line that says what it is for.
+export type RouterSkill = { name: string; description: string }
+
+// A rule the person set: the skill runs whenever a prompt says one of `when` (a word or phrase matched
+// at the start of a word, or `/a regex/`), with `args` where the skill takes them.
+export type RouterRule = { skill: string; when: string[]; args?: string }
+
+// What the person set for routing, in the store and in the project's `.claude/skill-router.json`: their
+// rules, a line per skill saying when it fits, and the skills left out.
+export type RouterSetup = { rules: RouterRule[]; hints: Record<string, string>; ignored: string[] }
+
+// One skill picked for a prompt: by one of the person's rules or by the model, and why.
+export type RouterPick = { skill: string; why: string; args?: string; by: 'rule' | 'model' }
+
+// What the router made of one prompt: its start, what it picked, how long it took, and a note where it
+// picked nothing for a reason worth showing (no skills, the model failed).
+export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; ms: number; note?: string }
+
+// An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
+export type RouterChange = { name: string; done: number; total: number }
+
+declare module 'claude-code' {
+  interface PluginState {
+    'agent-lens': {
+      // The language in force: what `lang` saved, else the setting's; null until it is read.
+      lang: Lang | null
+
+      // The review of what the agent changed.
+      // What each file edited was before its first edit, null for a file that was not there: of the
+      // session, and of the turn running. Held by the host, so a reload of the module keeps them.
+      'review.before': Record<string, string | null>
+      'review.turnBefore': Record<string, string | null>
+      // The prompts of the session's turns, and of the turn running.
+      'review.requests': string[]
+      'review.turnRequest': string
+      // The shell commands of the turn running.
+      'review.turnShell': ReviewShellRun[]
+      // The last turn with edits: what the row shows and what is reviewed by itself.
+      'review.turn': ReviewDiff | null
+      // What the pane shows, by the mode picked.
+      'review.shown': ReviewDiff | null
+      'review.mode': ReviewMode
+      'review.tab': ReviewTab
+      // The file picked in the Changes tab, by path.
+      'review.file': string | null
+      // The findings of each diff reviewed, by its fingerprint.
+      'review.reviews': Record<string, ReviewFinding[]>
+      // What the check of each edit caught this session, newest first.
+      'review.caught': ReviewCaughtRule[]
+      // What each hunk is for, by hunk id: kept across modes, as a hunk keeps its id.
+      'review.notes': Record<string, string>
+      'review.walkthroughs': Record<string, string>
+      // How many lines of a long hunk are shown, by hunk id, where the person asked for more.
+      'review.expanded': Record<string, number>
+      'review.answer': ReviewAnswer | null
+      // The hunk a question is asked about, by id.
+      'review.askAbout': string | null
+      'review.busy': ReviewBusy[]
+      'review.error': string | null
+      // Hunk ids looked at, and finding or hunk ids sent to Claude or put aside, this session.
+      'review.seen': string[]
+      'review.sent': string[]
+      'review.dismissed': string[]
+      'review.spent': ReviewSpent
+      // Every file the session has changed as of its last turn with edits, by path and shown path:
+      // an earlier review's findings stay while their file is among them.
+      'review.changed': string[]
+      // The files uncommitted in each repository, by path, as the turn's first shell command ran;
+      // null until one does. What is uncommitted at the turn's end and was not then, the shell changed.
+      'review.turnDirty': Record<string, string[]> | null
+
+      // The OpenSpec change in view.
+      'spec.lens': SpecLens | null
+      'spec.brief': SpecBrief | null
+      'spec.explain': string | null
+      'spec.answer': SpecAnswer | null
+      'spec.deciding': SpecDeciding | null
+      // Decisions sent to Claude for this change, at this fingerprint: once the spec moves on from
+      // it, the brief is made again.
+      'spec.refreshing': { change: string; fingerprint: string } | null
+      // The tasks sent to Claude this session, as `<change>:<task key>`.
+      'spec.sentTasks': string[]
+      'spec.checked': SpecChecked | null
+      // The change whose archiving waits for a second press, and the one sent to Claude to archive.
+      'spec.archive': { change: string; isSent: boolean } | null
+      // What the model is working on, shown while it reads.
+      'spec.busy': SpecBusy | null
+      'spec.error': string | null
+      // The model call that failed, so the error offers to run it again; null where there is
+      // nothing to retry (a prompt the session refused).
+      'spec.failed': SpecFailed | null
+      'spec.tab': SpecTab
+
+      // Which skill each prompt gets.
+      'router.decisions': RouterDecision[]
+      'router.loaded': string[]
+      'router.mode': RouterMode | null
+      'router.setup': RouterSetup | null
+      'router.catalog': RouterSkill[]
+      'router.project': RouterSetup | null
+      'router.tab': RouterTab
+      'router.formSkill': string | null
+      'router.formWords': string
+      'router.formHint': string
+      'router.flash': string | null
+    }
+  }
+}
