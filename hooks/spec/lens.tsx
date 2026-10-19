@@ -1218,13 +1218,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   // list comes last, out of the arrows' way, and the keys are told under it.
   return (
     <Box flexDirection="column">
-      <Box flexDirection="row" gap={1}>
-        <Text wrap="truncate">
-          <Text color={s.tone}>◆ </Text>
-          <Text bold>{lens.current}</Text>
-        </Text>
-        {Select && lens.changes.length > 1 ? <Text dimColor>{`· ${w.activeChanges(lens.changes.length)}`}</Text> : null}
-      </Box>
+      <Text wrap="truncate">
+        <Text color={s.tone}>◆ </Text>
+        <Text bold>{w.title(lens.current)}</Text>
+      </Text>
       <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
         {TABS.map((t, i) => (
           <Button

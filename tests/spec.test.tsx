@@ -325,7 +325,7 @@ test('a narrow row drops progress before problems, says how much it dropped, and
   await pane.press({ key: 'tab-spec' })
   expect(await pane.find({ type: 'Text', text: /^✗ TC-03 says neither "Automated:" nor "Manual:"/ })).toBeDefined()
   await pane.unmount()
-  expect(opened.at(-1)).toBe('OpenSpec · door')
+  expect(opened.at(-1)).toBe('Spec: door')
 })
 
 test('a model call that failed is offered again, and the error can be put away', async ($, on) => {
@@ -367,7 +367,7 @@ test('/spec opens the brief once per version of the change, and the row counts w
   const { asked, opened, spec, settle, store } = await project($, on, { door: DOOR })
   expect((await spec()).text).toBe('Opened door.')
   await settle()
-  expect(opened).toEqual(['OpenSpec · door'])
+  expect(opened).toEqual(['Spec: door'])
   expect(asked).toHaveLength(1)
   expect(asked[0]!.promptBlocks?.[0]).toMatchObject({ cache: true })
   expect(asked[0]!.prompt).toMatch(/=== proposal\.md ===[\s\S]*=== design\.md ===[\s\S]*=== specs\/api\/access\/spec\.md ===/)
@@ -603,7 +603,7 @@ test('another change is picked in the pane and stays picked', async ($, on) => {
   await pane.unmount()
   await settle()
   expect(store.get('picked:/proj/openspec')).toBe('mascot')
-  expect(opened.at(-1)).toBe('OpenSpec · mascot')
+  expect(opened.at(-1)).toBe('Spec: mascot')
   // Its own brief, made on picking it: the model's stand-in answers every change alike.
   expect(await bandText($)).toBe('◆ mascot · 2 to decide · tasks 1/1')
   expect((await spec('nope')).text).toBe('No change nope. Active: door, mascot.')

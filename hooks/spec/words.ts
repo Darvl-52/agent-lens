@@ -11,7 +11,7 @@ const plural = (n: number, one: string, few: string, many: string) => {
 // default; `/spec lang ru` switches both, kept for every session.
 const EN = {
   description: 'Read the OpenSpec change: gist, changes since you looked, what is left to decide, questions; lang: en or ru',
-  title: (change: string) => `OpenSpec · ${change}`,
+  title: (change: string) => `Spec: ${change}`,
   opened: (change: string) => `Opened ${change}.`,
   noSpec: 'No OpenSpec changes here: the project has no openspec/changes folder with an active change.',
   unknownChange: (name: string, known: string[]) => `No change ${name}. Active: ${known.join(', ')}.`,
@@ -34,8 +34,7 @@ const EN = {
   more: (n: number) => `+${n} more`,
   // The pane.
   tabs: { brief: 'Brief', changes: 'Changes', decide: 'Decide', tasks: 'Tasks', tests: 'Tests', spec: 'Spec', ask: 'Ask' },
-  change: 'Change',
-  activeChanges: (n: number) => `${n} active, switch at the bottom`,
+  change: 'Spec',
   keysFocused: 'keys: 1–7 tabs, the letter at a button · Esc closes',
   keysUnfocused: 'ctrl+x tab: keys to the pane',
   busy: {
@@ -179,7 +178,7 @@ No more than 350 words.`,
 
 const RU: typeof EN = {
   description: 'Прочитать изменение OpenSpec: суть, что изменилось, что решить, вопросы; lang: en или ru',
-  title: change => `OpenSpec · ${change}`,
+  title: change => `Спецификация: ${change}`,
   opened: change => `Открыто ${change}.`,
   noSpec: 'Здесь нет изменений OpenSpec: в проекте нет папки openspec/changes с активным изменением.',
   unknownChange: (name, known) => `Нет изменения ${name}. Активные: ${known.join(', ')}.`,
@@ -203,8 +202,7 @@ const RU: typeof EN = {
   makingBrief: 'готовлю выжимку…',
   more: n => `ещё ${n}`,
   tabs: { brief: 'Выжимка', changes: 'Изменения', decide: 'Решить', tasks: 'Задачи', tests: 'Тесты', spec: 'Спека', ask: 'Спросить' },
-  change: 'Изменение',
-  activeChanges: n => `активных ${n}, переключить внизу`,
+  change: 'Спецификация',
   keysFocused: 'клавиши: 1–7 вкладки, буква у кнопки · Esc закрыть',
   keysUnfocused: 'ctrl+x tab: клавиши в панель',
   busy: {
