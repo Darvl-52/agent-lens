@@ -127,11 +127,16 @@ export async function sessionCompact($: Parameters<Hook<'session.compact'>>[0], 
   return compacted
 }
 
-// A /clear starts the conversation over: nothing said before it, no skill loaded.
+// A /clear or /resume starts another conversation: nothing said before it, no skill loaded, no pick
+// on the status line. Its values emptied, the mode, the setup and the skills are read again.
 export async function clearRouter($: EngineInterface) {
   previous = ''
   answer = ''
+  $.ui.status(undefined)
   await forgetLoaded($)
+  await restoreLang($)
+  await refreshHeld($)
+  void lookAround($).catch(() => undefined)
 }
 
 export async function command($: Parameters<MatchedHook<'command.run', { command: 'router' }>>[0], e: Parameters<MatchedHook<'command.run', { command: 'router' }>>[1]) {

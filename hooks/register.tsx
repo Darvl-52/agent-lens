@@ -16,6 +16,7 @@ import {
   command as reviewCommand,
   pane as reviewPane,
   openPane as openReview,
+  restartReview,
   reviewLine,
   startReview,
   turnStart,
@@ -60,11 +61,15 @@ export const register: Register = (on, options) => {
   })
 
   // A /clear or /resume starts a conversation with its values emptied and no session.start; the
-  // old one's end says so, where an organization manages Claude Code too.
+  // old one's end says so, where an organization manages Claude Code too. Each part drops what it
+  // kept of the old conversation and reads back what it shows.
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') await clearRouter($).catch(() => {})
     const ended = await next(e)
-    if (e.reason === 'clear' || e.reason === 'resume') await rescanSpec($).catch(() => {})
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      await restartReview($).catch(() => {})
+      await rescanSpec($).catch(() => {})
+      await clearRouter($).catch(() => {})
+    }
     return ended
   })
 

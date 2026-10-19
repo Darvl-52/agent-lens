@@ -239,6 +239,8 @@ declare module 'claude-code' {
       'review.askAbout': string | null
       'review.busy': ReviewBusy[]
       'review.error': string | null
+      // The reviews that gave no findings to show, by the diff's fingerprint: why, as the pane says it.
+      'review.failed': Record<string, string>
       // Hunk ids looked at, and finding or hunk ids sent to Claude or put aside, this session.
       'review.seen': string[]
       'review.sent': string[]

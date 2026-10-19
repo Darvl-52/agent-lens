@@ -271,7 +271,10 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
       return ok([...disk.keys()].map(p => p.slice('/proj/'.length)).sort().join('\n'))
     return ok('')
   })
-  on('model.complete', ($, e) => {
+  // How long the review's model takes to answer, on the mocked clock.
+  let delay = 0
+  on('model.complete', async ($, e) => {
+    if (delay > 0 && !e.system?.startsWith('You review one change')) await clock.sleep(delay)
     if (e.system?.startsWith('You review one change')) {
       checked.push(e)
       return { value: { isAnswered: true as const, text: violations, usage: USAGE } }
@@ -362,6 +365,8 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     setReviewed: (r: string) => (reviewed = r),
     setKept: (k: string) => (kept = k),
     setViolations: (v: string) => (violations = v),
+    setDelay: (ms: number) => (delay = ms),
+    clock,
   }
 }
 
@@ -718,6 +723,61 @@ test('after a /clear the language is read again from the store, with no classic 
   store.set('lang', 'ru')
   await $.session.end({ reason: 'clear', sessionId: 'one', resume: { id: 'one' } })
   expect(await bandText($)).toMatch(/^✎ 1 файл/)
+})
+
+test('a review that fails turns the row red, says why on Findings, and r runs it again', async ($, on) => {
+  const { turn, setReviewed } = await project($, on, { 'src/app.ts': APP })
+  setReviewed('I could not finish the review.')
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  expect(await bandText($)).toBe('✎ 1 file +3 −1 · review failed · 1 piece not looked at')
+  const band = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND })
+  // Red, the part and the mark before the files both.
+  const row = JSON.stringify(await band.find({ key: 'row-review' }))
+  expect(row).toMatch(/"color":"error"\},"children":\["review failed"\]/)
+  expect(row).toMatch(/"color":"error"\},"children":\["✎ "\]/)
+  // Pressed, the row opens on Findings, where the failure is said and offered again.
+  await band.press({ key: 'row-review' })
+  await band.unmount()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await pane.find({ key: 'tab-findings' })).toMatchObject({ props: { variant: 'primary' } })
+  expect(await pane.find({ type: 'Text', text: /^✗ The model gave no answer: the reply was not JSON\. Press r to review it again\.$/ })).toBeDefined()
+  // Another call clearing the pane's error leaves the row as it was.
+  await pane.press({ key: 'tab-walkthrough' })
+  expect(await bandText($)).toBe('✎ 1 file +3 −1 · review failed · 1 piece not looked at')
+  setReviewed(REVIEWED)
+  await pane.press({ key: 'tab-findings' })
+  await pane.press({ key: 'check' })
+  expect(await bandText($)).toBe('✎ 1 file +3 −1 · 1 likely bug · 1 finding · 1 piece not looked at')
+  await pane.unmount()
+})
+
+test('a review a reload cut short leaves the turn not reviewed, yellow, until one is made', async ($, on) => {
+  const { turn, setDelay, clock } = await project($, on, { 'src/app.ts': APP })
+  setDelay(1000)
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  expect(await bandText($)).toBe('✎ 1 file +3 −1 · reviewing… · 1 piece not looked at')
+  // A reload: the module that ran the review is gone, and the session starts it again.
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  expect(await bandText($)).toBe('✎ 1 file +3 −1 · not reviewed · 1 piece not looked at')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-findings' })
+  expect(await pane.find({ type: 'Text', text: /^Not reviewed: the review stopped before it finished\. Press r to run it\.$/ })).toMatchObject({ props: { color: 'warning' } })
+  await pane.unmount()
+  await clock.advance(5000)
+  expect(await bandText($)).toBe('✎ 1 file +3 −1 · 1 likely bug · 1 finding · 1 piece not looked at')
+})
+
+test('after a /clear, what a check found in the conversation before is not told in the new one', async ($, on) => {
+  const { native, settle, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
+  await $.session.end({ reason: 'clear', sessionId: 'one', resume: { id: 'one' } })
+  await settle()
+  await $.turn.start({ text: 'a bigger font', turnId: 't2' })
+  const ran = await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED.replace('12', '14') })
+  expect(ran.context ?? []).toEqual([])
+  expect(toasts.filter(t => /rule|правил/i.test(t))).toEqual([])
 })
 
 // The check of each edit, as it is made: a comment where the rules forbid one.

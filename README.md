@@ -62,10 +62,14 @@ Once a turn has edited a file:
   before the session.
 - `not reviewed: small change`, dim: the turn touched a line or two, so it was not reviewed by
   itself; `r` on Findings reviews it.
+- `review failed`, in red: the model gave no review (the API failed, or its reply could not be
+  read); `not reviewed`, in yellow: the review stopped before it finished, as a reload of the mod
+  cuts one short. Either opens Findings, which says why, and `r` there runs it again.
 - `4 pieces not looked at`, in yellow: hunks you have not marked as looked at.
 - `looked at`, in green, once every piece is and nothing is left to fix.
 
-The `✎` is red while a likely bug stands, yellow while anything waits, green otherwise.
+The `✎` is red while a likely bug stands or the review failed, yellow while anything waits, green
+otherwise.
 
 ### The pane
 
@@ -266,7 +270,7 @@ and the list of skills, and picks the one that fits, or none. Claude is then tol
 - Every skill the Skill tool can run is a candidate: plugin skills (`mattpocock-skills:tdd`), your `~/.claude/skills` and `~/.claude/commands`, the project's `.claude/skills` and `.claude/commands` (OpenSpec puts its own there). Install or write a skill and it is routed from the next prompt on.
 - Your rules are checked first; a word matches at the start of a word in any case, so `test` finds `tests` but not `latest`, and `тест` finds `тесты`. A rule that fires skips the model.
 - Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change.
-- A skill already loaded in the conversation is not picked again until `/clear` or a compaction.
+- A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, clears the status line, and reads its mode and your rules again.
 - A prompt that names a skill (`/tdd`, `mattpocock-skills:tdd`), a slash command, and prompts from other plugins or scheduled runs are left alone.
 - If the model fails or is slow (8 seconds), the prompt goes through as typed.
 

@@ -29,7 +29,18 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const status: (string | undefined)[] = []
   const opened: string[] = []
   mock.clock(on, { now: 1_000 })
-  mock.store(on, setup.stored ?? {})
+  // The store, kept here so a test can change it as another session would.
+  const store = new Map<string, unknown>(Object.entries(setup.stored ?? {}))
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
   on('command.list', () => ({ value: COMMANDS }))
   on('command.register', () => ({ value: { command: 'router' } }))
   on('session.root', () => ({ value: '/proj' }))
@@ -80,7 +91,7 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const run = (args: string) =>
     $.command.run({ command: 'router', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
 
-  return { asked, entered, status, opened, send, run }
+  return { asked, entered, status, opened, store, send, run }
 }
 
 test('with no rule, the model picks and Claude is told to load the skill', async ($, on) => {
@@ -152,6 +163,24 @@ test('a skill already loaded is not picked again until a /clear', async ($, on) 
   await $.session.end({ reason: 'clear', sessionId: 's', resume: undefined } as any)
   await r.send('Добавь фильтр по цене в каталог')
   expect(r.entered[1]!.context.at(-1)).toContain('mattpocock-skills:tdd')
+})
+
+test('a /clear or /resume forgets what was said and the pick on the status line, and reads the mode again', async ($, on) => {
+  const r = await router($, on, { reply: '{"picks":[{"skill":"tdd","why":"feature"}]}' })
+  await r.send('Добавь фильтр по цене в каталог')
+  expect(r.status.at(-1)).toBe('skill: tdd')
+  // Another session turned it off meanwhile.
+  r.store.set('mode', 'off')
+  await $.session.end({ reason: 'resume', sessionId: 'one', resume: { id: 'two' } })
+  expect(r.status.at(-1)).toBeUndefined()
+  await r.send('Сделай регистрацию через email')
+  expect(r.asked).toHaveLength(1)
+  expect(r.entered[1]!.context).toEqual([])
+  // On again: the prompt before the resume is not read as the previous one.
+  await r.run('auto')
+  await r.send('Сделай регистрацию через телефон')
+  expect(r.asked).toHaveLength(2)
+  expect(r.asked[1]!.prompt).not.toContain('фильтр по цене')
 })
 
 test('a model that fails lets the prompt through as typed', async ($, on) => {

@@ -26,6 +26,7 @@ const answerAtom = atom({ plugin: 'agent-lens', key: 'review.answer' } as const,
 const askAboutAtom = atom({ plugin: 'agent-lens', key: 'review.askAbout' } as const, null)
 const busyAtom = atom({ plugin: 'agent-lens', key: 'review.busy' } as const, [] as Busy[])
 const errorAtom = atom({ plugin: 'agent-lens', key: 'review.error' } as const, null)
+const failedAtom = atom({ plugin: 'agent-lens', key: 'review.failed' } as const, {} as Record<string, string>)
 const seenAtom = atom({ plugin: 'agent-lens', key: 'review.seen' } as const, [] as string[])
 const sentAtom = atom({ plugin: 'agent-lens', key: 'review.sent' } as const, [] as string[])
 const dismissedAtom = atom({ plugin: 'agent-lens', key: 'review.dismissed' } as const, [] as string[])
@@ -102,6 +103,9 @@ const notes = new Map<string, string[]>()
 const pending = new Map<string, Set<Promise<void>>>()
 const stopped = new Set<string>()
 let sentBack = false
+// Counted up by each /clear or /resume: a check still running from the conversation before finds
+// its note has no one to go to.
+let conversation = 0
 
 function settingsOf(options: PluginOptions) {
   const live: Live = options.live === 'block' || options.live === 'off' ? options.live : 'warn'
@@ -361,6 +365,12 @@ async function reviewDiff($: EngineInterface, diff: Diff) {
   }
   await withBusy($, 'review', async () => {
     const w = await wordsIn($)
+    // The row says a review that gave nothing to show, red, until one does.
+    const failed = async (why: string) => {
+      await update($, errorAtom, () => why)
+      await update($, failedAtom, all => ({ ...all, [diff.fingerprint]: why }))
+    }
+    await update($, failedAtom, ({ [diff.fingerprint]: _was, ...rest }) => rest)
     // What the check of each edit caught and the person sees already is not found again.
     const names = diff.files.flatMap(f => [f.path, f.shown])
     const flagged = (await openCaught($)).filter(c => isOn(c, names)).map(c => ({ where: findingAt(c), rule: c.rule ?? c.text }))
@@ -368,10 +378,13 @@ async function reviewDiff($: EngineInterface, diff: Diff) {
     const ask = [w.reviewPrompt, ...(isSpec ? [w.specPrompt] : []), ...(flagged.length > 0 ? [w.flaggedPrompt(flagged)] : [])].join('\n\n')
     // Room for the few sentences it may reason in before the JSON.
     const text = await complete($, diff, ask, 8000, 'high')
-    if (text === undefined) return
+    if (text === undefined) {
+      await failed((await read($, errorAtom)) ?? w.failed('no reply'))
+      return
+    }
     const findings = parseFindings(text)
     if (findings === undefined) {
-      await update($, errorAtom, () => w.failed('the reply was not JSON'))
+      await failed(w.failed('the reply was not JSON'))
       return
     }
     // A second, doubting look at what the first found, over the same cached text: it drops a
@@ -512,7 +525,8 @@ async function setMode($: EngineInterface, mode: Mode) {
   await openTab($, await read($, tabAtom))
 }
 
-export async function openPane($: EngineInterface) {
+export async function openPane($: EngineInterface, tab?: Tab) {
+  if (tab) await update($, tabAtom, () => tab)
   await refreshShown($)
   const w = await wordsIn($)
   await $.ui.open({ id: PANE, title: w.title, focus: true, closeOnEscape: true })
@@ -661,11 +675,12 @@ const takeNotes = (loop: string) => {
 function checkInBackground($: EngineInterface, loop: string, change: Change) {
   const running = pending.get(loop) ?? new Set<Promise<void>>()
   pending.set(loop, running)
+  const at = conversation
   const done = new Promise<void>(resolve => {
     $.clock.after(0, () => {
       inspect($, change)
         .then(async violations => {
-          if (violations.length === 0) return
+          if (violations.length === 0 || at !== conversation) return
           notes.set(loop, [...(notes.get(loop) ?? []), noteFor(change.file, violations)])
           await keepCaught($, change, violations, 'told')
         })
@@ -769,6 +784,20 @@ export async function startReview($: EngineInterface) {
   await update($, busyAtom, () => [])
   await restoreLang($)
   await registerCommand($)
+}
+
+// A /clear or /resume starts another conversation: what this module kept of the one before (notes
+// for Claude, checks running, a review waiting its turn, what the shell was taken as) is dropped,
+// and the language read again.
+export async function restartReview($: EngineInterface) {
+  conversation++
+  notes.clear()
+  pending.clear()
+  stopped.clear()
+  sentBack = false
+  reviewNext = undefined
+  shellTaking = undefined
+  await restoreLang($)
 }
 
 export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Parameters<Hook<'turn.start'>>[1], next: Parameters<Hook<'turn.start'>>[2]) {
@@ -894,21 +923,26 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
   const unseen = turn.files.flatMap(f => f.hunks).filter(hunk => !seen.includes(hunk.id)).length
   const isReviewing = (await read($, busyAtom)).includes('review') && !review
   const isSkipped = !review && !isReviewing && isSmall(turn)
+  // A review that failed, red; one that is neither there nor running (a reload cut it short), yellow.
+  const isFailed = !review && !isReviewing && (await read($, failedAtom))[turn.fingerprint] !== undefined
+  const isLost = !review && !isReviewing && !isSkipped && !isFailed
   const added = turn.files.reduce((n, f) => n + f.added, 0)
   const removed = turn.files.reduce((n, f) => n + f.removed, 0)
-  const tone = bugs > 0 ? 'error' : findings.length > 0 || unseen > 0 ? 'warning' : 'success'
+  const tone = bugs > 0 || isFailed ? 'error' : findings.length > 0 || unseen > 0 || isLost ? 'warning' : 'success'
   const sep = <Text dimColor> · </Text>
   // What the row says, as plain text: the columns it takes.
   const said = [
     `✎ ${w.files(turn.files.length)} +${added} −${removed}`,
     ...(isReviewing ? [w.reviewing] : []),
     ...(isSkipped ? [w.small] : []),
+    ...(isFailed ? [w.reviewFailed] : []),
+    ...(isLost ? [w.unreviewed] : []),
     ...(bugs > 0 ? [w.bugs(bugs)] : []),
     ...(findings.length - bugs > 0 ? [w.findings(findings.length - bugs)] : []),
     ...(unseen > 0 ? [w.unseen(unseen)] : review && findings.length === 0 ? [w.allSeen] : []),
   ].join(' · ')
   const item = (
-    <Button key="row-review" plain onPress={() => void openPane($).catch(() => {})}>
+    <Button key="row-review" plain onPress={() => void openPane($, isFailed || isLost ? 'findings' : undefined).catch(() => {})}>
       <Text wrap="truncate">
         <Text color={tone}>✎ </Text>
         <Text bold>{w.files(turn.files.length)}</Text>
@@ -926,6 +960,18 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
           <Text>
             {sep}
             <Text dimColor>{w.small}</Text>
+          </Text>
+        ) : null}
+        {isFailed ? (
+          <Text>
+            {sep}
+            <Text color="error">{w.reviewFailed}</Text>
+          </Text>
+        ) : null}
+        {isLost ? (
+          <Text>
+            {sep}
+            <Text color="warning">{w.unreviewed}</Text>
           </Text>
         ) : null}
         {bugs > 0 ? (
@@ -975,6 +1021,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const spent = await read($, spentAtom)
   const files = diff?.files ?? []
   const review = diff ? (await read($, reviewsAtom))[diff.fingerprint] : undefined
+  const failure = diff ? (await read($, failedAtom))[diff.fingerprint] : undefined
   const earlier = await earlierFindings($, diff)
   const caught = await read($, caughtAtom)
   const findings = [...(review ?? []).filter(f => open(f, sent, dismissed)), ...earlier, ...(await openCaught($))]
@@ -1243,8 +1290,12 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Text dimColor>{w.findingsNote}</Text>
         {busy.includes('review') && !review ? (
           <Text dimColor>{w.reviewing}</Text>
+        ) : !review && failure !== undefined ? (
+          <Text color="error">{`✗ ${w.failedNote(failure)}`}</Text>
+        ) : !review && diff?.mode === 'turn' ? (
+          isSmall(diff) ? <Text dimColor>{w.smallNote}</Text> : <Text color="warning">{w.lostNote}</Text>
         ) : !review ? (
-          <Text dimColor>{diff && diff.mode === 'turn' && isSmall(diff) ? w.smallNote : w.notReviewed}</Text>
+          <Text dimColor>{w.notReviewed}</Text>
         ) : all.length === 0 ? (
           <Text color="success">{w.noFindings}</Text>
         ) : (
