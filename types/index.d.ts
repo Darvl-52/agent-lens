@@ -50,9 +50,10 @@ export type ReviewLive = 'warn' | 'block' | 'off'
 
 // A project rule an edit broke, caught as the edit was made, as a finding on the file at `path`.
 // `evidence` is the offending text, kept only where the edit wrote it as the check quoted it, so
-// whether it is still in the file can be told. `state`: told to Claude while the turn runs, still
-// in the file once it ended, gone from it, or the edit refused before it landed.
-export type ReviewCaughtRule = ReviewFinding & { path: string; evidence?: string; state: 'told' | 'open' | 'fixed' | 'refused' }
+// whether it is still in the file can be told. `state`: found and its note not yet with Claude,
+// told to Claude while the turn runs, still in the file once it ended, gone from it, or the edit
+// refused before it landed.
+export type ReviewCaughtRule = ReviewFinding & { path: string; evidence?: string; state: 'found' | 'told' | 'open' | 'fixed' | 'refused' }
 
 export type ReviewAnswer = { question: string; text: string }
 

@@ -86,8 +86,8 @@ repository the session touched and the project's own.
    finding still open in one prompt, once two or more are. `r` reviews a diff not yet reviewed (the
    session's or the uncommitted one). What earlier reviews found and nobody has answered yet stands
    below, under its own heading: a later turn does not drop it. Under **Caught while Claude
-   edited**, the rules each edit broke: still in the code, a finding like any other; else `told
-   Claude` in yellow while the turn runs, `fixed` in green once it is gone.
+   edited**, the rules each edit broke: still in the code, a finding like any other; else `not told
+   Claude yet` or `told Claude` in yellow while the turn runs, `fixed` in green once it is gone.
 3. **Walkthrough.** The change in reading order: in short, where to start, how the pieces fit,
    what it leaves out. `g` makes it again.
 4. **Ask.** A question about the diff, or about one piece after `ask` on it.
@@ -110,9 +110,11 @@ Fix this before moving on.
 
 If Claude ends its turn first, the mod waits for the checks still running (up to 8 seconds) and
 sends Claude back once to fix what they caught; where an organization manages Claude Code, as a
-new prompt right after the turn. A subagent's note goes to the main conversation. Once the turn
-ends, what was caught is looked for again: still in the code, it joins the findings, and the
-review after the turn is told not to report it a second time.
+new prompt right after the turn. A subagent's note goes to the main conversation. A note that
+cannot go then (the turn was sent back already, or another hook keeps it going) is not dropped: it
+rides on the next tool result, and its rule shows as told only once it has reached Claude. Once
+the turn ends, what was caught is looked for again: still in the code, it joins the findings, and
+the review after the turn is told not to report it a second time.
 
 Only rules about what files contain are judged (style, naming, comments, structure, forbidden
 patterns, hardcoded values); rules about git, workflow or how to talk are not. Edits to `CLAUDE.md`

@@ -745,7 +745,8 @@ test('the review reads the change in view beside the diff, and the row says both
   expect(await bandText($)).toMatch(/^◆ door · .* {2}│ {2}✎ 1 file \+3 −0/)
   // Too narrow for both: each on its own row.
   const narrow = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 60 } })
-  expect(textOf(await narrow.find({ key: 'lens-row' }))).toMatch(/^◆ door/)
+  // On a row of its own the change has the whole row, not what is left beside the review.
+  expect(textOf(await narrow.find({ key: 'lens-row' }))).toBe('◆ door · spec changed · tasks 1/2 · +1 more')
   expect(textOf(await narrow.find({ key: 'review-row' }))).toMatch(/^✎ 1 file/)
   await narrow.unmount()
 })

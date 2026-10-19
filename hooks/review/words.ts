@@ -82,7 +82,7 @@ const EN = {
   // The check of each edit as it is made.
   caughtToast: (n: number, file: string) => `CLAUDE.md: ${n} rule${n === 1 ? '' : 's'} broken in ${file}`,
   caught: 'Caught while Claude edited:',
-  caughtState: { told: 'told Claude', open: 'still there', fixed: 'fixed', refused: 'edit refused' } as Record<CaughtRule['state'], string>,
+  caughtState: { found: 'not told Claude yet', told: 'told Claude', open: 'still there', fixed: 'fixed', refused: 'edit refused' } as Record<CaughtRule['state'], string>,
   found: (evidence: string) => `found: ${evidence}`,
   liveHeader: (live: Live, model: string, running: number) =>
     live === 'off'
@@ -192,7 +192,7 @@ const RU: typeof EN = {
   caughtToast: (n, file) =>
     `CLAUDE.md: в ${file} ${plural(n, 'нарушено', 'нарушены', 'нарушено')} ${n} ${plural(n, 'правило', 'правила', 'правил')}`,
   caught: 'Поймано, пока Claude правил:',
-  caughtState: { told: 'сказано Claude', open: 'ещё в коде', fixed: 'исправлено', refused: 'правка отклонена' },
+  caughtState: { found: 'Claude ещё не сказано', told: 'сказано Claude', open: 'ещё в коде', fixed: 'исправлено', refused: 'правка отклонена' },
   found: evidence => `найдено: ${evidence}`,
   liveHeader: (live, model, running) =>
     live === 'off'

@@ -855,6 +855,54 @@ test("a subagent's unread note goes to the main loop when it ends", async ($, on
   expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.join('\n')).toMatch(/^A subagent left this unfixed:\nagent-lens: your edit/)
 })
 
+test("the next turn starting at once does not take the last one's diff from it", async ($, on) => {
+  const { asked, native, clock } = await project($, on, { 'src/app.ts': APP })
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: DARK })
+  await clock.advance(1)
+  await $.turn.complete({ ...DONE, turnId: 't1' })
+  // The person's next prompt lands before the diff of the last turn is read.
+  await $.turn.start({ text: 'what does it do?', turnId: 't2' })
+  await clock.advance(10)
+  expect(await bandText($)).toMatch(/^✎ 1 file \+3 −1/)
+  expect(asked[0]?.prompt).toMatch(/What the developer asked the agent for:\nadd dark mode/)
+})
+
+test('a note a stop could not carry waits for the next tool result, and its rule is told only once it is', async ($, on) => {
+  const { native, settle, setViolations, review } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
+  await settle()
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  // The turn still runs: its edits are in the session's diff.
+  await pane.select({ key: 'mode', value: 'session' })
+  await pane.press({ key: 'tab-findings' })
+  expect(await pane.find({ type: 'Text', text: /^not told Claude yet$/ })).toMatchObject({ props: { color: 'warning' } })
+  // Kept going by a stop already: the note is not dropped, nor marked told.
+  expect((await $.classic.Stop({ stop_hook_active: true })).block).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /^not told Claude yet$/ })).toBeDefined()
+  const next = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(next.context?.join('\n')).toMatch(/^agent-lens: your edit to .*app\.ts breaks/)
+  await settle()
+  expect(await pane.find({ type: 'Text', text: /^told Claude$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a turn let go after one sent back keeps its notes for the next, not drops them', async ($, on) => {
+  const { native, turn, setViolations, submitted } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  await turn('add dark mode', { 'src/app.ts': COMMENTED })
+  expect(submitted).toHaveLength(1)
+  // Sent back once: the next turn ends as it is, what it broke kept for later.
+  await turn('fix it', { 'src/app.ts': COMMENTED.replace('12', '14') })
+  expect(submitted).toHaveLength(1)
+  await $.turn.start({ text: 'go on', turnId: 't3' })
+  const ran = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(ran.context?.join('\n')).toMatch(/^agent-lens: your edit to .*app\.ts breaks/)
+})
+
 test('block refuses an edit that breaks a rule before it lands', { options: { live: 'block' } }, async ($, on) => {
   const { disk, native, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
   setViolations(COMMENT)

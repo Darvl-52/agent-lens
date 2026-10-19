@@ -120,9 +120,11 @@ export const register: Register = (on, options) => {
     const review = await reviewLine($, e).catch(() => null)
     const reviewButton = <Button key="open-changes" label="/changes" plain dimColor onPress={() => void openReview($).catch(() => {})} />
     const specButton = <Button key="open-spec" label="/spec" plain dimColor onPress={() => void openSpec($).catch(() => {})} />
+    // Whether the spec keeps its room beside the review is settled first: on a row of its own it
+    // is laid out for the whole row, not squeezed as if the review were still beside it.
     const taken = review ? ' /spec /changes'.length + SPLIT.length + review.width : ' /spec'.length
-    const together = review ? await specLine($, e, taken).catch(() => null) : null
-    const spec = together ?? (await specLine($, e, ' /spec'.length).catch(() => null))
+    const fits = review !== null && e.props.bodyColumns - taken >= MIN_SPEC
+    const spec = await specLine($, e, fits ? taken : ' /spec'.length).catch(() => null)
     const row = (key: string, items: RenderChildren, buttons: RenderChildren) => (
       <Box key={key} flexDirection="row" gap={1} justifyContent="space-between">
         <Box flexDirection="row" flexShrink={1} overflow="hidden">
@@ -133,7 +135,6 @@ export const register: Register = (on, options) => {
         </Box>
       </Box>
     )
-    const fits = together !== null && e.props.bodyColumns - taken >= MIN_SPEC
     const rows =
       spec && review && fits
         ? [row('lens-row', [...spec, <Text dimColor>{SPLIT}</Text>, review.item], [specButton, reviewButton])]

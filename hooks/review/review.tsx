@@ -99,10 +99,13 @@ let settings = settingsOf({})
 // What the check of each edit found for Claude, by loop, until a tool result or the turn's end
 // carries it; the checks running, by loop; the loops a classic Stop hook already sent back this
 // turn; and whether the main loop's last turn was sent back, so the next is let go.
-const notes = new Map<string, string[]>()
+const notes = new Map<string, Note[]>()
 const pending = new Map<string, Set<Promise<void>>>()
 const stopped = new Set<string>()
 let sentBack = false
+// A note for Claude and the caught rules it tells of, marked told once it reaches Claude.
+type Note = { text: string; ids: string[] }
+
 // Counted up by each /clear or /resume: a check still running from the conversation before finds
 // its note has no one to go to.
 let conversation = 0
@@ -533,25 +536,42 @@ export async function openPane($: EngineInterface, tab?: Tab) {
   void openTab($, await read($, tabAtom)).catch(() => {})
 }
 
-// After a turn that edited files, what it changed becomes the last turn's diff and is reviewed,
-// unless it touched a line or two.
-async function afterTurn($: EngineInterface) {
-  await afterShell($)
-  await resolveCaught($)
-  // Taken and emptied in one write, the request with them: the next turn may start, and edit, while
-  // this one's diff is read from the disk.
-  let before: Readonly<Record<string, string | null>> = {}
+// What a turn leaves for its diff: the files as they were, what was uncommitted before its first
+// shell command, the commands, the request.
+type TurnTaken = {
+  before: Readonly<Record<string, string | null>>
+  dirty: Readonly<Record<string, readonly string[]>> | null
+  shell: ShellRun[]
+  request: string
+  requests: string[]
+}
+
+// Taken at the turn's end and emptied in one write each, before anything is awaited: the next turn
+// may start, and edit, while this one's diff is read from the disk.
+async function takeTurn($: EngineInterface): Promise<TurnTaken> {
+  const taken: TurnTaken = { before: {}, dirty: null, shell: [], request: await read($, turnRequestAtom), requests: await read($, requestsAtom) }
   await update($, turnBeforeAtom, b => {
-    before = b
+    taken.before = b
     return {}
   })
-  let shell: ShellRun[] = []
+  await update($, turnDirtyAtom, d => {
+    taken.dirty = d
+    return null
+  })
   await update($, turnShellAtom, s => {
-    shell = s
+    taken.shell = s
     return []
   })
-  const request = await read($, turnRequestAtom)
-  const requests = await read($, requestsAtom)
+  shellTaking = undefined
+  return taken
+}
+
+// After a turn that edited files, what it changed becomes the last turn's diff and is reviewed,
+// unless it touched a line or two.
+async function afterTurn($: EngineInterface, taken: TurnTaken) {
+  const before = await afterShell($, taken.dirty, taken.before)
+  await resolveCaught($)
+  const { shell, request, requests } = taken
   const at = requests.lastIndexOf(request)
   const earlier = (at >= 0 ? requests.slice(0, at) : requests).slice(-EARLIER.count).map(r => r.slice(0, EARLIER.chars))
   if (Object.keys(before).length === 0) return
@@ -602,16 +622,10 @@ async function beforeShell($: EngineInterface) {
 }
 
 // After a turn that ran the shell: each file uncommitted now and not before it, and edited by no
-// tool, the shell changed; it was as committed, or not there.
-async function afterShell($: EngineInterface) {
-  const taken: { dirty: Readonly<Record<string, readonly string[]>> | null } = { dirty: null }
-  await update($, turnDirtyAtom, d => {
-    taken.dirty = d
-    return null
-  })
-  shellTaking = undefined
-  for (const [repo, was] of Object.entries(taken.dirty ?? {})) {
-    const edited = await read($, turnBeforeAtom)
+// tool, the shell changed; it was as committed, or not there. The turn's files with them.
+async function afterShell($: EngineInterface, dirty: TurnTaken['dirty'], turnBefore: TurnTaken['before']) {
+  const edited: Record<string, string | null> = { ...turnBefore }
+  for (const [repo, was] of Object.entries(dirty ?? {})) {
     const found = (await uncommittedIn($, repo)).filter(path => !was.includes(path) && !(keyIn(edited, path) in edited)).slice(0, SHELL_LIMIT)
     for (const named of found) {
       const head = await git($, repo, ['show', `HEAD:${below(named, repo) ?? ''}`])
@@ -619,10 +633,11 @@ async function afterShell($: EngineInterface) {
       if (head?.isStdoutTruncated) continue
       const before = head?.exitCode === 0 ? head.stdout : null
       const path = keyIn(await read($, beforeAtom), named)
-      await update($, turnBeforeAtom, b => (path in b ? b : { ...b, [path]: before }))
+      if (!(path in edited)) edited[path] = before
       await update($, beforeAtom, b => (path in b ? b : { ...b, [path]: before }))
     }
   }
+  return edited
 }
 
 // A shell command of the turn, for the review to read: what a push or an install did is in no diff.
@@ -662,12 +677,27 @@ async function keepCaught($: EngineInterface, change: Change, violations: readon
   const caught = violations.map(v => caughtOf(path, shown, v, change, now, state))
   await update($, caughtAtom, all => [...caught, ...all.filter(c => !caught.some(n => n.id === c.id))].slice(0, CAUGHT_LIMIT))
   await $.ui.toast((await wordsIn($)).caughtToast(violations.length, nameOf(path)))
+  return caught.map(c => c.id)
 }
 
 const takeNotes = (loop: string) => {
   const list = notes.get(loop) ?? []
   notes.delete(loop)
   return list
+}
+
+// Notes taken and not delivered after all go back first in their loop, for its next tool result or
+// the end of its turn.
+const putBack = (loop: string, list: readonly Note[]) => {
+  if (list.length > 0) notes.set(loop, [...list, ...(notes.get(loop) ?? [])])
+}
+
+const textOf = (list: readonly Note[]) => list.map(n => n.text)
+
+// The rules a note told of are told once it reaches Claude.
+async function markTold($: EngineInterface, list: readonly Note[]) {
+  const ids = new Set(list.flatMap(n => n.ids))
+  if (ids.size > 0) await update($, caughtAtom, all => all.map(c => (c.state === 'found' && ids.has(c.id) ? { ...c, state: 'told' as const } : c)))
 }
 
 // The check runs beside the turn, so an edit is not held for it: its note rides on the loop's next
@@ -681,8 +711,9 @@ function checkInBackground($: EngineInterface, loop: string, change: Change) {
       inspect($, change)
         .then(async violations => {
           if (violations.length === 0 || at !== conversation) return
-          notes.set(loop, [...(notes.get(loop) ?? []), noteFor(change.file, violations)])
-          await keepCaught($, change, violations, 'told')
+          const note = { text: noteFor(change.file, violations), ids: [] as string[] }
+          notes.set(loop, [...(notes.get(loop) ?? []), note])
+          note.ids.push(...(await keepCaught($, change, violations, 'found')))
         })
         .catch(() => undefined)
         .finally(resolve)
@@ -706,17 +737,29 @@ async function settleTurn($: EngineInterface, agentId: string | undefined, reaso
   if (stopped.delete(loop)) return
   if (loop !== MAIN) {
     const delivered = await settle($, loop)
-    if (delivered.length > 0) notes.set(MAIN, [...(notes.get(MAIN) ?? []), ...delivered.map(note => `A subagent left this unfixed:\n${note}`)])
+    if (delivered.length > 0) notes.set(MAIN, [...(notes.get(MAIN) ?? []), ...delivered.map(note => ({ ...note, text: `A subagent left this unfixed:\n${note.text}` }))])
     return
   }
   const wasSentBack = sentBack
   sentBack = false
   if (reason !== 'answer') return
   const delivered = await settle($, MAIN)
-  if (delivered.length === 0 || wasSentBack) return
+  if (delivered.length === 0) return
+  // The last turn was sent back already: this one goes, its notes kept for the next.
+  if (wasSentBack) {
+    putBack(MAIN, delivered)
+    return
+  }
   sentBack = true
-  void $.prompt.submit({ text: delivered.join('\n\n') }).catch(() => undefined)
+  // Not awaited: the prompt runs once the session is idle, after this turn's end.
+  void $.prompt
+    .submit({ text: textOf(delivered).join('\n\n') })
+    .then(r => (r.drop === undefined ? markTold($, delivered) : putBack(MAIN, delivered)))
+    .catch(() => putBack(MAIN, delivered))
 }
+
+// A caught rule that may still be in its file: found, told or open.
+const isLive = (c: CaughtRule) => c.state === 'found' || c.state === 'told' || c.state === 'open'
 
 // After a turn, what was caught while it ran is looked for again: still in its file, it is open as
 // any finding; gone, Claude fixed it. One whose evidence the edit did not hold as quoted stays told,
@@ -724,11 +767,11 @@ async function settleTurn($: EngineInterface, agentId: string | undefined, reaso
 async function resolveCaught($: EngineInterface) {
   const now = new Map<string, string | null>()
   for (const c of await read($, caughtAtom))
-    if (c.evidence !== undefined && (c.state === 'told' || c.state === 'open') && !now.has(c.path)) now.set(c.path, await readOrNull($, c.path))
+    if (c.evidence !== undefined && isLive(c) && !now.has(c.path)) now.set(c.path, await readOrNull($, c.path))
   await update($, caughtAtom, all =>
     all.map(c => {
       const text = now.get(c.path)
-      if (c.evidence === undefined || text === undefined || (c.state !== 'told' && c.state !== 'open')) return c
+      if (c.evidence === undefined || text === undefined || !isLive(c)) return c
       const line = text === null ? undefined : lineOf(text, c.evidence)
       const { line: _was, ...rest } = c
       return line === undefined ? { ...rest, state: 'fixed' as const } : { ...rest, line, state: 'open' as const }
@@ -863,31 +906,50 @@ export function checkAfter($: EngineInterface, e: ToolCallEvent, ran: ToolCallDo
   const change = changeOf(e)
   if (change && settings.live === 'warn' && !ran.isError) checkInBackground($, loop, change)
   const delivered = takeNotes(loop)
-  return delivered.length > 0 ? { ...ran, context: [...(ran.context ?? []), ...delivered] } : ran
+  if (delivered.length === 0) return ran
+  void markTold($, delivered).catch(() => {})
+  return { ...ran, context: [...(ran.context ?? []), ...textOf(delivered)] }
 }
 
 // The turn's end waits for the checks of its edits, so what they caught is told to Claude and
 // looked for again before the turn's diff is read.
 export async function endReviewTurn($: EngineInterface, agentId: string | undefined, reason: string) {
+  const taken = agentId === undefined ? await takeTurn($).catch(() => undefined) : undefined
   await settleTurn($, agentId, reason).catch(() => {})
-  if (agentId === undefined) void afterTurn($).catch(() => {})
+  if (taken) void afterTurn($, taken).catch(() => {})
 }
 
 // Where classic hooks run, they keep the same turn going instead of starting a new one.
+// A stop already kept going once, or kept going by another hook, carries no notes: they wait for the
+// loop's next tool result, or, a subagent let go, for the main loop.
 export async function classicStop($: Parameters<Hook<'classic.Stop'>>[0], e: Parameters<Hook<'classic.Stop'>>[1], next: Parameters<Hook<'classic.Stop'>>[2]) {
   stopped.add(MAIN)
   const delivered = await settle($, MAIN)
   const result = await next(e)
-  if (delivered.length === 0 || e.stop_hook_active || result.block !== undefined) return result
-  return { ...result, block: delivered.join('\n\n') }
+  if (delivered.length === 0) return result
+  if (e.stop_hook_active || result.block !== undefined) {
+    putBack(MAIN, delivered)
+    return result
+  }
+  await markTold($, delivered)
+  return { ...result, block: textOf(delivered).join('\n\n') }
 }
 
 export async function classicSubagentStop($: Parameters<Hook<'classic.SubagentStop'>>[0], e: Parameters<Hook<'classic.SubagentStop'>>[1], next: Parameters<Hook<'classic.SubagentStop'>>[2]) {
   stopped.add(e.agent_id)
   const delivered = await settle($, e.agent_id)
   const result = await next(e)
-  if (delivered.length === 0 || e.stop_hook_active || result.block !== undefined) return result
-  return { ...result, block: delivered.join('\n\n') }
+  if (delivered.length === 0) return result
+  if (result.block !== undefined) {
+    putBack(e.agent_id, delivered)
+    return result
+  }
+  if (e.stop_hook_active) {
+    putBack(MAIN, delivered.map(note => ({ ...note, text: `A subagent left this unfixed:\n${note.text}` })))
+    return result
+  }
+  await markTold($, delivered)
+  return { ...result, block: textOf(delivered).join('\n\n') }
 }
 
 export async function command($: Parameters<MatchedHook<'command.run', { command: 'changes' }>>[0], e: Parameters<MatchedHook<'command.run', { command: 'changes' }>>[1]) {
@@ -1318,12 +1380,12 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 item(c)
               ) : (
                 <Box key={`caught-${c.id}`} flexDirection="row" gap={1}>
-                  <Text color={c.state === 'fixed' ? 'success' : c.state === 'told' ? 'warning' : 'inactive'}>{c.state === 'fixed' ? '✓' : c.state === 'told' ? '●' : '·'}</Text>
+                  <Text color={c.state === 'fixed' ? 'success' : c.state === 'told' || c.state === 'found' ? 'warning' : 'inactive'}>{c.state === 'fixed' ? '✓' : c.state === 'told' || c.state === 'found' ? '●' : '·'}</Text>
                   <Box flexGrow={1} flexShrink={1}>
                     <Text wrap="truncate">{`${findingAt(c)} · ${c.rule ?? c.text}`}</Text>
                   </Box>
                   <Box flexShrink={0}>
-                    <Text color={c.state === 'fixed' ? 'success' : c.state === 'told' ? 'warning' : 'inactive'}>{w.caughtState[c.state]}</Text>
+                    <Text color={c.state === 'fixed' ? 'success' : c.state === 'told' || c.state === 'found' ? 'warning' : 'inactive'}>{w.caughtState[c.state]}</Text>
                   </Box>
                 </Box>
               ),

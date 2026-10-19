@@ -350,13 +350,22 @@ async function retry($: EngineInterface) {
   else if (failed?.what === 'answer' && failed.question !== undefined) await ask($, failed.question)
 }
 
+// The change in view with its files read. After a reload `files` starts empty while the session's
+// values still hold the change: it is read again before anything is sent to the model or kept as
+// read, so neither is made of nothing.
+async function lensNow($: EngineInterface) {
+  const lens = await read($, lensAtom)
+  if (lens && fingerprintOf(files) !== lens.fingerprint) await scan($)
+  return read($, lensAtom)
+}
+
 // The brief of the change as it is when its turn comes; asked for while one of that version is being
 // made, it is that one.
 async function makeBrief($: EngineInterface): Promise<void> {
   const lens = await read($, lensAtom)
   if (lens && briefing?.fingerprint === lens.fingerprint && !waiting.has('brief')) return briefing.done
   const run: Promise<void> = inTurn($, 'brief', 'brief', async () => {
-    const now = await read($, lensAtom)
+    const now = await lensNow($)
     if (!now) return
     briefing = { fingerprint: now.fingerprint, done: run }
     try {
@@ -395,7 +404,7 @@ async function briefOf($: EngineInterface, lens: Lens) {
 
 function explainChanges($: EngineInterface) {
   return inTurn($, 'explain', 'explain', async () => {
-    const lens = await read($, lensAtom)
+    const lens = await lensNow($)
     if (!lens || lens.deltas.length === 0) return
     const seen = (await $.store.get(seenKey(lens.root, lens.current)).catch(() => undefined)) as Files | undefined
     if (!seen) return
@@ -428,7 +437,7 @@ async function changeDeciding($: EngineInterface, fn: (d: Deciding, brief: Brief
 // The model's options for every decision at once, asked for when the first one is opened.
 function makeOptions($: EngineInterface) {
   return inTurn($, 'options', 'options', async () => {
-    const lens = await read($, lensAtom)
+    const lens = await lensNow($)
     const brief = await read($, briefAtom)
     if (lens && brief && !brief.options && brief.decisions.length > 0) await optionsOf($, lens, brief)
   })
@@ -701,7 +710,7 @@ export async function specInView($: EngineInterface) {
 
 // What is on disk now becomes what later changes are counted from.
 async function markRead($: EngineInterface) {
-  const lens = await read($, lensAtom)
+  const lens = await lensNow($)
   if (!lens) return
   await $.store.set(seenKey(lens.root, lens.current), files)
   await update($, explainAtom, () => null)
@@ -712,7 +721,7 @@ async function ask($: EngineInterface, question: string) {
   const q = question.trim()
   if (q === '') return
   await inTurn($, 'answer', `answer:${q}`, async () => {
-    const lens = await read($, lensAtom)
+    const lens = await lensNow($)
     if (!lens) return
     const w = await wordsIn($)
     await update($, answerAtom, () => null)
