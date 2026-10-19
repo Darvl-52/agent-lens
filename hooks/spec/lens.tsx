@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Hook, MatchedHook } from 'claude-code'
 
-import type { Brief, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict } from '../../types/spec'
+import type { Brief, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn, restoreLang } from '../core/lang'
 import { specSkill } from '../router/catalog'
@@ -12,12 +12,14 @@ import {
   changesText,
   deltasOf,
   fingerprintOf,
+  hasCase,
   lf,
   parseCovers,
   parseIssues,
   parseOptions,
   parseRequirements,
   parseTaskList,
+  parseTestCases,
   parseTasks,
   parseTests,
   requirementNames,
@@ -38,6 +40,8 @@ const answerAtom = atom({ plugin: 'agent-lens', key: 'spec.answer' } as const, n
 const decidingAtom = atom({ plugin: 'agent-lens', key: 'spec.deciding' } as const, null)
 const refreshingAtom = atom({ plugin: 'agent-lens', key: 'spec.refreshing' } as const, null)
 const sentTasksAtom = atom({ plugin: 'agent-lens', key: 'spec.sentTasks' } as const, [] as string[])
+const sentCasesAtom = atom({ plugin: 'agent-lens', key: 'spec.sentCases' } as const, [] as string[])
+const pickedCasesAtom = atom({ plugin: 'agent-lens', key: 'spec.pickedCases' } as const, [] as string[])
 const checkedAtom = atom({ plugin: 'agent-lens', key: 'spec.checked' } as const, null)
 const archiveAtom = atom({ plugin: 'agent-lens', key: 'spec.archive' } as const, null)
 const busyAtom = atom({ plugin: 'agent-lens', key: 'spec.busy' } as const, null)
@@ -46,7 +50,7 @@ const failedAtom = atom({ plugin: 'agent-lens', key: 'spec.failed' } as const, n
 const tabAtom = atom({ plugin: 'agent-lens', key: 'spec.tab' } as const, 'brief')
 
 export const PANE = 'agent-lens-spec'
-const TABS: readonly Tab[] = ['brief', 'changes', 'decide', 'tasks', 'spec', 'ask']
+const TABS: readonly Tab[] = ['brief', 'changes', 'decide', 'tasks', 'tests', 'spec', 'ask']
 // A brief and an answer want reading, not speed: the session's mid-sized model.
 const MODEL = 'sonnet'
 const TIMEOUT_MS = 180_000
@@ -214,6 +218,7 @@ async function scanOnce($: EngineInterface) {
     tasks: parseTasks(files['tasks.md'] ?? ''),
     taskList: parseTaskList(files['tasks.md'] ?? ''),
     tests: parseTests(files['test-cases.md'] ?? ''),
+    testCases: await testCasesOf($, files['test-cases.md'] ?? ''),
     requirements,
     newCapabilities: Object.keys(mains).filter(c => mains[c] === null),
     overlaps: await overlapsOf($, dir, current, changes, requirements),
@@ -227,6 +232,36 @@ async function scanOnce($: EngineInterface) {
   await update($, briefAtom, () => brief ?? null)
   await forgetArchived($, root, changes)
   void check($, lens).catch(() => {})
+}
+
+// Each test case and where it stands. Its test is looked for in the file its Automated line names,
+// under the project folder or a folder in it (`__front/e2e/…`), each file read once.
+async function testCasesOf($: EngineInterface, md: string): Promise<TestCase[]> {
+  const cases = parseTestCases(md)
+  if (cases.length === 0) return []
+  const isMarked = cases.some(c => c.mark !== 'none')
+  const project = await $.session.root()
+  const folders = (await $.fs.list(project).catch(() => []))
+    .filter(f => f.kind === 'dir' && !f.name.startsWith('.') && f.name !== 'node_modules')
+    .map(f => f.name)
+  const texts = new Map<string, string | null>()
+  const out: TestCase[] = []
+  for (const c of cases) {
+    if (c.file !== undefined && !texts.has(c.file)) {
+      let text: string | null = null
+      for (const at of [join(project, c.file), ...folders.map(d => join(project, d, c.file!))])
+        if (await $.fs.exists(at).catch(() => false)) {
+          text = ((await $.fs.read(at).catch(() => '')) as string) ?? ''
+          break
+        }
+      texts.set(c.file, text)
+    }
+    const text = c.file === undefined ? null : (texts.get(c.file) ?? null)
+    const state: TestCase['state'] =
+      c.mark === 'manual' ? 'manual' : c.mark === 'none' && isMarked ? 'unmarked' : text !== null && hasCase(text, c.id) ? 'tested' : 'untested'
+    out.push({ ...c, state })
+  }
+  return out
 }
 
 // A change archived or deleted leaves its read text and briefs behind: dropped, so the store
@@ -439,6 +474,33 @@ async function doTask($: EngineInterface, task: Task) {
   }
   await update($, sentTasksAtom, sent => [...sent, `${lens.current}:${key}`])
   await $.ui.toast(w.taskSentToast(key))
+}
+
+const caseKey = (lens: Lens, id: string) => `${lens.current}:${id}`
+
+async function togglePick($: EngineInterface, id: string) {
+  const lens = await read($, lensAtom)
+  if (!lens) return
+  const key = caseKey(lens, id)
+  await update($, pickedCasesAtom, picked => (picked.includes(key) ? picked.filter(k => k !== key) : [...picked, key]))
+}
+
+// The test cases go to the session as the person's prompt: Claude writes their tests, runs them
+// and marks what is unmarked.
+async function closeCases($: EngineInterface, ids: readonly string[]) {
+  const lens = await read($, lensAtom)
+  const cases = (lens?.testCases ?? []).filter(c => ids.includes(c.id))
+  if (!lens || cases.length === 0) return
+  const w = await wordsIn($)
+  const r = await $.prompt.submit({ text: w.closePrompt(lens.current, join(lens.root, 'changes', lens.current, 'test-cases.md'), cases), asUser: true })
+  if (r.drop !== undefined) {
+    await fail($, w.notSent(r.drop))
+    return
+  }
+  const keys = cases.map(c => caseKey(lens, c.id))
+  await update($, sentCasesAtom, sent => [...new Set([...sent, ...keys])])
+  await update($, pickedCasesAtom, picked => picked.filter(k => !keys.includes(k)))
+  await $.ui.toast(w.casesSentToast(cases.length))
 }
 
 // What stands between the change and its archive, once every task is ticked: errors and refused
@@ -666,18 +728,20 @@ export async function specLine($: EngineInterface, e: AbovePromptEvent, taken: n
   const add = (when: boolean, key: string, text: () => string, tab: Tab, color?: Tone) => {
     if (when) parts.push({ key, text: text(), tab, ...(color ? { color } : {}) })
   }
-  add(tests.unmarked.length > 0, 'unmarked', () => w.unmarked(tests.unmarked), 'spec', 'error')
+  add(tests.unmarked.length > 0, 'unmarked', () => w.unmarked(tests.unmarked), 'tests', 'error')
   add(s.errors > 0, 'errors', () => w.specErrors(s.errors), 'spec', 'error')
   add(s.decisions > 0, 'decide', () => w.toDecide(s.decisions), 'decide', 'warning')
   add(s.toApply > 0, 'apply', () => w.toApply(s.toApply), 'decide', 'warning')
   add(lens.deltas.length > 0, 'changed', () => w.changed, 'changes', 'warning')
   add(s.warnings > 0, 'warnings', () => w.specWarnings(s.warnings), 'spec', 'warning')
   add(s.untested > 0, 'untested', () => w.untested(s.untested), 'spec', 'warning')
+  const withoutTest = (lens.testCases ?? []).filter(c => c.state === 'untested').length
+  add(withoutTest > 0, 'nocase', () => w.withoutTest(withoutTest), 'tests', 'warning')
   add(s.overlapping.length > 0, 'overlaps', () => w.overlapsWith(s.overlapping), 'spec', 'warning')
   add((await read($, busyAtom)) === 'brief', 'busy', () => w.makingBrief, 'brief', 'warning')
   add(s.isReady, 'ready', () => w.readyToArchive, 'tasks', 'success')
   add(tasks.total > 0, 'tasks', () => w.tasks(tasks), 'tasks', tasks.total > 0 && tasks.done === tasks.total ? 'success' : undefined)
-  add(tests.cases > 0, 'tests', () => w.tests(tests), 'spec')
+  add(tests.cases > 0, 'tests', () => w.tests(tests), 'tests')
 
   // Cells are counted as characters: the row's words and marks are one cell each.
   const room = e.props.bodyColumns - `◆ ${lens.current}`.length - taken
@@ -742,6 +806,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     changes: { n: lens.deltas.length, color: 'warning' },
     decide: { n: undecided, color: 'warning' },
     tasks: { n: tasksLeft },
+    tests: { n: (lens.testCases ?? []).filter(c => c.state === 'untested' || c.state === 'unmarked').length, color: lens.tests.unmarked.length > 0 ? 'error' : 'warning' },
     spec: specRed > 0 ? { n: specRed, color: 'error' } : { n: specYellow, color: 'warning' },
     ask: { n: 0 },
   }
@@ -960,6 +1025,53 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               </Box>
             </Box>
           ))}
+        </Box>
+      )
+  } else if (tab === 'tests') {
+    const cases = lens.testCases ?? []
+    const sent = await read($, sentCasesAtom)
+    const picked = (await read($, pickedCasesAtom)).filter(k => k.startsWith(`${lens.current}:`)).map(k => k.slice(lens.current.length + 1))
+    const isSent = (c: TestCase) => c.state !== 'tested' && sent.includes(caseKey(lens, c.id))
+    const toClose = cases.filter(c => (c.state === 'untested' || c.state === 'unmarked') && !isSent(c))
+    const counts = { tested: 0, untested: 0, manual: 0, unmarked: 0 }
+    for (const c of cases) counts[c.state]++
+    const TONE = { tested: 'success', untested: 'warning', manual: 'suggestion', unmarked: 'error' } as const
+    const ICON = { tested: '✓', untested: '●', manual: '◇', unmarked: '✗' } as const
+    body =
+      cases.length === 0 ? (
+        <Text dimColor>{w.noCases}</Text>
+      ) : (
+        <Box flexDirection="column">
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            <Text>{w.casesSummary(counts)}</Text>
+            {picked.length > 0 ? keyed('send-picked', w.sendPicked(picked.length), 'p', run(() => closeCases($, picked)), { variant: 'primary' }) : null}
+            {toClose.length > 0
+              ? keyed('close-all', w.closeAll(toClose.length), 'c', run(() => closeCases($, toClose.map(c => c.id))), picked.length > 0 ? {} : { variant: 'primary' })
+              : null}
+          </Box>
+          <Text dimColor>{`${w.casesNote} ${w.pickHint}`}</Text>
+          <Box flexDirection="column" marginTop={1}>
+            {cases.map((c, i) => {
+              const isPicked = picked.includes(c.id)
+              return (
+                <Box flexDirection="row" gap={1}>
+                  {c.state === 'tested' ? (
+                    <Text color="success">✓</Text>
+                  ) : (
+                    <Button key={`case-${i}`} label={c.id} plain onPress={run(() => togglePick($, c.id))}>
+                      <Text {...(isPicked ? { color: 'claude' as const, bold: true } : { dimColor: true })}>{isPicked ? '[x]' : '[ ]'}</Text>
+                    </Button>
+                  )}
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text wrap="truncate" {...(c.state === 'tested' ? { dimColor: true } : {})}>{`${c.id} ${c.title}`}</Text>
+                  </Box>
+                  <Box flexShrink={0}>
+                    {isSent(c) ? <Text color="warning">{`→ ${w.taskSent}`}</Text> : <Text color={TONE[c.state]}>{`${ICON[c.state]} ${w.caseState[c.state]}`}</Text>}
+                  </Box>
+                </Box>
+              )
+            })}
+          </Box>
         </Box>
       )
   } else if (tab === 'spec') {

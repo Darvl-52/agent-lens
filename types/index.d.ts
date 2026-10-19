@@ -80,6 +80,17 @@ export type SpecTask = { id: string | null; text: string; isDone: boolean; secti
 // and, where the file marks its cases at all, the ids of those that say neither.
 export type SpecTests = { cases: number; automated: number; manual: number; unmarked: string[] }
 
+// One case of `test-cases.md`: its id and title, how it says it is checked, the test file its
+// `Automated:` line names, and where it stands: a test with its id is in that file, none is, it is
+// checked by hand, or it says neither where the others say.
+export type SpecTestCase = {
+  id: string
+  title: string
+  mark: 'automated' | 'manual' | 'none'
+  file?: string
+  state: 'tested' | 'untested' | 'manual' | 'unmarked'
+}
+
 // One requirement a delta spec adds, changes, removes or renames, with its scenarios' names.
 export type SpecRequirement = {
   // The capability: the spec's folder under `specs/`, `employee-fe/door-access`.
@@ -128,6 +139,8 @@ export type SpecLens = {
   fingerprint: string
   // Whether this change was ever read here: until then there is nothing to compare with.
   isSeen: boolean
+  // Each test case and where it stands; absent from a value an older version kept.
+  testCases?: SpecTestCase[]
   deltas: SpecDelta[]
 }
 
@@ -150,7 +163,7 @@ export type SpecBusy = 'brief' | 'explain' | 'answer' | 'options'
 // A model call that gave no answer: which one, and the question where it was one.
 export type SpecFailed = { what: SpecBusy; question?: string }
 
-export type SpecTab = 'brief' | 'changes' | 'decide' | 'tasks' | 'spec' | 'ask'
+export type SpecTab = 'brief' | 'changes' | 'decide' | 'tasks' | 'tests' | 'spec' | 'ask'
 
 // The language the mod speaks and the model answers in.
 export type SpecLang = 'en' | 'ru'
@@ -248,6 +261,10 @@ declare module 'claude-code' {
       'spec.refreshing': { change: string; fingerprint: string } | null
       // The tasks sent to Claude this session, as `<change>:<task key>`.
       'spec.sentTasks': string[]
+      // The test cases sent to Claude to close this session, and those picked in the pane to send,
+      // each as `<change>:<case id>`.
+      'spec.sentCases': string[]
+      'spec.pickedCases': string[]
       'spec.checked': SpecChecked | null
       // The change whose archiving waits for a second press, and the one sent to Claude to archive.
       'spec.archive': { change: string; isSent: boolean } | null

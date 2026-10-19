@@ -1,4 +1,4 @@
-import type { Lang, Progress, Tests } from '../../types/spec'
+import type { Lang, Progress, Tests, TestCase } from '../../types/spec'
 
 // Russian plural: 1 задача, 2 задачи, 5 задач.
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -29,13 +29,14 @@ const EN = {
   overlapsWith: (changes: string[]) => `overlaps ${changes.length > 2 ? `${changes.length} changes` : changes.join(', ')}`,
   readyToArchive: 'ready to archive',
   untested: (n: number) => `${n} ${n === 1 ? 'scenario' : 'scenarios'} untested`,
+  withoutTest: (n: number) => `${n} ${n === 1 ? 'case' : 'cases'} without a test`,
   makingBrief: 'making the brief…',
   more: (n: number) => `+${n} more`,
   // The pane.
-  tabs: { brief: 'Brief', changes: 'Changes', decide: 'Decide', tasks: 'Tasks', spec: 'Spec', ask: 'Ask' },
+  tabs: { brief: 'Brief', changes: 'Changes', decide: 'Decide', tasks: 'Tasks', tests: 'Tests', spec: 'Spec', ask: 'Ask' },
   change: 'Change',
   activeChanges: (n: number) => `${n} active, switch at the bottom`,
-  keysFocused: 'keys: 1–6 tabs, the letter at a button · Esc closes',
+  keysFocused: 'keys: 1–7 tabs, the letter at a button · Esc closes',
   keysUnfocused: 'ctrl+x tab: keys to the pane',
   busy: {
     brief: 'Making the brief: the model reads the whole change, about a minute…',
@@ -86,6 +87,16 @@ const EN = {
   doTask: 'do',
   taskSent: 'sent',
   taskSentToast: (key: string) => `Task ${key} went to Claude.`,
+  // The Tests tab.
+  noCases: 'This change has no test-cases.md, or no cases in it.',
+  casesNote: 'A case has a test where the file its Automated line names holds the case id.',
+  caseState: { tested: 'has a test', untested: 'no test', manual: 'manual', unmarked: 'unmarked' } as Record<TestCase['state'], string>,
+  casesSummary: (n: Record<TestCase['state'], number>) =>
+    [`${n.tested} with a test`, ...(n.untested > 0 ? [`${n.untested} without`] : []), ...(n.manual > 0 ? [`${n.manual} manual`] : []), ...(n.unmarked > 0 ? [`${n.unmarked} unmarked`] : [])].join(' · '),
+  sendPicked: (n: number) => `send picked (${n})`,
+  closeAll: (n: number) => `close all without a test (${n})`,
+  pickHint: 'Press a case to pick it.',
+  casesSentToast: (n: number) => `${n} test ${n === 1 ? 'case' : 'cases'} went to Claude.`,
   // The Spec tab.
   checking: 'Checking with openspec validate…',
   checkClean: 'Nothing to fix.',
@@ -154,6 +165,8 @@ No more than 350 words.`,
   withSkill: (skill: string) => `Load the \`${skill}\` skill with the Skill tool first and follow it.`,
   taskPrompt: (change: string, dir: string, key: string, text: string) =>
     `Do task ${key} of the OpenSpec change "${change}" (${dir}): "${text}". First read tasks.md (its preamble too), proposal.md, design.md and the change's specs. Do this task alone, run its check if it names one, and tick it in tasks.md. Where the spec stands in the way or leaves something out, ask me before deciding yourself.`,
+  closePrompt: (change: string, file: string, cases: readonly { id: string; title: string; mark: TestCase['mark']; file?: string }[]) =>
+    `Close these test cases of the OpenSpec change "${change}" (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.file ?? 'the file its line names'})` : c.mark === 'manual' ? ' (Manual)' : ' (no mark yet)'}`).join('\n')}\n\nRead each case whole, its steps and what it covers, and the change's specs. For a case marked Automated, write the test its steps describe in the file its Automated line names, its id in the test's name and tags as the other tests there have them, run it and make it pass; where it fails on a bug the spec rules out, fix the code, and where the spec itself is in doubt, ask me. For a case marked Manual, automate it where that can be done, and mark it Automated; where it cannot, say why. For a case with no mark, decide which it is first and write the mark into test-cases.md. Touch nothing the cases do not need, and end by saying which cases are closed and which are not.`,
   // Sent to the session as the person's own prompt: Claude edits the change's files.
   applyPrompt: (change: string, dir: string, items: { point: string; answer: string }[]) =>
     `I have settled open points of the OpenSpec change "${change}" (${dir}). Write the decisions into its files — proposal.md, design.md, the specs and tasks.md, wherever each belongs — and drop what is settled from the open questions and assumptions. Change nothing else. Where a decision contradicts the spec, or it is unclear how to write it, ask me before editing.\n\n${items.map((d, i) => `${i + 1}. ${d.point}\n   Decision: ${d.answer}`).join('\n')}`,
@@ -181,12 +194,13 @@ const RU: typeof EN = {
   overlapsWith: changes => `пересекается с ${changes.length > 2 ? `${changes.length} ${plural(changes.length, 'изменением', 'изменениями', 'изменениями')}` : changes.join(', ')}`,
   readyToArchive: 'готово к архиву',
   untested: n => `${n} ${plural(n, 'сценарий', 'сценария', 'сценариев')} без тест-кейса`,
+  withoutTest: n => `${n} ${plural(n, 'кейс', 'кейса', 'кейсов')} без автотеста`,
   makingBrief: 'готовлю выжимку…',
   more: n => `ещё ${n}`,
-  tabs: { brief: 'Выжимка', changes: 'Изменения', decide: 'Решить', tasks: 'Задачи', spec: 'Спека', ask: 'Спросить' },
+  tabs: { brief: 'Выжимка', changes: 'Изменения', decide: 'Решить', tasks: 'Задачи', tests: 'Тесты', spec: 'Спека', ask: 'Спросить' },
   change: 'Изменение',
   activeChanges: n => `активных ${n}, переключить внизу`,
-  keysFocused: 'клавиши: 1–6 вкладки, буква у кнопки · Esc закрыть',
+  keysFocused: 'клавиши: 1–7 вкладки, буква у кнопки · Esc закрыть',
   keysUnfocused: 'ctrl+x tab: клавиши в панель',
   busy: {
     brief: 'Готовлю выжимку: модель читает изменение целиком, около минуты…',
@@ -237,6 +251,15 @@ const RU: typeof EN = {
   doTask: 'сделать',
   taskSent: 'отправлено',
   taskSentToast: key => `Задача ${key} отправлена Claude.`,
+  noCases: 'В изменении нет test-cases.md или в нём нет кейсов.',
+  casesNote: 'Тест есть, если в файле из строки Automated есть id кейса.',
+  caseState: { tested: 'есть тест', untested: 'нет теста', manual: 'вручную', unmarked: 'без пометки' },
+  casesSummary: n =>
+    [`с тестом ${n.tested}`, ...(n.untested > 0 ? [`без теста ${n.untested}`] : []), ...(n.manual > 0 ? [`вручную ${n.manual}`] : []), ...(n.unmarked > 0 ? [`без пометки ${n.unmarked}`] : [])].join(' · '),
+  sendPicked: n => `отправить выбранные (${n})`,
+  closeAll: n => `закрыть все без теста (${n})`,
+  pickHint: 'Нажми на кейс, чтобы выбрать его.',
+  casesSentToast: n => `Тест-кейсы отправлены Claude: ${n}.`,
   checking: 'Проверяю через openspec validate…',
   checkClean: 'Замечаний нет.',
   checkMissing: 'CLI openspec здесь не запустился: установи его (npm i -g @fission-ai/openspec), чтобы проверять спеку.',
@@ -302,6 +325,8 @@ const RU: typeof EN = {
   withSkill: skill => `Сначала загрузи навык \`${skill}\` через Skill и следуй ему.`,
   taskPrompt: (change, dir, key, text) =>
     `Сделай задачу ${key} из изменения OpenSpec «${change}» (${dir}): «${text}». Сначала прочитай tasks.md (и шапку с правилами), proposal.md, design.md и specs изменения. Сделай только эту задачу, выполни её проверку, если она указана, и отметь задачу в tasks.md как выполненную. Если спека мешает сделать задачу или в ней чего-то не хватает, спроси меня, прежде чем решать самому.`,
+  closePrompt: (change, file, cases) =>
+    `Закрой эти тест-кейсы изменения OpenSpec «${change}» (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.file ?? 'файл из его строки'})` : c.mark === 'manual' ? ' (Manual)' : ' (без пометки)'}`).join('\n')}\n\nПрочитай каждый кейс целиком, его шаги и что он покрывает, и specs изменения. Для кейса с Automated напиши тест по его шагам в файле из строки Automated, с id кейса в названии и тегах теста, как у остальных тестов там, прогони его и добейся зелёного; если он падает на ошибке, которую спека исключает, поправь код, а если под вопросом сама спека, спроси меня. Кейс с Manual автоматизируй, если это возможно, и поменяй пометку на Automated; если нельзя, объясни почему. Для кейса без пометки сначала реши, какой он, и впиши пометку в test-cases.md. Не трогай ничего, что кейсам не нужно, и в конце скажи, какие кейсы закрыты, а какие нет.`,
   applyPrompt: (change, dir, items) =>
     `Я решил открытые пункты изменения OpenSpec «${change}» (${dir}). Внеси решения в его файлы — proposal.md, design.md, specs и tasks.md, туда, где каждому место, — и убери решённое из открытых вопросов и допущений. Остального не трогай. Если решение противоречит спеке или неясно, как его записать, спроси меня, прежде чем править.\n\n${items.map((d, i) => `${i + 1}. ${d.point}\n   Решение: ${d.answer}`).join('\n')}`,
 }

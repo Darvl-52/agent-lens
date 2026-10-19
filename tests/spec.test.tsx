@@ -190,8 +190,12 @@ const project = async (
   const openspec = `${at(root).replace(/\/$/, '')}/openspec`
   const disk = new Map<string, string>()
   const put = (change: string, file: string, text: string) => disk.set(`${openspec}/changes/${change}/${file}`, text)
+  // A file of the project outside `openspec`, a test, say.
+  const putAt = (path: string, text: string) => disk.set(at(path), text)
   const putMain = (capability: string, text: string) => disk.set(`${openspec}/specs/${capability}/spec.md`, text)
   for (const [change, files] of Object.entries(changes)) for (const [file, text] of Object.entries(files)) put(change, file, text)
+  // The test TC-01 of the door change names: there, so its case has a test.
+  disk.set(`${at(root).replace(/\/$/, '')}/e2e/door.spec.ts`, "test('TC-01 grant access', async () => {})\n")
   const isDir = (path: string) => [...disk.keys()].some(p => p.startsWith(`${at(path)}/`))
   const store = new Map<string, unknown>()
   const asked: ModelCompleteInput[] = []
@@ -276,7 +280,7 @@ const project = async (
     await $.tool.call({ tool: 'Write', file_path: `/proj/openspec/changes/${change}/${file}`, content: text })
   }
   const turn = () => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putMain, turn, setReply: (r: typeof reply) => (reply = r) }
+  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, setReply: (r: typeof reply) => (reply = r) }
 }
 
 // The text of a found element and everything under it.
@@ -732,4 +736,42 @@ test('the review reads the change in view beside the diff, and the row says both
   expect(textOf(await narrow.find({ key: 'lens-row' }))).toMatch(/^◆ door/)
   expect(textOf(await narrow.find({ key: 'review-row' }))).toMatch(/^✎ 1 file/)
   await narrow.unmount()
+})
+
+test('the Tests tab: each case and whether its test is there; picked ones, or all without a test, go to Claude', async ($, on) => {
+  const cases =
+    '# Test Cases\n\n## TC-01: Grant\n\nAutomated: e2e/door.spec.ts\n\n## TC-02: Revoke\n\nAutomated: e2e/door.spec.ts, tag `@door:TC-02`\n\n' +
+    '## TC-03: Expiry\n\nManual: needs a real clock\n\n## TC-04: Unlock\n\nSteps only.\n'
+  const { spec, settle, submitted, toasts, putAt } = await project($, on, { door: { ...DOOR, 'test-cases.md': cases } })
+  // The test of TC-01 is there, in a repository inside the project; TC-010 is no test of TC-02's.
+  putAt('/proj/__front/e2e/door.spec.ts', "test('TC-01 grant', tags(CHANGE, 'TC-01'), async () => {})\ntest('TC-010 other', async () => {})\n")
+  await spec()
+  await settle()
+  expect(await bandText($)).toMatch(/TC-04 unmarked[\s\S]*1 case without a test/)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await pane.find({ key: 'tab-tests' })).toMatchObject({ props: { label: 'Tests (2)' } })
+  await pane.press({ key: 'tab-tests' })
+  expect(await pane.find({ type: 'Text', text: /^1 with a test · 1 without · 1 manual · 1 unmarked$/ })).toBeDefined()
+  for (const said of ['✓ has a test', '● no test', '◇ manual', '✗ unmarked']) expect(await pane.find({ type: 'Text', text: new RegExp(`^${said}$`) })).toBeDefined()
+  // A case with its test is closed: nothing to pick there.
+  expect(await pane.find({ key: 'case-0' })).toBeUndefined()
+  expect(await pane.find({ key: 'close-all' })).toMatchObject({ props: { label: 'close all without a test (2)', hotkey: 'c' } })
+  expect(await pane.find({ key: 'send-picked' })).toBeUndefined()
+
+  // One picked, the manual one: it alone goes.
+  await pane.press({ key: 'case-2' })
+  expect(await pane.find({ key: 'send-picked' })).toMatchObject({ props: { label: 'send picked (1)', hotkey: 'p' } })
+  await pane.press({ key: 'send-picked' })
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]).toMatchObject({ asUser: true })
+  expect(submitted[0]!.text).toMatch(/^Close these test cases of the OpenSpec change "door" \(\/proj\/openspec\/changes\/door\/test-cases\.md\):\n- TC-03: Expiry \(Manual\)\n\nRead each case whole/)
+  expect(toasts).toEqual(['1 test case went to Claude.'])
+  expect(await pane.find({ key: 'send-picked' })).toBeUndefined()
+
+  // Then all without a test: the two left, not the one sent.
+  await pane.press({ key: 'close-all' })
+  expect(submitted[1]!.text).toMatch(/:\n- TC-02: Revoke \(Automated: e2e\/door\.spec\.ts\)\n- TC-04: Unlock \(no mark yet\)\n\n/)
+  expect(await pane.findAll({ type: 'Text', text: /^→ sent$/ })).toHaveLength(3)
+  expect(await pane.find({ key: 'close-all' })).toBeUndefined()
+  await pane.unmount()
 })

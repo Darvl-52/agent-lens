@@ -2,5 +2,5 @@
   "name": "agent-lens",
   "owner": { "name": "Darvl-52" },
   "description": "A Claude Code mod for working with the agent: what it changed, the OpenSpec change it works on, and the skill each prompt gets.",
-  "plugins": [{ "name": "agent-lens", "source": "./", "version": "0.1.0" }]
+  "plugins": [{ "name": "agent-lens", "source": "./", "version": "0.2.0" }]
 }

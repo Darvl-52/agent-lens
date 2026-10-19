@@ -1,4 +1,4 @@
-import type { Delta, Issue, Progress, Requirement, Task, Tests } from '../../types/spec'
+import type { Delta, Issue, Progress, Requirement, Task, Tests, TestCase } from '../../types/spec'
 
 // A change's Markdown files by their path inside the change folder: `proposal.md`,
 // `specs/web/dark-mode/spec.md`.
@@ -172,6 +172,26 @@ export const parseTests = (md: string): Tests => {
   if (tests.automated + tests.manual === 0) tests.unmarked = []
   return tests
 }
+
+// Each `## TC-01: Title` case with how it says it is checked, and the test file its `Automated:`
+// line names first (`Automated: e2e/door.spec.ts, tag \`@door:TC-01\``), as the project writes it.
+export const parseTestCases = (md: string): Omit<TestCase, 'state'>[] => {
+  const parts = lf(md).split(/^##\s+(TC-[\w.-]+)/m)
+  const cases: Omit<TestCase, 'state'>[] = []
+  for (let i = 1; i < parts.length; i += 2) {
+    const body = parts[i + 1] ?? ''
+    const title = /^:?\s*(.*)$/m.exec(body)?.[1]?.trim() ?? ''
+    const automated = /^Automated:\s*(.*)$/m.exec(body)
+    const file = automated ? /[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z]+/.exec(automated[1]!)?.[0] : undefined
+    cases.push({ id: parts[i]!, title, mark: automated ? 'automated' : /^Manual:/m.test(body) ? 'manual' : 'none', ...(file ? { file } : {}) })
+  }
+  return cases
+}
+
+// Whether a test file holds a test for `id`: the id standing alone, so `TC-1` is not found in
+// `TC-10` nor `TC-1.2`.
+export const hasCase = (text: string, id: string) =>
+  new RegExp(`(?<![\\w.-])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w.-]*\\w)`).test(text)
 
 // A task ticked off is progress, not a change to the spec: ticks are read as unticked wherever
 // the spec is compared, so the brief stays fresh and the row calm while agents work through it.

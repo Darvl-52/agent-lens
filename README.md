@@ -159,6 +159,7 @@ picked, else the latest edited): first what wants a look, red before yellow, the
 - `tests 9 auto, 2 manual` the test cases of `test-cases.md` by their `Automated:` and `Manual:`
   lines; `13 test cases` where the file marks none of them.
 - `TC-07 unmarked`, in red, a case that says neither, where the file marks the others.
+- `2 cases without a test`, in yellow, cases marked `Automated:` whose file holds no test with their id.
 - `2 to decide`, in yellow, what the brief found left for a person to decide.
 - `1 not in the spec`, in yellow, a decision you made in the pane and have not sent to Claude yet.
 - `1 spec error`, in red, `2 warnings`, in yellow: what `openspec validate --strict` found, run
@@ -185,7 +186,7 @@ yellow where that holds a problem.
 
 `/spec` opens it on the change in view, `/spec <change>` on another, and the pane's change list
 at the bottom switches between the active ones (your pick is kept). The change and its `◆` head
-the pane; under them six tabs, `1`–`6`, each with a count of what is in it to look at. A button
+the pane; under them seven tabs, `1`–`7`, each with a count of what is in it to look at. A button
 pressed by a key shows the key before its label (`g refresh`), and the last row says the keys.
 
 1. **Brief.** The gist, what is out of scope, the key decisions with their reasons, the risks.
@@ -209,14 +210,21 @@ pressed by a key shows the key before its label (`g refresh`), and the last row 
    between the change and its archive, or with `archive`: a second press sends it to the session,
    and Claude archives it the project's way (its archive skill or command, else `openspec archive`)
    and says what changed in the main specs.
-5. **Spec.** What `openspec validate --strict` says of the change, the test cases marked neither
+5. **Tests.** Each test case of `test-cases.md` and where it stands: `✓ has a test` (the file its
+   `Automated:` line names, under the project or a repository in it, holds a test with the case's
+   id: `TC-01`, not `TC-010`), `● no test`, `◇ manual`, `✗ unmarked`. Press a case to pick it,
+   `p` sends the picked ones to the session, `c` every case without a test or a mark. Claude writes
+   each test from the case's steps in that file, its id in the test's name and tags, runs it and
+   makes it pass; automates a manual case where it can; marks an unmarked one first. A case sent
+   shows so until its test is there.
+6. **Spec.** What `openspec validate --strict` says of the change, the test cases marked neither
    way, the other active changes in the
    same specs and the requirements both name, then every requirement the change adds, changes,
    removes or renames, by capability, with its scenarios and the ones no test case covers. A
    capability `openspec/specs` does not have yet is marked new (and warned of, where the change
    modifies its requirements as if it existed); against an existing one, an added requirement it
    already has or a changed one it lacks is marked. Read from the files, no model.
-6. **Ask.** Type a question, Enter, or pick one of the three offered: the model answers from the
+7. **Ask.** Type a question, Enter, or pick one of the three offered: the model answers from the
    change alone and says where it says so, or that it does not.
 
 What the model is doing shows under the tabs, whichever is open. Where it gives no answer, the
