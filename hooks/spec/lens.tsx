@@ -503,6 +503,13 @@ async function doTask($: EngineInterface, task: Task) {
 
 const caseKey = (lens: Lens, id: string) => `${lens.current}:${id}`
 
+// The scenarios of the change's specs no test case covers, each with an id among the cases': `S:`
+// then its capability, requirement and name.
+const uncoveredOf = (lens: Lens) =>
+  lens.requirements.flatMap(r =>
+    (r.uncovered ?? []).map(scenario => ({ id: `S:${r.capability}|${r.name}|${scenario}`, capability: r.capability, requirement: r.name, scenario })),
+  )
+
 async function togglePick($: EngineInterface, id: string) {
   const lens = await read($, lensAtom)
   if (!lens) return
@@ -511,21 +518,28 @@ async function togglePick($: EngineInterface, id: string) {
 }
 
 // The test cases go to the session as the person's prompt: Claude writes their tests, runs them
-// and marks what is unmarked.
+// and marks what is unmarked; a scenario no case covers gets a case first, closed the same way.
 async function closeCases($: EngineInterface, ids: readonly string[]) {
   const lens = await read($, lensAtom)
-  const cases = (lens?.testCases ?? []).filter(c => ids.includes(c.id))
-  if (!lens || cases.length === 0) return
+  if (!lens) return
+  const cases = (lens.testCases ?? []).filter(c => ids.includes(c.id))
+  const scenarios = uncoveredOf(lens).filter(s => ids.includes(s.id))
+  if (cases.length + scenarios.length === 0) return
   const w = await wordsIn($)
-  const r = await $.prompt.submit({ text: w.closePrompt(lens.current, join(lens.root, 'changes', lens.current, 'test-cases.md'), cases), asUser: true })
+  const file = join(lens.root, 'changes', lens.current, 'test-cases.md')
+  const text = [
+    ...(cases.length > 0 ? [w.closePrompt(lens.current, file, cases)] : []),
+    ...(scenarios.length > 0 ? [w.coverPrompt(lens.current, file, scenarios, cases.length === 0)] : []),
+  ].join('\n\n')
+  const r = await $.prompt.submit({ text, asUser: true })
   if (r.drop !== undefined) {
     await fail($, w.notSent(r.drop))
     return
   }
-  const keys = cases.map(c => caseKey(lens, c.id))
+  const keys = [...cases, ...scenarios].map(c => caseKey(lens, c.id))
   await update($, sentCasesAtom, sent => [...new Set([...sent, ...keys])])
   await update($, pickedCasesAtom, picked => picked.filter(k => !keys.includes(k)))
-  await $.ui.toast(w.casesSentToast(cases.length))
+  await $.ui.toast(w.casesSentToast(keys.length))
 }
 
 // What stands between the change and its archive, once every task is ticked: errors and refused
@@ -759,7 +773,7 @@ export async function specLine($: EngineInterface, e: AbovePromptEvent, taken: n
   add(s.toApply > 0, 'apply', () => w.toApply(s.toApply), 'decide', 'warning')
   add(lens.deltas.length > 0, 'changed', () => w.changed, 'changes', 'warning')
   add(s.warnings > 0, 'warnings', () => w.specWarnings(s.warnings), 'spec', 'warning')
-  add(s.untested > 0, 'untested', () => w.untested(s.untested), 'spec', 'warning')
+  add(s.untested > 0, 'untested', () => w.untested(s.untested), 'tests', 'warning')
   const withoutTest = (lens.testCases ?? []).filter(c => c.state === 'untested').length
   add(withoutTest > 0, 'nocase', () => w.withoutTest(withoutTest), 'tests', 'warning')
   add(s.overlapping.length > 0, 'overlaps', () => w.overlapsWith(s.overlapping), 'spec', 'warning')
@@ -831,7 +845,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     changes: { n: lens.deltas.length, color: 'warning' },
     decide: { n: undecided, color: 'warning' },
     tasks: { n: tasksLeft },
-    tests: { n: (lens.testCases ?? []).filter(c => c.state === 'untested' || c.state === 'unmarked').length, color: lens.tests.unmarked.length > 0 ? 'error' : 'warning' },
+    tests: { n: (lens.testCases ?? []).filter(c => c.state === 'untested' || c.state === 'unmarked').length + s.untested, color: lens.tests.unmarked.length > 0 ? 'error' : 'warning' },
     spec: specRed > 0 ? { n: specRed, color: 'error' } : { n: specYellow, color: 'warning' },
     ask: { n: 0 },
   }
@@ -1058,36 +1072,42 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     const sent = await read($, sentCasesAtom)
     const picked = (await read($, pickedCasesAtom)).filter(k => k.startsWith(`${lens.current}:`)).map(k => k.slice(lens.current.length + 1))
     const isSent = (c: TestCase) => c.state !== 'tested' && sent.includes(caseKey(lens, c.id))
-    const toClose = cases.filter(c => (c.state === 'untested' || c.state === 'unmarked') && !isSent(c))
+    const scenarios = uncoveredOf(lens)
+    const isScenarioSent = (id: string) => sent.includes(caseKey(lens, id))
+    const toClose = [
+      ...cases.filter(c => (c.state === 'untested' || c.state === 'unmarked') && !isSent(c)).map(c => c.id),
+      ...scenarios.filter(sc => !isScenarioSent(sc.id)).map(sc => sc.id),
+    ]
+    const pick = (key: string, id: string) => {
+      const isPicked = picked.includes(id)
+      return (
+        <Button key={key} label={id} plain onPress={run(() => togglePick($, id))}>
+          <Text {...(isPicked ? { color: 'claude' as const, bold: true } : { dimColor: true })}>{isPicked ? '[x]' : '[ ]'}</Text>
+        </Button>
+      )
+    }
     const counts = { tested: 0, untested: 0, manual: 0, unmarked: 0 }
     for (const c of cases) counts[c.state]++
     const TONE = { tested: 'success', untested: 'warning', manual: 'suggestion', unmarked: 'error' } as const
     const ICON = { tested: '✓', untested: '●', manual: '◇', unmarked: '✗' } as const
     body =
-      cases.length === 0 ? (
+      cases.length + scenarios.length === 0 ? (
         <Text dimColor>{w.noCases}</Text>
       ) : (
         <Box flexDirection="column">
           <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-            <Text>{w.casesSummary(counts)}</Text>
+            {cases.length > 0 ? <Text>{w.casesSummary(counts)}</Text> : null}
             {picked.length > 0 ? keyed('send-picked', w.sendPicked(picked.length), 'p', run(() => closeCases($, picked)), { variant: 'primary' }) : null}
             {toClose.length > 0
-              ? keyed('close-all', w.closeAll(toClose.length), 'c', run(() => closeCases($, toClose.map(c => c.id))), picked.length > 0 ? {} : { variant: 'primary' })
+              ? keyed('close-all', w.closeAll(toClose.length), 'c', run(() => closeCases($, toClose)), picked.length > 0 ? {} : { variant: 'primary' })
               : null}
           </Box>
           <Text dimColor>{`${w.casesNote} ${w.pickHint}`}</Text>
           <Box flexDirection="column" marginTop={1}>
             {cases.map((c, i) => {
-              const isPicked = picked.includes(c.id)
               return (
                 <Box flexDirection="row" gap={1}>
-                  {c.state === 'tested' ? (
-                    <Text color="success">✓</Text>
-                  ) : (
-                    <Button key={`case-${i}`} label={c.id} plain onPress={run(() => togglePick($, c.id))}>
-                      <Text {...(isPicked ? { color: 'claude' as const, bold: true } : { dimColor: true })}>{isPicked ? '[x]' : '[ ]'}</Text>
-                    </Button>
-                  )}
+                  {c.state === 'tested' ? <Text color="success">✓</Text> : pick(`case-${i}`, c.id)}
                   <Box flexGrow={1} flexShrink={1}>
                     <Text wrap="truncate" {...(c.state === 'tested' ? { dimColor: true } : {})}>{`${c.id} ${c.title}`}</Text>
                   </Box>
@@ -1098,6 +1118,26 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               )
             })}
           </Box>
+          {/* What the specs ask for and no case checks: a case is written for it, then closed. */}
+          {scenarios.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold>{w.uncoveredHead(scenarios.length)}</Text>
+              {scenarios.map((sc, i) => (
+                <Box flexDirection="row" gap={1}>
+                  {pick(`scenario-${i}`, sc.id)}
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Text wrap="truncate">
+                      <Text dimColor>{`${sc.capability} · ${sc.requirement} / `}</Text>
+                      {sc.scenario}
+                    </Text>
+                  </Box>
+                  <Box flexShrink={0}>
+                    {isScenarioSent(sc.id) ? <Text color="warning">{`→ ${w.taskSent}`}</Text> : <Text color="warning">{`● ${w.noCaseYet}`}</Text>}
+                  </Box>
+                </Box>
+              ))}
+            </Box>
+          ) : null}
         </Box>
       )
   } else if (tab === 'spec') {

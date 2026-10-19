@@ -807,3 +807,29 @@ test('Claude decides all the points left, one decided by hand aside, and the bri
   expect(asked.filter(a => !a.prompt.includes('JSON'))).toHaveLength(briefs + 1)
   await pane.unmount()
 })
+
+test('a scenario no test case covers is in the Tests tab, and goes to Claude to get a case and a test', async ($, on) => {
+  const door = {
+    ...DOOR,
+    'specs/api/access/spec.md': '## ADDED Requirements\n\n### Requirement: Grant\n\n#### Scenario: By a manager\n\n#### Scenario: Expired\n',
+    'test-cases.md': '# Test Cases\n\n## TC-01: Grant\n\nCovers: Requirement: Grant / Scenario: By a manager\nAutomated: e2e/door.spec.ts\n',
+  }
+  const { spec, settle, submitted } = await project($, on, { door })
+  await spec()
+  await settle()
+  expect(await bandText($)).toMatch(/1 scenario untested/)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await pane.find({ key: 'tab-tests' })).toMatchObject({ props: { label: 'Tests (1)' } })
+  await pane.press({ key: 'tab-tests' })
+  expect(await pane.find({ type: 'Text', text: /^Scenarios with no test case \(1\):$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^api\/access · Grant \/ Expired$/ })).toBeDefined()
+  expect(await pane.find({ key: 'close-all' })).toMatchObject({ props: { label: 'close all without a test (1)' } })
+  await pane.press({ key: 'scenario-0' })
+  await pane.press({ key: 'send-picked' })
+  expect(submitted[0]!.text).toMatch(
+    /^Cover these scenarios of the OpenSpec change "door" \(\/proj\/openspec\/changes\/door\/test-cases\.md\), which no test case covers yet:\n- api\/access: Requirement: Grant \/ Scenario: Expired\n\nFor each, add a test case to test-cases\.md/,
+  )
+  expect(await pane.find({ type: 'Text', text: /^→ sent$/ })).toBeDefined()
+  expect(await pane.find({ key: 'close-all' })).toBeUndefined()
+  await pane.unmount()
+})

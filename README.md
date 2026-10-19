@@ -218,7 +218,9 @@ pressed by a key shows the key before its label (`g refresh`), and the last row 
    `p` sends the picked ones to the session, `c` every case without a test or a mark. Claude writes
    each test from the case's steps in that file, its id in the test's name and tags, runs it and
    makes it pass; automates a manual case where it can; marks an unmarked one first. A case sent
-   shows so until its test is there.
+   shows so until its test is there. Under the cases, the scenarios of the change's specs no case
+   covers, picked and sent the same way: Claude adds a case for each to `test-cases.md` in the form
+   the others have, then writes and runs its test. A scenario leaves the list once a case covers it.
 6. **Spec.** What `openspec validate --strict` says of the change, the test cases marked neither
    way, the other active changes in the
    same specs and the requirements both name, then every requirement the change adds, changes,
