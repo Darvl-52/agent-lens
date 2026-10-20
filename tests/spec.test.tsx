@@ -245,6 +245,7 @@ const project = async (
   const asked: ModelCompleteInput[] = []
   const opened: string[] = []
   const submitted: { text: string; asUser?: true; context?: readonly string[] }[] = []
+  let held: Promise<void> | undefined
   // Set: the session refuses the next prompt, for this reason.
   let refusal: string | undefined
   const toasts: string[] = []
@@ -313,7 +314,9 @@ const project = async (
     return <Box key="engine" />
   })
   on('command.register', () => ({ value: { command: 'spec' } }))
-  on('prompt.submit', ($, e) => {
+  on('prompt.submit', async ($, e) => {
+    // A prompt held in the queue while a turn runs.
+    await held
     if (refusal !== undefined) return { drop: refusal }
     submitted.push({ text: e.text, ...(e.origin?.kind === 'plugin' && e.origin.asUser ? { asUser: true as const } : {}), ...(e.context?.length ? { context: e.context } : {}) })
     return { text: e.text }
@@ -335,6 +338,7 @@ const project = async (
   on('agent.list', () => ({
     value: spawned.map((a, i) => ({ id: `critic-${i + 1}`, description: a.prompt.match(/change "(\w+)"/)?.[1] ? `Holes in ${a.prompt.match(/change "(\w+)"/)![1]}` : '', type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })),
   }))
+  on('session.receive', ($, e) => ({ text: e.text }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
@@ -351,7 +355,7 @@ const project = async (
   // A spawned agent's run ends with `answer`.
   const agentDone = (agentId: string, answer: string) =>
     $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { spawned, startTurn, agentDone, store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why) }
+  return { spawned, startTurn, agentDone, store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why), hold: (until: Promise<void> | undefined) => (held = until) }
 }
 
 // The text of a found element and everything under it.
@@ -1172,6 +1176,45 @@ test('the critic in auto mode: what it finds goes to Claude to close, three roun
   await turn()
   await settle()
   expect(spawned).toHaveLength(4)
+})
+
+test("the critic's report handed back to the main conversation is the Decide tab's, not read by Claude", async ($, on) => {
+  const { spec, settle, turn, spawned } = await project($, on, { door: DOOR })
+  await spec('critic auto')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(1)
+  const handBack = (from: string) =>
+    $.session.receive({ origin: { kind: 'peer' }, text: `Another Claude session sent a message:\n<agent-message from="${from}">\n[Subagent hand-back] Found one.\n</agent-message>` })
+  expect(await handBack('critic-1')).toMatchObject({ consumed: expect.any(String) })
+  expect(await handBack('worker-7')).toMatchObject({ text: expect.stringMatching(/worker-7/) })
+})
+
+test('a critic started while the holes before wait in the queue reads the next round, and its record stands', async ($, on) => {
+  const { spec, settle, submitted, put, turn, spawned, agentDone, hold } = await project($, on, { door: DOOR })
+  await spec('critic auto')
+  await turn()
+  await settle()
+  let release = () => {}
+  hold(new Promise<void>(resolve => (release = resolve)))
+  await agentDone('critic-1', '[{"hole": "No revoke task", "where": "tasks.md", "fix": "Add one"}]')
+  await settle()
+  // A turn ends while the prompt waits: the critic it starts is round 1's.
+  put('door', 'tasks.md', `${TASKS}- [ ] 1.3 Revoke access\n`)
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(2)
+  hold(undefined)
+  release()
+  await settle()
+  expect(submitted).toHaveLength(1)
+  await agentDone('critic-2', '[{"hole": "Hole 2", "where": "design.md", "fix": "Say it"}]')
+  await settle()
+  expect(submitted).toHaveLength(2)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  expect(await pane.find({ type: 'Text', text: /^→ sent to Claude to close · round 2 of 3$/ })).toBeDefined()
+  await pane.unmount()
 })
 
 test('the critic on a button: f looks for holes, h sends them; off, the tab says how to turn it on', async ($, on) => {

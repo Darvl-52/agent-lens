@@ -108,6 +108,8 @@ let criticDefault: CriticMode = 'off'
 // the change named here.
 let isMainTurn = false
 let holesWaiting: string | undefined
+// The critic agents this mod started, by id, as long as it runs.
+const critics = new Set<string>()
 
 const criticModeOf = (value: unknown): CriticMode | undefined => (value === 'off' || value === 'button' || value === 'auto' ? value : undefined)
 
@@ -835,6 +837,7 @@ async function critique($: EngineInterface, isAsked: boolean) {
   // A spawn a hook answered carries no id: the agent is found in the list, as this mod's run of the task.
   const agentId =
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
+  if (agentId) critics.add(agentId)
   // What the rounds before sent stays in view while they go on.
   const sent = was?.isSent ? (was.sent ?? []) : []
   await keepCritic($, lens.root, { change: lens.current, fingerprint, at, holes: [], round, status: agentId ? 'running' : 'failed', ...(agentId ? { agentId } : {}), ...(sent.length > 0 ? { sent } : {}) })
@@ -863,14 +866,19 @@ async function closeHoles($: EngineInterface, change: string) {
   const critic = (await read($, criticAtom))[change]
   if (!lens || !critic || critic.status !== 'done' || critic.holes.length === 0 || critic.isSent) return
   const w = await wordsIn($)
+  // Kept sent before the prompt goes: it waits in the queue while a turn runs, and a critic that
+  // turn's end starts reads the round from this, not has its own record written over after.
+  const round = critic.round + 1
+  await keepCritic($, lens.root, { ...critic, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes: critic.holes }] })
   const r = await $.prompt.submit({ text: w.closeHolesPrompt(change, join(lens.root, 'changes', change), critic.holes), asUser: true })
   if (r.drop !== undefined) {
+    // Taken back, unless a critic started since.
+    const now = (await read($, criticAtom))[change]
+    if (now?.isSent && now.round === round) await keepCritic($, lens.root, critic)
     await fail($, w.notSent(r.drop))
     return
   }
   await keepDecided($, { ...lens, current: change }, critic.holes.map(hole => ({ point: `${hole.text} (${hole.where})`, answer: hole.fix })))
-  const round = critic.round + 1
-  await keepCritic($, lens.root, { ...critic, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes: critic.holes }] })
   await $.ui.toast(w.holesToast(critic.holes.length))
 }
 
@@ -1036,6 +1044,15 @@ export function startSpecTurn() {
 export function endSpecTurn($: EngineInterface) {
   isMainTurn = false
   void afterTurn($).catch(() => {})
+}
+
+// What a critic hands back to the main conversation as its run ends: the Decide tab holds it, and
+// the holes go to Claude by the mod's own prompt, in auto mode or on h; read by Claude as well, they
+// would be closed twice and the button would hold nothing back. By the agent's id in the text.
+export async function isCriticReport($: EngineInterface, text: string) {
+  const listed = (await $.agent.list().catch(() => [])).filter(a => a.spawnedBy === 'agent-lens').map(a => a.id)
+  const running = Object.values(await read($, criticAtom)).flatMap(c => (c.agentId ? [c.agentId] : []))
+  return [...critics, ...listed, ...running].some(id => text.includes(id))
 }
 
 // A subagent's run ended: the critic's, its answer is read.

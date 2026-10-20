@@ -36,7 +36,7 @@ import {
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
 import { langCommand } from './switch'
-import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
+import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, isCriticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
 // Three parts in one module, each in its own folder, sharing the language: the review of what the
 // agent changed (with the check of each edit as it is made), the OpenSpec change in view, and the
@@ -98,6 +98,11 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) startSpecTurn()
     return turnStart($, e, next)
   })
+
+  // The spec critic's report is the Decide tab's, not a message for Claude.
+  on('session.receive', async ($, e, next) =>
+    e.agentId === undefined && e.origin.kind === 'peer' && (await isCriticReport($, e.text).catch(() => false)) ? { consumed: 'the spec critic report, on the Decide tab' } : next(e),
+  )
 
   on('turn.complete', async ($, e, next) => {
     endRouterTurn(e.agentId, e.answer)

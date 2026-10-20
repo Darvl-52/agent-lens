@@ -245,7 +245,9 @@ brief, say) waits its turn, and the pane says what comes next.
    after each turn that changed the change's text (a task ticked is not a change), and what it finds
    goes to Claude by itself, once the turn running has ended. Each round is told what was decided and
    sent before, so it does not report it again; after three rounds in a row it stops, and what the
-   last one changed is yours to look at. The next change to the text starts over.
+   last one changed is yours to look at. The next change to the text starts over. The report the
+   engine hands back to the session as the agent ends is kept from Claude: the holes reach it only
+   by that prompt, so none is closed twice.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
    the session as your prompt, `do` on a task sends that one: Claude reads the change, does the
    task alone, runs its check if it names one, and ticks it. A task sent is marked so until it is
