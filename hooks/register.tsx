@@ -66,6 +66,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
+      await restoreLang($).catch(() => {})
       await restartReview($).catch(() => {})
       await rescanSpec($).catch(() => {})
       await clearRouter($).catch(() => {})
@@ -99,7 +100,7 @@ export const register: Register = (on, options) => {
     const refusal = await checkBefore($, e).catch(() => undefined)
     if (refusal !== undefined) return { deny: refusal }
     const ran = await next(e)
-    if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) await afterSpecEdit($, e.file_path).catch(() => {})
+    if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) afterSpecEdit($, e.file_path)
     return checkAfter($, e, ran)
   }).catch(($, e, next) => next(e))
 

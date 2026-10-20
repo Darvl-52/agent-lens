@@ -242,7 +242,10 @@ const project = async (
   on('command.list', () => ({ value: [{ name: 'opsx:apply', description: 'Implement the tasks of an OpenSpec change.', source: 'user' as const }] }))
   on('session.root', () => ({ value: root }))
   on('fs.exists', ($, e) => ({ value: disk.has(at(e.path)) || isDir(e.path) }))
-  on('fs.list', ($, e) => {
+  // How long listing a folder takes, on the mocked clock.
+  let listDelay = 0
+  on('fs.list', async ($, e) => {
+    if (listDelay > 0) await clock.sleep(listDelay)
     const dir = at(e.path)
     if (gone.some(change => dir === `${openspec}/changes/${change}`)) return { deny: `ENOENT: no such file or directory, scandir '${e.path}'` }
     const names = new Map<string, 'file' | 'dir'>()
@@ -253,7 +256,11 @@ const project = async (
       }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: name === 'archive' ? 99 : 1, isLink: false })) }
   })
-  on('fs.read', ($, e) => ({ value: disk.get(at(e.path)) ?? '' }))
+  const reads: string[] = []
+  on('fs.read', ($, e) => {
+    reads.push(at(e.path))
+    return { value: disk.get(at(e.path)) ?? '' }
+  })
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
     store.set(e.key, e.value)
@@ -310,7 +317,7 @@ const project = async (
     await $.tool.call({ tool: 'Write', file_path: `/proj/openspec/changes/${change}/${file}`, content: text })
   }
   const turn = () => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why) }
+  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why) }
 }
 
 // The text of a found element and everything under it.
@@ -1018,4 +1025,25 @@ test('the row, the badges and the archive agree on what wants a look', async ($,
   expect(await pane.find({ type: 'Text', text: /Nothing is left for you to decide/ })).toBeUndefined()
   expect(await bandText($)).toMatch(/^◆ door · what to decide unknown · /)
   await pane.unmount()
+})
+
+test('an edit to the change is read beside the tool call, the test files as last read', async ($, on) => {
+  const { spec, settle, reads, turn, put, clock, setListDelay } = await project($, on, { door: DOOR })
+  await spec()
+  await settle()
+  const tests = () => reads.filter(p => p === '/proj/e2e/door.spec.ts').length
+  const was = tests()
+  put('door', 'tasks.md', TASKS.replace('- [ ] 1.2', '- [x] 1.2'))
+  // A slow disk: the tool call is back before the scan, and the row moves on once it ends.
+  setListDelay(100)
+  await $.tool.call({ tool: 'Write', file_path: '/proj/openspec/changes/door/tasks.md', content: TASKS.replace('- [ ] 1.2', '- [x] 1.2') })
+  expect(await bandText($)).toMatch(/tasks 1\/2/)
+  await clock.advance(5000)
+  setListDelay(0)
+  expect(await bandText($)).toMatch(/tasks 2\/2/)
+  expect(tests()).toBe(was)
+  // A turn's end reads them again.
+  await turn()
+  await settle()
+  expect(tests()).toBe(was + 1)
 })

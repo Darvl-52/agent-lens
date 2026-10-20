@@ -2,7 +2,6 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-c
 
 import type { Change, Decision, Pick, Setup, Skill } from '../../types/router'
 import type { PaneHook } from '../core/hooks'
-import { restoreLang } from '../core/lang'
 import { catalogNow, changesIn, isLoaded, KEPT_DECISIONS, lookAround, oneLine } from './catalog'
 import { drawPane } from './pane'
 import { SYSTEM, directiveOf, isTerse, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf } from './route'
@@ -72,7 +71,6 @@ export function configureRouter(options: PluginOptions) {
 }
 
 export async function startRouter($: EngineInterface) {
-  await restoreLang($)
   await refreshHeld($)
   await registerCommand($)
   void lookAround($).catch(() => undefined)
@@ -140,7 +138,6 @@ export async function clearRouter($: EngineInterface) {
   answer = ''
   $.ui.status(undefined)
   await forgetLoaded($)
-  await restoreLang($)
   await refreshHeld($)
   void lookAround($, true).catch(() => undefined)
 }

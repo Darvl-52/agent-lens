@@ -232,7 +232,13 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     if (probing) root = e.path.replace(/[\\/]probe$/, '')
     return { value: disk.has(posix(e.path)) }
   })
-  on('fs.read', ($, e) => ({ value: disk.get(posix(e.path)) ?? '' }))
+  // What was read, file by file; how often the language was.
+  const reads: string[] = []
+  let langReads = 0
+  on('fs.read', ($, e) => {
+    reads.push(posix(e.path))
+    return { value: disk.get(posix(e.path)) ?? '' }
+  })
   // The engine's walk for nested rules: each folder strictly inside `below`, down to the one `of`
   // is in, root first, and the names asked for that each holds.
   on('fs.ancestors', ($, e) => {
@@ -244,7 +250,10 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     const found = dirs.flatMap(dir => e.names.filter(name => disk.has(`${dir}/${name}`)).map(name => ({ dir, name, content: disk.get(`${dir}/${name}`)! })))
     return { value: found.map(f => ({ dir: native(f.dir), name: f.name, content: f.content, parts: [{ path: native(`${f.dir}/${f.name}`), content: f.content }] })) }
   })
-  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.get', ($, e) => {
+    if (e.key === 'lang') langReads++
+    return { value: store.get(e.key) }
+  })
   on('store.set', ($, e) => {
     store.set(e.key, e.value)
     return { value: undefined }
@@ -367,6 +376,8 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     setViolations: (v: string) => (violations = v),
     setDelay: (ms: number) => (delay = ms),
     clock,
+    reads,
+    langReads: () => langReads,
   }
 }
 
@@ -933,4 +944,49 @@ test('an edit where no rule applies, or to a rule file, is not checked; an AGENT
 test('/changes rules says how each edit is checked and which rule files apply here', async ($, on) => {
   const { review } = await project($, on, { ...RULES, 'src/app.ts': APP })
   expect((await review('rules')).text).toMatch(/^Rules while Claude edits: Claude is told what an edit breaks, checked by haiku\.\n\nThe rules here come from:\n {2}\S*CLAUDE\.md$/)
+})
+
+test('one diff is read for the model once: every call on it sends the same context', async ($, on) => {
+  const { asked, turn, review, runs, disk } = await project($, on, { 'src/app.ts': APP })
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  // A file edited by hand meanwhile does not change what the calls on this diff read.
+  disk.set('/proj/src/app.ts', `${DARK}// later\n`)
+  await pane.press({ key: 'tab-walkthrough' })
+  await pane.unmount()
+  const walk = asked.find(a => /Walk the developer/.test(a.prompt))
+  expect(walk?.promptBlocks?.slice(0, 2)).toEqual(asked[0]!.promptBlocks?.slice(0, 2))
+  expect(runs.filter(argv => argv.includes('ls-files') && argv.includes('--cached'))).toHaveLength(1)
+})
+
+test('a diff of many pieces is explained in parts, and a piece left unsaid is not asked again', async ($, on) => {
+  const block = (i: number, v: string) => `export const v${i} = ${v}\n${'// keep\n'.repeat(7)}`
+  const before = Array.from({ length: 90 }, (_, i) => block(i, '0')).join('')
+  const after = Array.from({ length: 90 }, (_, i) => block(i, '1')).join('')
+  const { asked, turn, review, settle } = await project($, on, { 'src/many.ts': before })
+  await turn('bump them all', { 'src/many.ts': after })
+  await review()
+  await settle()
+  const notes = () => asked.filter(a => /For each hunk/.test(a.prompt))
+  expect(notes()).toHaveLength(3)
+  expect(notes().map(a => (a.promptBlocks?.at(-1)?.text.match(/with the id (.+?), say in one/)?.[1] ?? '').split(', ').length)).toEqual([40, 40, 10])
+  await review()
+  await settle()
+  expect(notes()).toHaveLength(3)
+})
+
+test("a turn reads again only its own files for the session's changes, not every file the session touched", async ($, on) => {
+  const { turn, reads } = await project($, on, { 'src/app.ts': APP, 'src/theme.ts': APP })
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  const was = reads.filter(p => p === '/proj/src/app.ts').length
+  await turn('and a theme', { 'src/theme.ts': DARK })
+  expect(reads.filter(p => p === '/proj/src/app.ts').length).toBe(was)
+})
+
+test('the language is read once at the start, and once after a /clear', async ($, on) => {
+  const { langReads } = await project($, on, { 'src/app.ts': APP })
+  expect(langReads()).toBe(1)
+  await $.session.end({ reason: 'clear', sessionId: 'one', resume: { id: 'one' } })
+  expect(langReads()).toBe(2)
 })

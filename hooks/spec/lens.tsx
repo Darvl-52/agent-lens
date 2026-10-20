@@ -3,7 +3,7 @@ import type { EngineInterface, Hook, MatchedHook } from 'claude-code'
 
 import type { Brief, Busy, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
-import { langIn, restoreLang } from '../core/lang'
+import { langIn } from '../core/lang'
 import { sentWithSkill, specSkill } from '../router/catalog'
 import {
   annotateRequirements,
@@ -69,6 +69,13 @@ let files: Files = {}
 // resolves, so whoever waits on it gets what is on disk now.
 let scanning: Promise<void> | undefined
 let isScanStale = false
+// Whether a scan asked for meanwhile wants the test files read again, not only the change's.
+let isTestsStale = false
+// What the scans read that rarely changes between them: the test files the cases name, kept from
+// one full scan to the next (an edit to the spec does not touch them), and the last deltas, by the
+// version read and the version on disk.
+const testTexts = new Map<string, string | null>()
+let deltasHeld: { key: string; deltas: Lens['deltas'] } | undefined
 // The change and fingerprint `openspec validate` is running on, so a scan does not start it twice.
 let checking = ''
 // The pane's model calls run one at a time, so a question asked during the brief reads the change
@@ -169,8 +176,10 @@ async function check($: EngineInterface, lens: Lens) {
 }
 
 // Reads the project's OpenSpec changes from disk: the active ones, latest edited first, the one
-// in view (the one picked, else the latest) and its files.
-function scan($: EngineInterface): Promise<void> {
+// in view (the one picked, else the latest) and its files. `isEdit`: an edit to the change asked
+// for it, and the test files are taken as last read.
+function scan($: EngineInterface, isEdit = false): Promise<void> {
+  if (!isEdit) isTestsStale = true
   if (scanning) {
     isScanStale = true
     return scanning
@@ -178,7 +187,9 @@ function scan($: EngineInterface): Promise<void> {
   scanning = (async () => {
     do {
       isScanStale = false
-      await scanOnce($)
+      const isFresh = isTestsStale
+      isTestsStale = false
+      await scanOnce($, isFresh)
     } while (isScanStale)
   })().finally(() => {
     scanning = undefined
@@ -186,7 +197,8 @@ function scan($: EngineInterface): Promise<void> {
   return scanning
 }
 
-async function scanOnce($: EngineInterface) {
+async function scanOnce($: EngineInterface, isTestsFresh: boolean) {
+  if (isTestsFresh) testTexts.clear()
   const root = join(await $.session.root(), 'openspec')
   const dir = join(root, 'changes')
   const active: { name: string; at: number }[] = []
@@ -208,6 +220,7 @@ async function scanOnce($: EngineInterface) {
   const current = picked !== undefined && changes.includes(picked) ? picked : changes[0]!
   files = await readTree($, join(dir, current))
   const seen = (await $.store.get(seenKey(root, current)).catch(() => undefined)) as Files | undefined
+  const fingerprint = fingerprintOf(files)
   const deltas = Object.keys(files).flatMap(path => {
     const capability = capabilityOf(path)
     return capability === undefined ? [] : parseRequirements(capability, files[path]!)
@@ -230,9 +243,9 @@ async function scanOnce($: EngineInterface) {
     requirements,
     newCapabilities: Object.keys(mains).filter(c => mains[c] === null),
     overlaps: await overlapsOf($, dir, current, changes, requirements),
-    fingerprint: fingerprintOf(files),
+    fingerprint,
     isSeen: seen !== undefined,
-    deltas: seen ? deltasOf(seen, files) : [],
+    deltas: seen ? deltasHeldOf(seen, fingerprint) : [],
   }
   const lang = await langIn($)
   const brief = (await $.store.get(briefKey(root, lang, current)).catch(() => undefined)) as Brief | undefined
@@ -241,6 +254,14 @@ async function scanOnce($: EngineInterface) {
   await prunePicks($, lens)
   await forgetArchived($, root, changes)
   void check($, lens).catch(() => {})
+}
+
+// What changed since `seen`, by line: worked out once per pair of versions, as a scan on each edit
+// would otherwise diff every file again.
+function deltasHeldOf(seen: Files, fingerprint: string) {
+  const key = `${fingerprintOf(seen)}:${fingerprint}`
+  if (deltasHeld?.key !== key) deltasHeld = { key, deltas: deltasOf(seen, files) }
+  return deltasHeld.deltas
 }
 
 // Each test case and where it stands. Its test is looked for in the file its Automated line names,
@@ -253,7 +274,7 @@ async function testCasesOf($: EngineInterface, md: string): Promise<TestCase[]> 
   const folders = (await $.fs.list(project).catch(() => []))
     .filter(f => f.kind === 'dir' && !f.name.startsWith('.') && f.name !== 'node_modules')
     .map(f => f.name)
-  const texts = new Map<string, string | null>()
+  const texts = testTexts
   const out: TestCase[] = []
   for (const c of cases) {
     for (const file of c.files ?? []) {
@@ -785,8 +806,9 @@ async function pickChange($: EngineInterface, change: string) {
   await openPane($)
 }
 
-async function afterEdit($: EngineInterface, path: string) {
-  if (new RegExp(String.raw`[\\/]openspec[\\/]changes[\\/]`, isWindowsPath(path) ? 'i' : '').test(path)) await scan($)
+// An edit to the change is read beside the turn: the tool call does not wait on the scan.
+function afterEdit($: EngineInterface, path: string) {
+  if (new RegExp(String.raw`[\\/]openspec[\\/]changes[\\/]`, isWindowsPath(path) ? 'i' : '').test(path)) void scan($, true).catch(() => {})
 }
 
 // The colour of what is said: red is broken, yellow wants a look, green is done.
@@ -836,7 +858,6 @@ export async function forgetSaid($: EngineInterface) {
 }
 
 export async function startSpec($: EngineInterface, isInteractive: boolean) {
-  await restoreLang($)
   // A reload drops the calls the old code was making, while the session's values still show them.
   if (jobs === 0) {
     await update($, busyAtom, () => null)
@@ -850,7 +871,6 @@ export async function startSpec($: EngineInterface, isInteractive: boolean) {
 // is back before the first prompt. Heard as the old session's end, which runs where an
 // organization manages Claude Code (classic.SessionStart does not there).
 export async function rescanSpec($: EngineInterface) {
-  await restoreLang($)
   await scan($).catch(() => {})
 }
 
@@ -859,8 +879,8 @@ export function endSpecTurn($: EngineInterface) {
   void afterTurn($).catch(() => {})
 }
 
-export async function afterSpecEdit($: EngineInterface, path: string) {
-  await afterEdit($, path)
+export function afterSpecEdit($: EngineInterface, path: string) {
+  afterEdit($, path)
 }
 
 export async function command($: Parameters<MatchedHook<'command.run', { command: 'spec' }>>[0], e: Parameters<MatchedHook<'command.run', { command: 'spec' }>>[1]) {

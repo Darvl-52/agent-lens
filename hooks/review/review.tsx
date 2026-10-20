@@ -3,7 +3,7 @@ import type { EngineInterface, Hook, MatchedHook, ModelEffort, ModelUsage, Plugi
 
 import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode, ShellRun, Spent, Tab } from '../../types/review'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
-import { langIn, restoreLang } from '../core/lang'
+import { langIn } from '../core/lang'
 import { specInView } from '../spec/lens'
 import { below, canonical, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
@@ -66,6 +66,8 @@ const SMALL_LINES = 2
 // press of `show more`.
 const HUNK_LINES = 40
 const HUNK_STEP = 200
+// Hunks a call on the Changes tab says what each is for, at most: their lines fit its answer.
+const NOTES_PER_CALL = 40
 // How each kind of finding is drawn: a likely bug red, a broken rule yellow, a note blue.
 const SEVERITY = {
   bug: { icon: '✗', color: 'error' },
@@ -79,6 +81,8 @@ const GUTTER = 10
 const UNTRACKED_LIMIT = 40
 // Uncommitted files taken before a shell command, and found changed by it, at most, per repository.
 const SHELL_LIMIT = 100
+// What of them is taken before the shell, at most, in characters: a file, and all of them.
+const SHELL_TAKE = { file: 200_000, total: 1_000_000 }
 // What a review reads beside the diff, so it does not call a change unasked for or a step undone:
 // the session's earlier prompts, the turn's shell commands with the end of their output, and the
 // files of each repository changed. Each up to this many, cut to these lengths.
@@ -91,6 +95,9 @@ const REPO_FILES_LIMIT = 300
 const repos = new Map<string, string | null>()
 // A review asked for while one runs: made once that one is done.
 let reviewNext: Diff | undefined
+// The model's context for the last few diffs, by `blocksOf`'s key.
+const contexts = new Map<string, Promise<{ rules: string; context: string }>>()
+const CONTEXTS_KEPT = 4
 // What was uncommitted being taken before the turn's first shell command: the commands run side by
 // side wait on the one taking, so none is counted before it.
 let shellTaking: Promise<void> | undefined
@@ -342,15 +349,31 @@ async function spend($: EngineInterface, u: ModelUsage) {
   }))
 }
 
+// The rules and the context of a diff, built once per version of it and language: the files on
+// disk and the git listing are read once, and every call on the diff sends the same text, which the
+// prompt cache then holds.
+function blocksOf($: EngineInterface, diff: Diff, lang: string) {
+  const key = `${lang}:${diff.mode}:${diff.fingerprint}:${diff.request.length}`
+  let held = contexts.get(key)
+  if (!held) {
+    held = (async () => ({ rules: await rulesFor($, diff.files), context: await contextFor($, diff) }))()
+    contexts.set(key, held)
+    held.catch(() => contexts.delete(key))
+    if (contexts.size > CONTEXTS_KEPT) contexts.delete(contexts.keys().next().value!)
+  }
+  return held
+}
+
 // The rules, then the request, the files and the diff, then what is asked: the first two marked,
 // so the review, the explanations, the walkthrough and the answers on one diff read them from the
 // cache and only the ask is new.
 async function complete($: EngineInterface, diff: Diff, ask: string, maxTokens: number, effort: ModelEffort) {
   const w = await wordsIn($)
+  const { rules, context } = await blocksOf($, diff, await langIn($))
   const r = await $.model.complete({
     model: MODEL,
     system: w.system,
-    prompt: [{ text: await rulesFor($, diff.files), cache: true }, { text: await contextFor($, diff), cache: true }, { text: ask }],
+    prompt: [{ text: rules, cache: true }, { text: context, cache: true }, { text: ask }],
     maxTokens,
     effort,
     timeoutMs: TIMEOUT_MS,
@@ -410,11 +433,15 @@ async function explainHunks($: EngineInterface) {
   await withBusy($, 'notes', async () => {
     const w = await wordsIn($)
     // The whole diff is sent, as to the review, so it is read from the cache; the ask names the
-    // hunks still unsaid.
-    const text = await complete($, diff, w.notesPrompt(missing.length < ids.length ? missing : null), 3000, 'low')
-    if (text === undefined) return
-    const said = parseNotes(text, missing)
-    await update($, notesAtom, all => ({ ...all, ...said }))
+    // hunks still unsaid, so many at a time as one answer holds.
+    for (let at = 0; at < missing.length; at += NOTES_PER_CALL) {
+      const part = missing.slice(at, at + NOTES_PER_CALL)
+      const text = await complete($, diff, w.notesPrompt(part.length < ids.length ? part : null), 3000, 'low')
+      if (text === undefined) return
+      // A hunk the model said nothing of is left without a note, not asked again on every visit.
+      const said = parseNotes(text, part)
+      await update($, notesAtom, all => ({ ...all, ...Object.fromEntries(part.map(id => [id, ''])), ...said }))
+    }
   })
 }
 
@@ -576,8 +603,15 @@ async function afterTurn($: EngineInterface, taken: TurnTaken) {
   const earlier = (at >= 0 ? requests.slice(0, at) : requests).slice(-EARLIER.count).map(r => r.slice(0, EARLIER.chars))
   if (Object.keys(before).length === 0) return
   const files = await snapshotDiff($, before)
-  const session = await snapshotDiff($, await read($, beforeAtom))
-  await update($, changedAtom, () => session.flatMap(f => [f.path, f.shown]))
+  // The session's changed files, worked out again for the files this turn touched alone: the rest
+  // stand as the last turn left them.
+  const root = await $.session.root()
+  const all = await read($, beforeAtom)
+  const touched = Object.keys(before).map(path => keyIn(all, path))
+  const session = await snapshotDiff($, Object.fromEntries(touched.map(path => [path, all[path] ?? null])))
+  const again = new Set<string>()
+  for (const path of touched) again.add(path).add(whereIn(path, root, await repoOf($, path)).shown)
+  await update($, changedAtom, names => [...names.filter(n => !again.has(n)), ...session.flatMap(f => [f.path, f.shown])])
   if (files.length === 0) return
   const turn: Diff = { mode: 'turn', files, request, earlier, shell, fingerprint: fingerprintOf(files), at: await $.clock.now() }
   await update($, turnAtom, () => turn)
@@ -591,13 +625,16 @@ async function afterTurn($: EngineInterface, taken: TurnTaken) {
 const keyIn = (kept: Readonly<Record<string, unknown>>, path: string) => Object.keys(kept).find(k => samePath(k, path)) ?? canonical(path)
 
 // A file is kept by one key however the edit tools and git name it.
-async function remember($: EngineInterface, named: string) {
+// `room`: the most characters it is kept up to, else it is let be; resolves to what it took.
+async function remember($: EngineInterface, named: string, room = Infinity) {
   const path = keyIn(await read($, beforeAtom), named)
-  if (path in (await read($, turnBeforeAtom)) && path in (await read($, beforeAtom))) return
+  if (path in (await read($, turnBeforeAtom)) && path in (await read($, beforeAtom))) return 0
   const was = await readOrNull($, path)
+  if ((was?.length ?? 0) > room) return 0
   // Only the first taking of a file counts: an edit made since is not what it was.
   await update($, turnBeforeAtom, b => (path in b ? b : { ...b, [path]: was }))
   await update($, beforeAtom, b => (path in b ? b : { ...b, [path]: was }))
+  return was?.length ?? 0
 }
 
 // Every file uncommitted in `repo`, by path: modified, staged, deleted or untracked.
@@ -612,9 +649,11 @@ async function beforeShell($: EngineInterface) {
   if ((await read($, turnDirtyAtom)) !== null) return
   shellTaking ??= (async () => {
     const dirty: Record<string, string[]> = {}
+    // Each file goes into the session's values whole: so much of them, and none past a size.
+    let room = SHELL_TAKE.total
     for (const repo of await sessionRepos($)) {
       dirty[repo] = await uncommittedIn($, repo)
-      for (const path of dirty[repo].slice(0, SHELL_LIMIT)) await remember($, path)
+      for (const path of dirty[repo].slice(0, SHELL_LIMIT)) if (room > 0) room -= await remember($, path, Math.min(room, SHELL_TAKE.file))
     }
     await update($, turnDirtyAtom, d => d ?? dirty)
   })()
@@ -825,7 +864,6 @@ export async function startReview($: EngineInterface) {
   // A reload runs this again with nothing in flight: a review the old module was running when it
   // went would hold `busy` for good, and every review after it would wait on it.
   await update($, busyAtom, () => [])
-  await restoreLang($)
   await registerCommand($)
 }
 
@@ -840,7 +878,7 @@ export async function restartReview($: EngineInterface) {
   sentBack = false
   reviewNext = undefined
   shellTaking = undefined
-  await restoreLang($)
+  contexts.clear()
 }
 
 export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Parameters<Hook<'turn.start'>>[1], next: Parameters<Hook<'turn.start'>>[2]) {
