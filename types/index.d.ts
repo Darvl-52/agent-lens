@@ -7,8 +7,9 @@ export type Lang = 'en' | 'ru'
 export type ReviewLine = { kind: '+' | '-' | ' '; text: string }
 
 // A run of changed lines with the context around them, where it starts in the old and the new
-// file. `id` hashes the file and the lines, so it stays the same while they do.
-export type ReviewHunk = { id: string; oldStart: number; newStart: number; lines: ReviewLine[] }
+// file. `id` hashes the file and the lines, so it stays the same while they do. `cut`: how many of
+// its lines are left out at its end, past what a diff keeps.
+export type ReviewHunk = { id: string; oldStart: number; newStart: number; lines: ReviewLine[]; cut?: number }
 
 // Where a file is shown: the repository it is in, named from the project folder (`__front`, `''`
 // for the project's own), its path in it, and the two joined, which names it to the model.

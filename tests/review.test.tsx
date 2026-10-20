@@ -812,7 +812,19 @@ test('a turn that deletes a file of a hundred thousand lines is the last turn, i
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await pane.select({ key: 'mode', value: 'session' })
   expect((await pane.find({ type: 'Text', text: /left out/ }))?.text).toBe('98000 lines left out')
+  // Its one hunk is cut short: taken back from what is kept, it would be taken back in part.
+  const [, cut] = prompt.match(/=== src\/data\.ts ===\n\[hunk (\w+)\]/)!
+  await pane.press({ key: 'file-1' })
+  expect(await pane.find({ key: `seen-${cut}` })).toBeDefined()
+  expect(await pane.find({ key: `revert-${cut}` })).toBeUndefined()
   await pane.unmount()
+})
+
+test('a turn that rewrites a file of one very long line is the last turn, the line left out', async ($, on) => {
+  const line = (n: number) => `${JSON.stringify(Array.from({ length: 450_000 }, (_, i) => i + n))}\n`
+  const { turn } = await project($, on, { 'data/all.json': line(0), 'src/app.ts': APP })
+  await turn('renumber the data, dark mode', { 'data/all.json': line(1), 'src/app.ts': DARK })
+  expect(await bandText($)).toMatch(/^✎ 2 files \+4 −2/)
 })
 
 test('a file that grows past what can be read is left out, not taken for deleted', async ($, on) => {

@@ -51,7 +51,7 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
   const hits = ruleHits(text, setup.rules, skills)
   if (hits.length > 0) return fresh(hits).length > 0 ? { picks: fresh(hits) } : { picks: [] as Pick[], note: 'loaded' }
   if (!useModel || isTerse(text)) return { picks: [] as Pick[] }
-  if ((await $.clock.now()) < restUntil) return { picks: [] as Pick[], note: 'failed' }
+  if ((await $.clock.now()) < restUntil) return { picks: [] as Pick[], note: 'resting' }
 
   const changes = await changesIn($).catch(() => null)
   const prompt = promptOf(text, { skills, hints: setup.hints, loaded, changes, previous, answer })
@@ -111,9 +111,17 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
   }
   await addDecision($, decision, KEPT_DECISIONS)
   const words = await wordsIn($)
-  // A model that failed says so where the pick would be, so no pick is not read as nothing fitting.
+  // A model that failed says so where the pick would be, so no pick is not read as nothing fitting;
+  // one left to rest, when it is asked again.
+  const note = 'note' in routed ? routed.note : undefined
   $.ui.status(
-    routed.picks.length > 0 ? words.status(routed.picks.map(p => shortOf(p.skill)).join(', ')) : 'note' in routed && routed.note === 'failed' ? words.status(words.failed) : undefined,
+    routed.picks.length > 0
+      ? words.status(routed.picks.map(p => shortOf(p.skill)).join(', '))
+      : note === 'failed'
+        ? words.status(words.failed)
+        : note === 'resting'
+          ? words.status(words.resting(Math.ceil((restUntil - ms - startedAt) / 60_000)))
+          : undefined,
   )
   if (routed.picks.length === 0) return next(e)
 

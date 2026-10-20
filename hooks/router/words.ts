@@ -28,6 +28,7 @@ export type Words = {
   noSuchRule: (n: string) => string
   list: (lines: string[]) => string
   failed: string
+  resting: (minutes: number) => string
   opened: string
   langSet: string
   langUsage: string
@@ -101,6 +102,7 @@ export const WORDS: Record<Lang, Words> = {
     noSuchRule: n => `No rule ${n}.`,
     list: lines => (lines.length > 0 ? lines.join('\n') : 'No skills found.'),
     failed: 'model failed',
+    resting: minutes => `model failed, asked again in ${minutes} min`,
     leftOutByProject: 'left out by the project',
     fromSpec: 'sent from /spec',
     ignoredByProject: skill => `${skill} is left out by the project's .claude/skill-router.json: change it there.`,
@@ -118,6 +120,8 @@ export const WORDS: Record<Lang, Words> = {
         ? 'the prompt names a skill'
         : note === 'failed'
           ? 'the model failed'
+          : note === 'resting'
+            ? 'the model failed a while ago: it rests five minutes, not asked'
           : note === 'no skills'
             ? 'no skills installed'
             : note === 'loaded'
@@ -182,6 +186,7 @@ export const WORDS: Record<Lang, Words> = {
     noSuchRule: n => `Правила ${n} нет.`,
     list: lines => (lines.length > 0 ? lines.join('\n') : 'Скиллов не найдено.'),
     failed: 'ошибка модели',
+    resting: minutes => `ошибка модели, снова спросим через ${minutes} мин`,
     leftOutByProject: 'исключён проектом',
     fromSpec: 'отправлено из /spec',
     ignoredByProject: skill => `${skill} исключён проектом в .claude/skill-router.json: это меняется там.`,
@@ -199,6 +204,8 @@ export const WORDS: Record<Lang, Words> = {
         ? 'скилл назван в промпте'
         : note === 'failed'
           ? 'ошибка модели'
+          : note === 'resting'
+            ? 'модель недавно упала: пять минут её не спрашивают'
           : note === 'no skills'
             ? 'скиллов нет'
             : note === 'loaded'

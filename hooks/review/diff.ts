@@ -135,22 +135,36 @@ export const fileDiff = (path: string, where: Where, before: string | null, afte
 }
 
 // A diff is kept in the session's values, and a value has a size it is refused past: a file's hunks
-// are kept up to so many lines, the files of one diff up to so many in all, and the rest counted.
-const FILE_LINES = 2_000
-const DIFF_LINES = 20_000
+// are kept up to so many lines and characters, the files of one diff up to so many in all, and from
+// the first line past that on, the rest is counted, not kept.
+const FILE_ROOM = { lines: 2_000, chars: 400_000 }
+const DIFF_ROOM = { lines: 20_000, chars: 2_000_000 }
 
 export const capped = (files: readonly FileDiff[]): FileDiff[] => {
-  let room = DIFF_LINES
+  const diff = { ...DIFF_ROOM }
   return files.map(f => {
-    let left = Math.min(FILE_LINES, room)
+    const file = { ...FILE_ROOM }
+    let isFull = false
     let cut = 0
     const hunks: Hunk[] = []
     for (const h of f.hunks) {
-      if (left > 0) hunks.push(h.lines.length <= left ? h : { ...h, lines: h.lines.slice(0, left) })
-      cut += Math.max(0, h.lines.length - Math.max(0, left))
-      left -= h.lines.length
+      let kept = 0
+      for (const l of h.lines) {
+        const fits = !isFull && file.lines > 0 && diff.lines > 0 && l.text.length <= Math.min(file.chars, diff.chars)
+        if (!fits) {
+          isFull = true
+          break
+        }
+        kept++
+        file.lines--
+        diff.lines--
+        file.chars -= l.text.length
+        diff.chars -= l.text.length
+      }
+      cut += h.lines.length - kept
+      if (kept === h.lines.length) hunks.push(h)
+      else if (kept > 0) hunks.push({ ...h, lines: h.lines.slice(0, kept), cut: h.lines.length - kept })
     }
-    room -= f.hunks.reduce((n, h) => n + h.lines.length, 0) - cut
     return cut > 0 ? { ...f, hunks, cut } : f
   })
 }

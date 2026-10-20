@@ -111,15 +111,18 @@ let holesWaiting: string | undefined
 // The critic agents this mod started, by id, as long as it runs.
 const critics = new Set<string>()
 // A critic being started: its record is written once the spawn resolves, and a press or a turn's
-// end meanwhile would start another for the same text.
+// end meanwhile would start another for the same text. A press meanwhile is kept for after it, as
+// the start under way may be a turn's end that started none.
 let critiquing = false
-// What the pane's buttons sent and is on its way, by button: a prompt waits in the queue while a
-// turn runs, and the button is still there, so a press again is told so and sends nothing.
+let isAskedAgain = false
+// What the pane's buttons sent and is on its way, by button: until the prompt is in the queue the
+// button is still there, so a press again is told so and sends nothing.
 const pressing = new Set<string>()
 
 async function pressOnce($: EngineInterface, key: string, fn: () => Promise<unknown>) {
   if (pressing.has(key)) {
-    await $.ui.toast((await wordsIn($)).sentAlready)
+    const w = await wordsIn($)
+    await $.ui.toast(key === 'critic' ? w.criticStarting : w.sentAlready)
     return
   }
   pressing.add(key)
@@ -834,10 +837,17 @@ async function keepCritic($: EngineInterface, root: string, critic: Critic) {
 // went to Claude count up while Claude's turns close them; once CRITIC_ROUNDS went, what the last
 // changed is left to the person, and the next change to the text starts over.
 async function critique($: EngineInterface, isAsked: boolean) {
-  if (critiquing) return
+  if (critiquing) {
+    isAskedAgain ||= isAsked
+    return
+  }
   critiquing = true
   try {
     await startCritic($, isAsked)
+    while (isAskedAgain) {
+      isAskedAgain = false
+      await startCritic($, true)
+    }
   } finally {
     critiquing = false
   }
@@ -1463,7 +1473,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               <Text dimColor>{'━'.repeat(BAR - filled)}</Text>
             </Text>
             {isAllDone ? <Text color="success">{w.allDone}</Text> : <Text>{w.tasksDone(lens.tasks)}</Text>}
-            {next ? keyed('do-next', w.doNext(taskKey(next)), 'n', once(`task:${taskKey(next)}`, () => doTask($, next)), { variant: 'primary' }) : null}
+            {next ? keyed('do-next', w.doNext(taskKey(next)), 'n', once(`task:${lens.current}:${taskKey(next)}`, () => doTask($, next)), { variant: 'primary' }) : null}
           </Box>
           {/* Every task ticked: what is left is the archive, so it comes before the list. */}
           {ready.isOffered ? (
@@ -1515,10 +1525,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 {t.isDone ? null : isSent(t) ? (
                   <Box flexDirection="row" gap={1} flexShrink={0}>
                     <Text color="warning">{w.taskSent}</Text>
-                    <Button key={`again-${i}`} label={w.sendAgain} dimColor onPress={once(`task:${taskKey(t)}`, () => doTask($, t))} />
+                    <Button key={`again-${i}`} label={w.sendAgain} dimColor onPress={once(`task:${lens.current}:${taskKey(t)}`, () => doTask($, t))} />
                   </Box>
                 ) : (
-                  <Button key={`task-${i}`} label={w.doTask} dimColor onPress={once(`task:${taskKey(t)}`, () => doTask($, t))} />
+                  <Button key={`task-${i}`} label={w.doTask} dimColor onPress={once(`task:${lens.current}:${taskKey(t)}`, () => doTask($, t))} />
                 )}
               </Box>
             </Box>

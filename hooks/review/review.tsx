@@ -103,9 +103,7 @@ const REPO_FILES_LIMIT = 300
 // The repository each folder is in, by `git rev-parse`, each path in its one spelling (`canonical`);
 // null outside any.
 const repos = new Map<string, string | null>()
-// The repositories of their own in the project's top folders, by the project's folder: dev-env
-// keeps its clones so (`__front`), ignored by its own repository. So many folders looked in at most.
-const nestedAt = new Map<string, Promise<string[]>>()
+// So many of the project's top folders looked in for a repository of their own, at most.
 const NESTED_LIMIT = 40
 // A review asked for while one runs: made once that one is done.
 let reviewNext: Diff | undefined
@@ -211,19 +209,13 @@ async function sessionRepos($: EngineInterface) {
   return [...found]
 }
 
-// Every repository of its own in a top folder of the project, as the shell may edit one no tool did.
-function nestedRepos($: EngineInterface, root: string) {
-  const key = canonical(root)
-  if (!nestedAt.has(key))
-    nestedAt.set(
-      key,
-      (async () => {
-        const dirs = (await $.fs.list(root).catch(() => [])).filter(x => x.kind === 'dir' && !x.name.startsWith('.')).slice(0, NESTED_LIMIT)
-        const found = await Promise.all(dirs.map(async d => ((await $.fs.exists(joinPath(root, `${d.name}/.git`)).catch(() => false)) ? joinPath(root, d.name) : null)))
-        return found.filter((d): d is string => d !== null).map(canonical)
-      })(),
-    )
-  return nestedAt.get(key)!
+// Every repository of its own in a top folder of the project, as dev-env keeps its clones
+// (`__front`, ignored by its own repository): the shell may edit one no tool did. Looked for again
+// each turn, so a clone made since is found.
+async function nestedRepos($: EngineInterface, root: string) {
+  const dirs = (await $.fs.list(root).catch(() => [])).filter(x => x.kind === 'dir' && !x.name.startsWith('.')).slice(0, NESTED_LIMIT)
+  const found = await Promise.all(dirs.map(async d => ((await $.fs.exists(joinPath(root, `${d.name}/.git`)).catch(() => false)) ? joinPath(root, d.name) : null)))
+  return found.filter((d): d is string => d !== null).map(canonical)
 }
 
 // What is uncommitted in every repository the session edited a file in, and in the project's own:
@@ -601,7 +593,9 @@ async function fixAll($: EngineInterface, findings: readonly Finding[]) {
   await sendToClaude($, findings.map(f => f.id), w.fixAllPrompt(findings.map(f => ({ where: findingAt(f), text: f.text, rule: f.rule }))))
 }
 
+// A hunk cut short is not taken back: its patch would take back the part kept.
 async function revertHunk($: EngineInterface, f: FileDiff, hunk: Hunk) {
+  if (hunk.cut) return
   const w = await wordsIn($)
   await sendToClaude($, [hunk.id], w.revertPrompt(f.shown, hunkPatch(f, hunk)))
 }
@@ -1426,7 +1420,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                   />
                   {isSent ? (
                     <Text color="warning">{`→ ${w.sentToClaude}`}</Text>
-                  ) : (
+                  ) : hunk.cut ? null : (
                     <Button key={`revert-${hunk.id}`} label={w.revert} dimColor onPress={() => void revertHunk($, picked, hunk).catch(() => {})} />
                   )}
                 </Box>

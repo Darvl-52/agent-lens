@@ -25,7 +25,8 @@ One row, the change in view first, then what the agent's last turn changed:
 ```
 
 Each part opens its pane, on the tab that tells more of it. Where the row is too narrow for both,
-each has a row of its own. Red is broken, yellow wants a look, green is done.
+each has a row of its own. Red is broken, yellow wants a look, green is done. The rows go above
+those of the mods loaded after agent-lens, so a short band keeps them in view.
 
 ## How the parts work together
 
@@ -158,8 +159,17 @@ the cache. The foot of the pane says what the mod's own calls have cost this ses
 counted it: input tokens, those the cache served, output. Sending a finding or a piece to Claude
 is a turn of the session itself, on its own model.
 
-The diff of a turn is taken from the edit tools (Write, Edit, NotebookEdit): a file changed by a
-shell command (`sed -i`, a generator) is not in it. The uncommitted mode shows those.
+The diff of a turn is taken from the edit tools (Write, Edit, NotebookEdit) and from the shell: a
+file a command (`sed -i`, a generator) left uncommitted that was not before it is in the turn, from
+what it was before the turn, or from what is committed. That holds in the project's repository, in
+every repository a tool edited a file in, and in a repository of its own in a top folder of the
+project (dev-env's `__front`, `__bff`…); a file already uncommitted there before the command is
+not. The uncommitted mode shows every change in those repositories.
+
+A diff keeps 2,000 lines of a file and 20,000 in all (400k and 2M characters): a turn that deletes
+or rewrites a big file (a lockfile, a data file) shows the rest as `N lines left out` on the file's
+row, in yellow, and the review is told so; its counts are whole, and a piece cut short has no `take
+back`. A file over 4 MiB, which Claude Code does not read, is left out of the diff.
 
 ## The OpenSpec change
 
@@ -243,7 +253,8 @@ brief, say) waits its turn, and the pane says what comes next.
    `f` sends it to look; `h` sends what it found to the session as your prompt, and Claude closes
    each hole in the change's files, asking you where only you can decide. In `auto` it also looks
    after each turn that changed the change's text (a task ticked is not a change), and what it finds
-   goes to Claude by itself, once the turn running has ended. Each round is told what was decided and
+   goes to Claude by itself, once the turn running has ended with an answer: a turn you stop with
+Esc, or one an error ends, leaves them waiting and starts no critic. Each round is told what was decided and
    sent before, so it does not report it again; after three rounds in a row it stops, and what the
    last one changed is yours to look at. The next change to the text starts over. The report the
    engine hands back to the session as the agent ends is kept from Claude: the holes reach it only
@@ -312,7 +323,7 @@ and the list of skills, and picks the one that fits, or none. Claude is then tol
 - Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change. It reads at most the first 4,000 characters of a prompt and 400 of each skill's description.
 - A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, takes the last pick off the status line, and reads its mode and your rules again (off says so there).
 - A prompt that names a skill (`/tdd`, `mattpocock-skills:tdd`), a slash command, and prompts from other plugins or scheduled runs are left alone.
-- If the model fails or is slow (8 seconds), the prompt goes through as typed, and the status line says `skill: model failed`.
+- If the model fails or is slow (2.5 seconds), the prompt goes through as typed, and the status line says `skill: model failed`. The model is then not asked for five minutes, so the prompts after it are not kept waiting too; the status line says when it is asked again (`skill: model failed, asked again in 4 min`).
 
 ### Add your own
 

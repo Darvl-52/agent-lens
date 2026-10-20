@@ -204,11 +204,14 @@ test('a model that failed is left to rest five minutes, each prompt kept waiting
   expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(3_000)
   // Offline or overloaded, the next prompts go in at once, and the status line still says why no
   // skill is picked.
+  expect(r.status.at(-1)).toBe('skill: model failed')
   await r.send('Почему падает сборка на CI')
+  await r.clock.advance(60_000)
   await r.send('Добавь кнопку экспорта в отчёт')
   expect(r.asked).toHaveLength(1)
   expect(r.entered.map(x => x.context)).toEqual([[], [], []])
-  expect(r.status.at(-1)).toBe('skill: model failed')
+  // Not asked, and said so: when it is asked again.
+  expect(r.status.slice(-2)).toEqual(['skill: model failed, asked again in 5 min', 'skill: model failed, asked again in 4 min'])
   await r.clock.advance(5 * 60_000)
   await r.send('Сделай регистрацию через телефон')
   expect(r.asked).toHaveLength(2)

@@ -1153,7 +1153,7 @@ test('a button pressed again while its prompt waits for the turn under way goes 
   await settle()
   await pane.press({ key: 'decide-all' })
   await settle()
-  expect(toasts.at(-1)).toBe('Sent already: it goes to Claude once the turn under way ends.')
+  expect(toasts.at(-1)).toBe('Sent already: on its way to Claude.')
   hold(undefined)
   release()
   await settle()

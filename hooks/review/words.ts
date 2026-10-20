@@ -43,7 +43,7 @@ const EN = {
   failed: (why: string) => `The model gave no answer: ${why}.`,
   newFile: 'new',
   deletedFile: 'deleted',
-  leftOut: (n: number) => `${n} lines left out`,
+  leftOut: (n: number) => `${n} ${n === 1 ? 'line' : 'lines'} left out`,
   seen: 'looked at',
   markSeen: 'mark looked at',
   markFileSeen: 'mark this file looked at',
