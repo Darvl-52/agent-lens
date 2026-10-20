@@ -238,6 +238,7 @@ async function scanOnce($: EngineInterface) {
   const brief = (await $.store.get(briefKey(root, lang, current)).catch(() => undefined)) as Brief | undefined
   await update($, lensAtom, () => lens)
   await update($, briefAtom, () => brief ?? null)
+  await prunePicks($, lens)
   await forgetArchived($, root, changes)
   void check($, lens).catch(() => {})
 }
@@ -255,18 +256,22 @@ async function testCasesOf($: EngineInterface, md: string): Promise<TestCase[]> 
   const texts = new Map<string, string | null>()
   const out: TestCase[] = []
   for (const c of cases) {
-    if (c.file !== undefined && !texts.has(c.file)) {
+    for (const file of c.files ?? []) {
+      if (texts.has(file)) continue
       let text: string | null = null
-      for (const at of [join(project, c.file), ...folders.map(d => join(project, d, c.file!))])
+      for (const at of [join(project, file), ...folders.map(d => join(project, d, file))])
         if (await $.fs.exists(at).catch(() => false)) {
           text = ((await $.fs.read(at).catch(() => '')) as string) ?? ''
           break
         }
-      texts.set(c.file, text)
+      texts.set(file, text)
     }
-    const text = c.file === undefined ? null : (texts.get(c.file) ?? null)
-    const state: TestCase['state'] =
-      c.mark === 'manual' ? 'manual' : c.mark === 'none' && isMarked ? 'unmarked' : text !== null && hasCase(text, c.id) ? 'tested' : 'untested'
+    // Tested where any file its line names holds a test with its id.
+    const isTested = (c.files ?? []).some(file => {
+      const text = texts.get(file) ?? null
+      return text !== null && hasCase(text, c.id)
+    })
+    const state: TestCase['state'] = c.mark === 'manual' ? 'manual' : c.mark === 'none' && isMarked ? 'unmarked' : isTested ? 'tested' : 'untested'
     out.push({ ...c, state })
   }
   return out
@@ -602,6 +607,17 @@ const uncoveredOf = (lens: Lens) =>
     (r.uncovered ?? []).map(scenario => ({ id: `S:${r.capability}|${r.name}|${scenario}`, capability: r.capability, requirement: r.name, scenario })),
   )
 
+// What can be picked on the Tests tab: a case with no test yet, a scenario no case covers.
+const pickableOf = (lens: Lens) => new Set([...(lens.testCases ?? []).filter(c => c.state !== 'tested').map(c => c.id), ...uncoveredOf(lens).map(s => s.id)])
+
+// A pick whose case got its test, or whose scenario got a case, is no longer one.
+async function prunePicks($: EngineInterface, lens: Lens) {
+  const pickable = pickableOf(lens)
+  const at = `${lens.current}:`
+  const isKept = (k: string) => !k.startsWith(at) || pickable.has(k.slice(at.length))
+  if ((await read($, pickedCasesAtom)).some(k => !isKept(k))) await update($, pickedCasesAtom, picked => picked.filter(isKept))
+}
+
 async function togglePick($: EngineInterface, id: string) {
   const lens = await read($, lensAtom)
   if (!lens) return
@@ -649,7 +665,8 @@ async function readiness($: EngineInterface, lens: Lens) {
   if (errors > 0) blockers.push(w.blockErrors(errors))
   if (issues.some(i => i.level !== 'ERROR' && blocksArchive(i))) blockers.push(w.blockRefused)
   const brief = await read($, briefAtom)
-  if (brief && brief.fingerprint === lens.fingerprint) {
+  if (brief && brief.fingerprint === lens.fingerprint && brief.isUnsplit) blockers.push(w.blockDecideUnknown)
+  else if (brief && brief.fingerprint === lens.fingerprint) {
     const verdicts = (await decidingOf($, brief)).verdicts
     const undecided = brief.decisions.filter((_, i) => !verdicts[i]).length
     const toApply = Object.values(verdicts).filter(v => !v.isSent).length
@@ -659,11 +676,17 @@ async function readiness($: EngineInterface, lens: Lens) {
   if (lens.tests.unmarked.length > 0) blockers.push(w.blockUnmarked(lens.tests.unmarked))
   const untested = untestedIn(lens)
   if (untested > 0) blockers.push(w.blockUntested(untested))
+  const withoutTest = withoutTestIn(lens)
+  if (withoutTest > 0) blockers.push(w.blockWithoutTest(withoutTest))
+  const mismatches = mismatchesIn(lens)
+  if (mismatches > 0) blockers.push(w.blockMismatch(mismatches))
   const archive = await read($, archiveAtom)
   return { isOffered, blockers, isReady: isOffered && blockers.length === 0, archive: archive?.change === lens.current ? archive : null }
 }
 
 const untestedIn = (lens: Lens) => lens.requirements.reduce((n, r) => n + (r.uncovered?.length ?? 0), 0)
+const withoutTestIn = (lens: Lens) => (lens.testCases ?? []).filter(c => c.state === 'untested').length
+const mismatchesIn = (lens: Lens) => lens.requirements.filter(r => r.mismatch).length
 
 async function askArchive($: EngineInterface, isAsked: boolean) {
   const lens = await read($, lensAtom)
@@ -785,14 +808,17 @@ async function statusOf($: EngineInterface, lens: Lens) {
   const warnings = issues.filter(i => i.level === 'WARNING').length
   const overlapping = [...new Set(lens.overlaps.map(o => o.change))]
   const untested = untestedIn(lens)
+  const withoutTest = withoutTestIn(lens)
+  const mismatches = mismatchesIn(lens)
+  const isDecideUnknown = isFresh && brief.isUnsplit === true
   const ready = await readiness($, lens)
   const tone: Tone =
     lens.tests.unmarked.length > 0 || errors > 0
       ? 'error'
-      : decisions > 0 || toApply > 0 || warnings > 0 || untested > 0 || overlapping.length > 0 || lens.deltas.length > 0
+      : decisions > 0 || toApply > 0 || warnings > 0 || untested > 0 || withoutTest > 0 || mismatches > 0 || isDecideUnknown || overlapping.length > 0 || lens.deltas.length > 0
         ? 'warning'
         : 'success'
-  return { decisions, toApply, errors, warnings, overlapping, untested, isReady: ready.isReady && !ready.archive?.isSent, tone }
+  return { decisions, toApply, errors, warnings, overlapping, untested, withoutTest, mismatches, isDecideUnknown, isReady: ready.isReady && !ready.archive?.isSent, tone }
 }
 
 export async function registerCommand($: EngineInterface) {
@@ -865,12 +891,13 @@ export async function specLine($: EngineInterface, e: AbovePromptEvent, taken: n
   add(tests.unmarked.length > 0, 'unmarked', () => w.unmarked(tests.unmarked), 'tests', 'error')
   add(s.errors > 0, 'errors', () => w.specErrors(s.errors), 'spec', 'error')
   add(s.decisions > 0, 'decide', () => w.toDecide(s.decisions), 'decide', 'warning')
+  add(s.isDecideUnknown, 'decide-unknown', () => w.decideUnknown, 'decide', 'warning')
   add(s.toApply > 0, 'apply', () => w.toApply(s.toApply), 'decide', 'warning')
   add(lens.deltas.length > 0, 'changed', () => w.changed, 'changes', 'warning')
   add(s.warnings > 0, 'warnings', () => w.specWarnings(s.warnings), 'spec', 'warning')
   add(s.untested > 0, 'untested', () => w.untested(s.untested), 'tests', 'warning')
-  const withoutTest = (lens.testCases ?? []).filter(c => c.state === 'untested').length
-  add(withoutTest > 0, 'nocase', () => w.withoutTest(withoutTest), 'tests', 'warning')
+  add(s.withoutTest > 0, 'nocase', () => w.withoutTest(s.withoutTest), 'tests', 'warning')
+  add(s.mismatches > 0, 'mismatch', () => w.mismatches(s.mismatches), 'spec', 'warning')
   add(s.overlapping.length > 0, 'overlaps', () => w.overlapsWith(s.overlapping), 'spec', 'warning')
   add((await read($, busyAtom)) === 'brief', 'busy', () => w.makingBrief, 'brief', 'warning')
   add(s.isReady, 'ready', () => w.readyToArchive, 'tasks', 'success')
@@ -935,11 +962,12 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
 
   // What each tab holds that wants a look, coloured as the worst of it.
   const specRed = s.errors + lens.tests.unmarked.length
-  const specYellow = s.warnings + s.untested + s.overlapping.length
+  const specYellow = s.warnings + s.untested + s.mismatches + s.overlapping.length
   const badges: Record<Tab, { n: number; color?: Tone }> = {
     brief: { n: 0 },
     changes: { n: lens.deltas.length, color: 'warning' },
-    decide: { n: undecided, color: 'warning' },
+    // A brief older than the spec says nothing of what is left now.
+    decide: { n: isStale ? 0 : undecided, color: 'warning' },
     tasks: { n: tasksLeft },
     tests: { n: (lens.testCases ?? []).filter(c => c.state === 'untested' || c.state === 'unmarked').length + s.untested, color: lens.tests.unmarked.length > 0 ? 'error' : 'warning' },
     spec: specRed > 0 ? { n: specRed, color: 'error' } : { n: specYellow, color: 'warning' },
@@ -1028,6 +1056,11 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         {staleRow}
         {!brief ? (
           busy === 'brief' ? null : <Text dimColor>{w.noBrief}</Text>
+        ) : brief.isUnsplit && !isStale ? (
+          <Box flexDirection="row" gap={1}>
+            <Text color="warning">{`⚠ ${w.noDecideSection}`}</Text>
+            {remake({ variant: 'primary' })}
+          </Box>
         ) : decisions.length === 0 ? (
           <Text color="success">{`✓ ${w.nothingToDecide}`}</Text>
         ) : (
@@ -1186,7 +1219,11 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   } else if (tab === 'tests') {
     const cases = lens.testCases ?? []
     const sent = await read($, sentCasesAtom)
-    const picked = (await read($, pickedCasesAtom)).filter(k => k.startsWith(`${lens.current}:`)).map(k => k.slice(lens.current.length + 1))
+    const pickable = pickableOf(lens)
+    const picked = (await read($, pickedCasesAtom))
+      .filter(k => k.startsWith(`${lens.current}:`))
+      .map(k => k.slice(lens.current.length + 1))
+      .filter(id => pickable.has(id))
     const isSent = (c: TestCase) => c.state !== 'tested' && sent.includes(caseKey(lens, c.id))
     const scenarios = uncoveredOf(lens)
     const isScenarioSent = (id: string) => sent.includes(caseKey(lens, id))

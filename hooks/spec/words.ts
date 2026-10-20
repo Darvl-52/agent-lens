@@ -30,6 +30,9 @@ const EN = {
   readyToArchive: 'ready to archive',
   untested: (n: number) => `${n} ${n === 1 ? 'scenario' : 'scenarios'} untested`,
   withoutTest: (n: number) => `${n} ${n === 1 ? 'case' : 'cases'} without a test`,
+  mismatches: (n: number) => `${n} not matching the main spec`,
+  decideUnknown: 'what to decide unknown',
+  noDecideSection: 'The brief came without its "Up to you" section, so what is left to decide is not known. Make it again.',
   makingBrief: 'making the brief…',
   more: (n: number) => `+${n} more`,
   // The pane.
@@ -130,7 +133,10 @@ const EN = {
   blockApply: (n: number) => `${n} ${n === 1 ? 'decision' : 'decisions'} not yet in the spec`,
   blockUnmarked: (ids: string[]) => `test cases not marked: ${ids.join(', ')}`,
   blockChecking: 'the check is still running',
-  blockUntested: (n: number) => `${n} ${n === 1 ? 'scenario has' : 'scenarios have'} no test case (see Spec)`,
+  blockUntested: (n: number) => `${n} ${n === 1 ? 'scenario has' : 'scenarios have'} no test case (see Tests)`,
+  blockWithoutTest: (n: number) => `${n} test ${n === 1 ? 'case has' : 'cases have'} no test yet (see Tests)`,
+  blockMismatch: (n: number) => `${n} ${n === 1 ? 'requirement does' : 'requirements do'} not match the main spec (see Spec)`,
+  blockDecideUnknown: 'the brief does not say what is left to decide: make it again',
   blockBrief: 'the brief is older than the spec: what is left to decide is not known yet',
   archive: 'archive',
   archiveConfirm: 'yes, archive it',
@@ -176,8 +182,8 @@ No more than 350 words.`,
   noCaseYet: 'no test case',
   coverPrompt: (change: string, file: string, scenarios: readonly { capability: string; requirement: string; scenario: string }[], isAlone: boolean) =>
     `${isAlone ? `Cover these scenarios of the OpenSpec change "${change}" (${file}), which no test case covers yet:` : 'Then cover these scenarios of its specs, which no test case covers yet:'}\n${scenarios.map(s => `- ${s.capability}: Requirement: ${s.requirement} / Scenario: ${s.scenario}`).join('\n')}\n\nFor each, add a test case to test-cases.md in the form the others there have (the next TC id, a Covers line naming its requirement and scenario, its steps, an Automated or Manual line)${isAlone ? ', then, where it is Automated, write the test its steps describe in the file it names, its id in the test\'s name and tags as the other tests there have them, run it and make it pass. Touch nothing the scenarios do not need, and end by saying which are covered and which are not.' : ', then close it as the cases above.'}`,
-  closePrompt: (change: string, file: string, cases: readonly { id: string; title: string; mark: TestCase['mark']; file?: string }[]) =>
-    `Close these test cases of the OpenSpec change "${change}" (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.file ?? 'the file its line names'})` : c.mark === 'manual' ? ' (Manual)' : ' (no mark yet)'}`).join('\n')}\n\nRead each case whole, its steps and what it covers, and the change's specs. For a case marked Automated, write the test its steps describe in the file its Automated line names, its id in the test's name and tags as the other tests there have them, run it and make it pass; where it fails on a bug the spec rules out, fix the code, and where the spec itself is in doubt, ask me. For a case marked Manual, automate it where that can be done, and mark it Automated; where it cannot, say why. For a case with no mark, decide which it is first and write the mark into test-cases.md. Touch nothing the cases do not need, and end by saying which cases are closed and which are not.`,
+  closePrompt: (change: string, file: string, cases: readonly { id: string; title: string; mark: TestCase['mark']; files?: string[] }[]) =>
+    `Close these test cases of the OpenSpec change "${change}" (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.files?.join(', ') ?? 'the file its line names'})` : c.mark === 'manual' ? ' (Manual)' : ' (no mark yet)'}`).join('\n')}\n\nRead each case whole, its steps and what it covers, and the change's specs. For a case marked Automated, write the test its steps describe in the file its Automated line names, its id in the test's name and tags as the other tests there have them, run it and make it pass; where it fails on a bug the spec rules out, fix the code, and where the spec itself is in doubt, ask me. For a case marked Manual, automate it where that can be done, and mark it Automated; where it cannot, say why. For a case with no mark, decide which it is first and write the mark into test-cases.md. Touch nothing the cases do not need, and end by saying which cases are closed and which are not.`,
   // Sent to the session as the person's own prompt: Claude edits the change's files.
   decideAllPrompt: (change: string, dir: string, points: readonly string[]) =>
     `Decide these open points of the OpenSpec change "${change}" (${dir}) yourself:\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nFirst read proposal.md, design.md, tasks.md and the change's specs, and the project's code where a point turns on it. For each point take the answer the change and the code argue for best, write it where it belongs (proposal.md, design.md, the specs, tasks.md) with its reason in a sentence, and take it out of the open questions and assumptions. Where a point cannot be settled without me (a product choice, a cost, something no file says), leave it open and ask me about it at the end. Touch nothing else, and end with a line per point: what you decided, or what you need from me.`,
@@ -208,6 +214,9 @@ const RU: typeof EN = {
   readyToArchive: 'готово к архиву',
   untested: n => `${n} ${plural(n, 'сценарий', 'сценария', 'сценариев')} без тест-кейса`,
   withoutTest: n => `${n} ${plural(n, 'кейс', 'кейса', 'кейсов')} без автотеста`,
+  mismatches: n => `${n} не ${plural(n, 'сходится', 'сходятся', 'сходятся')} с основной спекой`,
+  decideUnknown: 'неясно, что решить',
+  noDecideSection: 'В выжимке нет раздела «Решить тебе», поэтому неясно, что осталось решить. Сделай её заново.',
   makingBrief: 'готовлю выжимку…',
   more: n => `ещё ${n}`,
   tabs: { brief: 'Выжимка', changes: 'Изменения', decide: 'Решить', tasks: 'Задачи', tests: 'Тесты', spec: 'Спека', ask: 'Спросить' },
@@ -305,7 +314,10 @@ const RU: typeof EN = {
   blockApply: n => `${n} ${plural(n, 'решение', 'решения', 'решений')} не в спеке`,
   blockUnmarked: ids => `тест-кейсы без пометки: ${ids.join(', ')}`,
   blockChecking: 'проверка ещё идёт',
-  blockUntested: n => `${n} ${plural(n, 'сценарий', 'сценария', 'сценариев')} без тест-кейса (см. «Спека»)`,
+  blockUntested: n => `${n} ${plural(n, 'сценарий', 'сценария', 'сценариев')} без тест-кейса (см. «Тесты»)`,
+  blockWithoutTest: n => `${n} ${plural(n, 'тест-кейс', 'тест-кейса', 'тест-кейсов')} без автотеста (см. «Тесты»)`,
+  blockMismatch: n => `${n} ${plural(n, 'требование не сходится', 'требования не сходятся', 'требований не сходятся')} с основной спекой (см. «Спека»)`,
+  blockDecideUnknown: 'выжимка не говорит, что осталось решить: сделай её заново',
   blockBrief: 'выжимка старше спеки: что осталось решить, пока неизвестно',
   archive: 'в архив',
   archiveConfirm: 'да, в архив',
@@ -350,7 +362,7 @@ const RU: typeof EN = {
   coverPrompt: (change, file, scenarios, isAlone) =>
     `${isAlone ? `Покрой тест-кейсами эти сценарии изменения OpenSpec «${change}» (${file}), у которых тест-кейса ещё нет:` : 'Потом покрой эти сценарии его спек, у которых тест-кейса ещё нет:'}\n${scenarios.map(s => `- ${s.capability}: Requirement: ${s.requirement} / Scenario: ${s.scenario}`).join('\n')}\n\nДля каждого добавь в test-cases.md тест-кейс в том же виде, что у остальных там (следующий id TC, строка Covers с его требованием и сценарием, шаги, строка Automated или Manual)${isAlone ? ', затем, если он Automated, напиши тест по его шагам в файле из этой строки, с id кейса в названии и тегах, как у остальных тестов там, прогони его и добейся зелёного. Не трогай ничего, что сценариям не нужно, и в конце скажи, какие покрыты, а какие нет.' : ', а затем закрой его, как кейсы выше.'}`,
   closePrompt: (change, file, cases) =>
-    `Закрой эти тест-кейсы изменения OpenSpec «${change}» (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.file ?? 'файл из его строки'})` : c.mark === 'manual' ? ' (Manual)' : ' (без пометки)'}`).join('\n')}\n\nПрочитай каждый кейс целиком, его шаги и что он покрывает, и specs изменения. Для кейса с Automated напиши тест по его шагам в файле из строки Automated, с id кейса в названии и тегах теста, как у остальных тестов там, прогони его и добейся зелёного; если он падает на ошибке, которую спека исключает, поправь код, а если под вопросом сама спека, спроси меня. Кейс с Manual автоматизируй, если это возможно, и поменяй пометку на Automated; если нельзя, объясни почему. Для кейса без пометки сначала реши, какой он, и впиши пометку в test-cases.md. Не трогай ничего, что кейсам не нужно, и в конце скажи, какие кейсы закрыты, а какие нет.`,
+    `Закрой эти тест-кейсы изменения OpenSpec «${change}» (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.files?.join(', ') ?? 'файл из его строки'})` : c.mark === 'manual' ? ' (Manual)' : ' (без пометки)'}`).join('\n')}\n\nПрочитай каждый кейс целиком, его шаги и что он покрывает, и specs изменения. Для кейса с Automated напиши тест по его шагам в файле из строки Automated, с id кейса в названии и тегах теста, как у остальных тестов там, прогони его и добейся зелёного; если он падает на ошибке, которую спека исключает, поправь код, а если под вопросом сама спека, спроси меня. Кейс с Manual автоматизируй, если это возможно, и поменяй пометку на Automated; если нельзя, объясни почему. Для кейса без пометки сначала реши, какой он, и впиши пометку в test-cases.md. Не трогай ничего, что кейсам не нужно, и в конце скажи, какие кейсы закрыты, а какие нет.`,
   decideAllPrompt: (change, dir, points) =>
     `Реши сам эти открытые пункты изменения OpenSpec «${change}» (${dir}):\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nСначала прочитай proposal.md, design.md, tasks.md и specs изменения, а где пункт упирается в код проекта, и код. Для каждого пункта выбери ответ, за который больше говорят изменение и код, впиши его туда, где ему место (proposal.md, design.md, specs, tasks.md), с причиной в одном предложении, и убери пункт из открытых вопросов и допущений. Если пункт без меня не решить (продуктовый выбор, деньги, то, чего нет ни в одном файле), оставь его открытым и спроси меня о нём в конце. Больше ничего не трогай и в конце напиши по строке на пункт: что решил или что тебе нужно от меня.`,
   applyPrompt: (change, dir, items) =>

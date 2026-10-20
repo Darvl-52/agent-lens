@@ -81,14 +81,14 @@ export type SpecTask = { id: string | null; text: string; isDone: boolean; secti
 // and, where the file marks its cases at all, the ids of those that say neither.
 export type SpecTests = { cases: number; automated: number; manual: number; unmarked: string[] }
 
-// One case of `test-cases.md`: its id and title, how it says it is checked, the test file its
-// `Automated:` line names, and where it stands: a test with its id is in that file, none is, it is
-// checked by hand, or it says neither where the others say.
+// One case of `test-cases.md`: its id and title, how it says it is checked, the test files its
+// `Automated:` line names, and where it stands: a test with its id is in one of those files, none
+// is, it is checked by hand, or it says neither where the others say.
 export type SpecTestCase = {
   id: string
   title: string
   mark: 'automated' | 'manual' | 'none'
-  file?: string
+  files?: string[]
   state: 'tested' | 'untested' | 'manual' | 'unmarked'
 }
 
@@ -147,7 +147,8 @@ export type SpecLens = {
 
 // The model's brief of a change, kept per change in the store; `options`, once asked for, the
 // ways the model offers to settle each decision, in their order.
-export type SpecBrief = { fingerprint: string; summary: string; decisions: string[]; at: number; options?: string[][] }
+// `isUnsplit` where the model left out the section of what is left to decide: that is not known.
+export type SpecBrief = { fingerprint: string; summary: string; decisions: string[]; at: number; options?: string[][]; isUnsplit?: true }
 
 // What the person settled of one decision, and whether it went to Claude to write into the spec;
 // `isByClaude` where the person left it for Claude to decide.

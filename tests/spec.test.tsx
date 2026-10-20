@@ -14,6 +14,7 @@ import {
   parseRequirements,
   parseTaskList,
   parseTasks,
+  parseTestCases,
   parseTests,
   requirementNames,
   splitBrief,
@@ -146,6 +147,29 @@ test('the brief gives up its last section as the list of what is left to decide'
   expect(ru.toDecide(1)).toBe('1 вопрос решить')
   expect(ru.toDecide(3)).toBe('3 вопроса решить')
   expect(ru.toDecide(5)).toBe('5 вопросов решить')
+})
+
+test('test cases are read however the project marks them: bold, listed, a dot after the id, several files', () => {
+  const md =
+    '# Test Cases\n\n## TC-01. Grant\n\n- **Automated:** e2e/door.spec.ts, e2e\\api\\door.spec.ts\n\n' +
+    '### TC-02 — Revoke\n\n**Manual**: needs a real lock\n\n## TC-03: Expiry\n\nSteps only.\n'
+  expect(parseTestCases(md)).toEqual([
+    { id: 'TC-01', title: 'Grant', mark: 'automated', files: ['e2e/door.spec.ts', 'e2e/api/door.spec.ts'] },
+    { id: 'TC-02', title: 'Revoke', mark: 'manual' },
+    { id: 'TC-03', title: 'Expiry', mark: 'none' },
+  ])
+  expect(parseTests(md)).toEqual({ cases: 3, automated: 1, manual: 1, unmarked: ['TC-03'] })
+  // A tag, an abbreviation and an id with a part are no files.
+  expect(parseTestCases('## TC-1.2: a\n\nAutomated: e2e/door.spec.ts, tag `@door:TC-1.2`, i.e. the smoke run\n')).toEqual([
+    { id: 'TC-1.2', title: 'a', mark: 'automated', files: ['e2e/door.spec.ts'] },
+  ])
+})
+
+test('the list of what is left to decide is found under its heading however the model writes it, and missed when it is not there', () => {
+  const en = WORDS.en
+  for (const heading of ['### Up to you:', '## **Up to you**', '## up to you'])
+    expect(splitBrief(`## Gist\nA.\n${heading}\n- Pick the expiry\n`, en.decideHeading, en.none)).toEqual({ summary: '## Gist\nA.', decisions: ['Pick the expiry'] })
+  expect(splitBrief('## Gist\nA.\n## Risks\nNone.\n', en.decideHeading, en.none)).toEqual({ summary: '## Gist\nA.\n## Risks\nNone.', decisions: [], isUnsplit: true })
 })
 
 test('the options the model offers are read from its JSON, fenced or not', () => {
@@ -527,7 +551,7 @@ test('openspec validate, the requirements, and other changes in the same specs',
   await turn()
   await settle()
   expect(ran[0]).toEqual({ argv: ['openspec', 'validate', 'door', '--strict', '--json', '--no-interactive'], cwd: '/proj' })
-  expect(await bandText($)).toBe('◆ door · 1 spec error · 1 scenario untested · overlaps revoke · tasks 1/2 · tests 1 auto, 1 manual')
+  expect(await bandText($)).toBe('◆ door · 1 spec error · 1 scenario untested · 1 not matching the main spec · overlaps revoke · tasks 1/2 · tests 1 auto, 1 manual')
   await spec()
   await settle()
   // Checked once per version of the change, not on every scan.
@@ -919,5 +943,60 @@ test('model calls asked for while one runs wait their turn, each shown, and none
   // The brief's failure stays offered: the answers after it do not put it away.
   expect(await pane.find({ type: 'Text', text: /^✗ The model gave no answer/ })).toBeDefined()
   expect(await pane.find({ key: 'retry' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a picked case that got its test, or scenario that got a case, is no longer picked', async ($, on) => {
+  const cases = '# Test Cases\n\n## TC-01: Grant\n\nAutomated: e2e/door.spec.ts\n\n## TC-02: Revoke\n\nAutomated: e2e/door.spec.ts\n'
+  const { spec, settle, putAt, turn } = await project($, on, { door: { ...DOOR, 'test-cases.md': cases } })
+  await spec()
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-tests' })
+  await pane.press({ key: 'case-1' })
+  expect(await pane.find({ key: 'send-picked' })).toMatchObject({ props: { label: 'send picked (1)' } })
+  // Claude wrote its test meanwhile.
+  putAt('/proj/e2e/door.spec.ts', "test('TC-01 grant', async () => {})\ntest('TC-02 revoke', async () => {})\n")
+  await turn()
+  await settle()
+  expect(await pane.find({ key: 'send-picked' })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('the row, the badges and the archive agree on what wants a look', async ($, on) => {
+  const done = { ...DOOR, 'tasks.md': TASKS.replace('- [ ] 1.2', '- [x] 1.2'), 'test-cases.md': `${TESTS}\n## TC-03: Expiry\n\nAutomated: e2e/expiry.spec.ts\n` }
+  const { spec, settle, setReply, put, turn } = await project($, on, { door: done }, report([]))
+  setReply(() => '## Gist\nManagers grant door access.\n## Up to you\nNothing.\n')
+  await spec()
+  await settle()
+  // A case without its test: yellow, and it stands between the change and the archive.
+  expect(await bandText($)).toBe('◆ door · 1 case without a test · tasks 2/2 · tests 2 auto, 1 manual')
+  const band = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND })
+  expect(JSON.stringify(await band.find({ key: 'row-change' }))).toMatch(/"color":"warning"/)
+  await band.unmount()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-tasks' })
+  expect(await pane.find({ type: 'Text', text: /^  · 1 test case has no test yet \(see Tests\)$/ })).toBeDefined()
+  expect(await pane.find({ key: 'archive' })).toBeUndefined()
+
+  // A brief older than the spec counts nothing on the Decide tab.
+  setReply(() => BRIEF_EN)
+  await pane.press({ key: 'tab-brief' })
+  await pane.press({ key: 'refresh' })
+  await settle()
+  expect(await pane.find({ key: 'tab-decide' })).toMatchObject({ props: { label: 'Decide (2)' } })
+  put('door', 'design.md', '# Design\n\nThe grant is a row in door_access.\nIt expires at midnight.\n')
+  await turn()
+  await settle()
+  expect(await pane.find({ key: 'tab-decide' })).toMatchObject({ props: { label: 'Decide' } })
+
+  // A brief without its list of what is left: not known, not "nothing".
+  setReply(() => '## Gist\nManagers grant door access.\n')
+  await pane.press({ key: 'refresh' })
+  await settle()
+  await pane.press({ key: 'tab-decide' })
+  expect(await pane.find({ type: 'Text', text: /^⚠ The brief came without its "Up to you" section/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Nothing is left for you to decide/ })).toBeUndefined()
+  expect(await bandText($)).toMatch(/^◆ door · what to decide unknown · /)
   await pane.unmount()
 })

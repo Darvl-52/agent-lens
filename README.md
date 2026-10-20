@@ -163,24 +163,32 @@ picked, else the latest edited): first what wants a look, red before yellow, the
 
 - `tasks 7/12` the ticked boxes of `tasks.md`, followed as agents tick them; green once all are.
 - `tests 9 auto, 2 manual` the test cases of `test-cases.md` by their `Automated:` and `Manual:`
-  lines; `13 test cases` where the file marks none of them.
+  lines (bold or in a list item too, `- **Automated:** e2e/a.spec.ts, e2e/b.spec.ts`); `13 test
+  cases` where the file marks none of them. A case is any heading that starts with its id:
+  `## TC-01: Title`, `### TC-02. Title`.
 - `TC-07 unmarked`, in red, a case that says neither, where the file marks the others.
-- `2 cases without a test`, in yellow, cases marked `Automated:` whose file holds no test with their id.
-- `2 to decide`, in yellow, what the brief found left for a person to decide.
+- `2 cases without a test`, in yellow, cases marked `Automated:` none of whose files holds a test
+  with their id.
+- `2 to decide`, in yellow, what the brief found left for a person to decide; `what to decide
+  unknown`, in yellow, where the brief came without that list (`g` on Decide makes it again).
 - `1 not in the spec`, in yellow, a decision you made in the pane and have not sent to Claude yet.
 - `1 spec error`, in red, `2 warnings`, in yellow: what `openspec validate --strict` found, run
   on the change each time its text changes (where the `openspec` CLI is installed).
 - `3 scenarios untested`, in yellow, scenarios of the change's specs that no test case names on
   its `Covers:` line (`Covers: Requirement: X / Scenario: A; Scenario: B`; a requirement named
   alone counts whole). Where no case has such a line, nothing is counted.
+- `1 not matching the main spec`, in yellow, a requirement the change adds that the main spec
+  already has, or changes that it does not have: `openspec archive` refuses those.
 - `overlaps door-access-page`, in yellow, another active change whose specs touch the same
   capability: the two will collide when the second is archived.
 - `spec changed`, in yellow, the change was edited since you last read it. Ticking tasks off is
   progress, not a change, and does not count.
 - `ready to archive`, in green: every task ticked, the check clean, nothing left to decide, every
-  test case marked, every scenario covered.
+  test case marked and with its test, every scenario covered, every requirement matching the main
+  spec.
 
-The `◆` is red while a case is unmarked or the spec has errors, yellow while something waits for you, green otherwise.
+The `◆` is red while a case is unmarked or the spec has errors, yellow while any part above waits
+for you, green otherwise.
 `making the brief…`, in yellow, while the model reads the change.
 
 Each part opens the pane on the tab that tells more of it: `2 to decide` on Decide, `spec changed`

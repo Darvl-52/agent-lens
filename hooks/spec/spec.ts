@@ -156,37 +156,49 @@ export const parseIssues = (stdout: string): Issue[] | undefined => {
 // A finding that says `openspec archive` would refuse the change, whatever its level.
 export const blocksArchive = (issue: Issue) => issue.level === 'ERROR' || /archive would refuse/i.test(issue.message)
 
-// Each `## TC-01: …` case may say how it is checked on a line of its own, `Automated: <spec>` or
-// `Manual: <why>`. Where some cases do, one that says neither is unmarked; where none does, the
-// project keeps no such marks (cases checked by hand, say) and nothing is unmarked.
-export const parseTests = (md: string): Tests => {
-  const tests: Tests = { cases: 0, automated: 0, manual: 0, unmarked: [] }
-  const parts = lf(md).split(/^##\s+(TC-[\w.-]+)/m)
+// The cases of `test-cases.md`, each under a heading that starts with its id, the title after it
+// as the project writes it: `## TC-01: Title`, `### TC-02. Title`, `## TC-03 — Title`.
+const casesIn = (md: string) => {
+  const parts = lf(md).split(/^#{2,4}\s+(TC-\w+(?:[.-]\w+)*)/m)
+  const out: { id: string; title: string; body: string }[] = []
   for (let i = 1; i < parts.length; i += 2) {
     const body = parts[i + 1] ?? ''
+    out.push({ id: parts[i]!, title: /^\s*[:.—–-]?\s*(.*)$/m.exec(body)?.[1]?.trim() ?? '', body })
+  }
+  return out
+}
+
+// How a case says it is checked, on a line of its own: `Automated: …` or `Manual: …`, bold, in a
+// list item or neither (`- **Automated:** e2e/door.spec.ts`), and what follows the mark.
+const markOf = (body: string) => {
+  const m = /^\s*(?:[-*+]\s+)?(?:\*\*|__)?(Automated|Manual)\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*)$/im.exec(body)
+  return m ? { mark: m[1]!.toLowerCase() as 'automated' | 'manual', rest: m[2]! } : { mark: 'none' as const, rest: '' }
+}
+
+// Each case may say how it is checked, `Automated: <spec>` or `Manual: <why>`. Where some cases do,
+// one that says neither is unmarked; where none does, the project keeps no such marks (cases
+// checked by hand, say) and nothing is unmarked.
+export const parseTests = (md: string): Tests => {
+  const tests: Tests = { cases: 0, automated: 0, manual: 0, unmarked: [] }
+  for (const c of casesIn(md)) {
+    const { mark } = markOf(c.body)
     tests.cases++
-    if (/^Automated:/m.test(body)) tests.automated++
-    else if (/^Manual:/m.test(body)) tests.manual++
-    else tests.unmarked.push(parts[i]!)
+    if (mark === 'automated') tests.automated++
+    else if (mark === 'manual') tests.manual++
+    else tests.unmarked.push(c.id)
   }
   if (tests.automated + tests.manual === 0) tests.unmarked = []
   return tests
 }
 
-// Each `## TC-01: Title` case with how it says it is checked, and the test file its `Automated:`
-// line names first (`Automated: e2e/door.spec.ts, tag \`@door:TC-01\``), as the project writes it.
-export const parseTestCases = (md: string): Omit<TestCase, 'state'>[] => {
-  const parts = lf(md).split(/^##\s+(TC-[\w.-]+)/m)
-  const cases: Omit<TestCase, 'state'>[] = []
-  for (let i = 1; i < parts.length; i += 2) {
-    const body = parts[i + 1] ?? ''
-    const title = /^:?\s*(.*)$/m.exec(body)?.[1]?.trim() ?? ''
-    const automated = /^Automated:\s*(.*)$/m.exec(body)
-    const file = automated ? /[\w@.-]+(?:\/[\w@.-]+)*\.[A-Za-z]+/.exec(automated[1]!)?.[0] : undefined
-    cases.push({ id: parts[i]!, title, mark: automated ? 'automated' : /^Manual:/m.test(body) ? 'manual' : 'none', ...(file ? { file } : {}) })
-  }
-  return cases
-}
+// Each case with how it says it is checked, and every test file its `Automated:` line names
+// (`Automated: e2e/door.spec.ts, e2e\\api.spec.ts, tag \`@door:TC-01\``), by `/`.
+export const parseTestCases = (md: string): Omit<TestCase, 'state'>[] =>
+  casesIn(md).map(c => {
+    const { mark, rest } = markOf(c.body)
+    const files = mark === 'automated' ? [...new Set([...rest.matchAll(/[\w@.-]+(?:[\\/][\w@.-]+)*\.[A-Za-z][A-Za-z0-9]{1,5}\b/g)].map(m => m[0].replace(/\\/g, '/')))] : []
+    return { id: c.id, title: c.title, mark, ...(files.length > 0 ? { files } : {}) }
+  })
 
 // Whether a test file holds a test for `id`: the id standing alone, so `TC-1` is not found in
 // `TC-10` nor `TC-1.2`.
@@ -266,12 +278,14 @@ export const specText = (name: string, files: Files) =>
   `OpenSpec change "${name}"\n\n` + orderedPaths(files).map(path => `=== ${path} ===\n${files[path]}`).join('\n\n')
 
 // A brief is Markdown whose last section, under `heading`, lists what is left to decide; that
-// section is taken out into its own list, empty when it says `none`.
+// section is taken out into its own list, empty when it says `none`. The heading as a model may
+// write it: any level, bold, a colon after. With no such section what is left is not known, and
+// `isUnsplit` says so rather than an empty list passing for nothing to decide.
 export const splitBrief = (text: string, heading: string, none: string) => {
-  const at = text.search(new RegExp(`^##\\s*${heading}\\s*$`, 'im'))
-  if (at < 0) return { summary: text.trim(), decisions: [] as string[] }
+  const at = text.search(new RegExp(`^#{1,4}\\s*(?:\\*\\*)?\\s*${heading}\\s*(?:\\*\\*)?\\s*:?\\s*(?:\\*\\*)?\\s*$`, 'im'))
+  if (at < 0) return { summary: text.trim(), decisions: [] as string[], isUnsplit: true as const }
   const rest = text.slice(at).split('\n').slice(1)
-  const end = rest.findIndex(l => /^##\s/.test(l))
+  const end = rest.findIndex(l => /^#{1,4}\s/.test(l))
   const decisions = (end < 0 ? rest : rest.slice(0, end))
     .map(l => l.replace(/^\s*(?:[-*]|\d+[.)])\s+/, '').trim())
     .filter(l => l !== '' && l.toLowerCase().replace(/[.!]$/, '') !== none.toLowerCase())
