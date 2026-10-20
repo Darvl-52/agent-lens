@@ -165,6 +165,31 @@ export type SpecDeciding = { at: number; open: number | null; verdicts: Record<s
 export type SpecAnswer = { question: string; text: string }
 
 // What the model is working on.
+// A hole the critic agent found in a change: what is missing or wrong, where that shows, and how
+// to close it.
+export type SpecHole = { text: string; where: string; fix: string }
+
+// The critic agent's last look at a change, at the version of its text it read (task ticks aside),
+// started `at`. `round`: how many times in a row its holes went to Claude to close; `isSent` once
+// the last of them went; `isCapped` once the rounds ran out and what the last ones changed was left
+// to the person. `sent`: the holes each round of this run of rounds sent to Claude, the first first.
+export type SpecCritic = {
+  change: string
+  fingerprint: string
+  status: 'running' | 'done' | 'failed'
+  at: number
+  agentId?: string
+  holes: SpecHole[]
+  round: number
+  isSent?: true
+  isCapped?: true
+  sent?: { round: number; holes: SpecHole[] }[]
+}
+
+// off: no critic; button: it reads the change when asked; auto: also at the end of each turn that
+// moved the change's text on, and what it finds goes to Claude to close.
+export type SpecCriticMode = 'off' | 'button' | 'auto'
+
 export type SpecBusy = 'brief' | 'explain' | 'answer' | 'options'
 
 // A model call that gave no answer: which one, and the question where it was one.
@@ -295,6 +320,9 @@ declare module 'claude-code' {
       // nothing to retry (a prompt the session refused).
       'spec.failed': SpecFailed | null
       'spec.tab': SpecTab
+      // The critic agent's last look at each change, by its name, and the mode /spec critic set.
+      'spec.critic': Record<string, SpecCritic>
+      'spec.criticMode': SpecCriticMode | null
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]

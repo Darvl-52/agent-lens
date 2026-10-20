@@ -1,5 +1,5 @@
 // The types of the spec part, by the names the contract in index.d.ts gives them.
-import type { SpecProgress, SpecTask, SpecTests, SpecTestCase, SpecRequirement, SpecOverlap, SpecIssue, SpecChecked, SpecDelta, SpecLens, SpecBrief, SpecVerdict, SpecDeciding, SpecAnswer, SpecBusy, SpecFailed, SpecTab, SpecLang } from '.'
+import type { SpecProgress, SpecTask, SpecTests, SpecTestCase, SpecRequirement, SpecOverlap, SpecIssue, SpecChecked, SpecDelta, SpecLens, SpecBrief, SpecVerdict, SpecDeciding, SpecAnswer, SpecBusy, SpecFailed, SpecTab, SpecLang, SpecHole, SpecCritic, SpecCriticMode } from '.'
 
 export type Progress = SpecProgress
 export type Task = SpecTask
@@ -19,3 +19,6 @@ export type Busy = SpecBusy
 export type Failed = SpecFailed
 export type Tab = SpecTab
 export type Lang = SpecLang
+export type Hole = SpecHole
+export type Critic = SpecCritic
+export type CriticMode = SpecCriticMode

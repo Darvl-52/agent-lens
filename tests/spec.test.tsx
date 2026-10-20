@@ -10,7 +10,9 @@ import {
   fingerprintOf,
   parseCovers,
   parseIssues,
+  criticPrint,
   parseAdvice,
+  parseHoles,
   parseOptions,
   parseRequirements,
   parseTaskList,
@@ -173,6 +175,17 @@ test('the list of what is left to decide is found under its heading however the 
   expect(splitBrief('## Gist\nA.\n## Risks\nNone.\n', en.decideHeading, en.none)).toEqual({ summary: '## Gist\nA.\n## Risks\nNone.', decisions: [], isUnsplit: true })
 })
 
+test('the holes of the critic are read from the JSON its answer ends with; a task ticked is no new version', () => {
+  const said = 'I read design.md [and the code].\n```json\n[{"hole": " No revoke task ", "where": "tasks.md", "fix": "Add one"}, {"where": "x"}, 3]\n```'
+  expect(parseHoles(said)).toEqual([{ text: 'No revoke task', where: 'tasks.md', fix: 'Add one' }])
+  expect(parseHoles('Nothing found.\n[]')).toEqual([])
+  expect(parseHoles('No list at all.')).toBeUndefined()
+  const many = JSON.stringify(Array.from({ length: 7 }, (_, i) => ({ hole: `h${i}` })))
+  expect(parseHoles(many)).toHaveLength(5)
+  expect(criticPrint({ 'tasks.md': '- [x] 1.1 Do it\n' })).toBe(criticPrint({ 'tasks.md': '- [ ] 1.1 Do it\n' }))
+  expect(criticPrint({ 'tasks.md': '- [ ] 1.1 Do it\n' })).not.toBe(criticPrint({ 'tasks.md': '- [ ] 1.1 Do it now\n' }))
+})
+
 test('the options the model offers are read from its JSON, fenced or not', () => {
   expect(parseOptions('```json\n[["Midnight", " A week ", "Midnight"], ["The manager"]]\n```', 2)).toEqual([['Midnight', 'A week'], ['The manager']])
   expect(parseOptions('[["Midnight"]]', 3)).toEqual([['Midnight'], [], []])
@@ -235,6 +248,8 @@ const project = async (
   // Set: the session refuses the next prompt, for this reason.
   let refusal: string | undefined
   const toasts: string[] = []
+  // The agents the mod started, each answered by its id: the critic's run ends when a test says so.
+  const spawned: { prompt: string; subagentType?: string; model?: string }[] = []
   const ran: { argv: readonly string[]; cwd?: string }[] = []
   if (validate)
     on('process.run', ($, e) => {
@@ -307,12 +322,19 @@ const project = async (
     toasts.push(e.text)
     return { value: undefined }
   })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
-  on('tool.call', ($, e) =>
-    e.tool === 'Write'
-      ? { result: { type: 'update' as const, filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
-      : { deny: 'unexpected' },
-  )
+  on('tool.call', ($, e) => {
+    if (e.tool === 'Write') return { result: { type: 'update' as const, filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
+    return { deny: 'unexpected' }
+  })
+  on('agent.spawn', ($, e) => {
+    spawned.push({ prompt: e.prompt, subagentType: e.subagentType, ...(e.model ? { model: e.model } : {}) })
+    return { model: 'sonnet' }
+  })
+  on('agent.list', () => ({
+    value: spawned.map((a, i) => ({ id: `critic-${i + 1}`, description: a.prompt.match(/change "(\w+)"/)?.[1] ? `Holes in ${a.prompt.match(/change "(\w+)"/)![1]}` : '', type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })),
+  }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.session.start({ cwd: root, surface: 'terminal', isInteractive: true })
@@ -325,7 +347,11 @@ const project = async (
     await $.tool.call({ tool: 'Write', file_path: `/proj/openspec/changes/${change}/${file}`, content: text })
   }
   const turn = () => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why) }
+  const startTurn = () => $.turn.start({ text: 'go on', turnId: 't' })
+  // A spawned agent's run ends with `answer`.
+  const agentDone = (agentId: string, answer: string) =>
+    $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  return { spawned, startTurn, agentDone, store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why) }
 }
 
 // The text of a found element and everything under it.
@@ -1082,5 +1108,105 @@ test('openspec validate that runs past its time is said so, not taken for a CLI 
   await pane.press({ key: 'tab-spec' })
   expect(await pane.find({ type: 'Text', text: /^⚠ openspec validate ran over 30 seconds and was stopped/ })).toMatchObject({ props: { color: 'warning' } })
   expect(await pane.find({ type: 'Text', text: /did not run here/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('the critic in auto mode: what it finds goes to Claude to close, three rounds in a row at most', async ($, on) => {
+  const { spec, settle, submitted, toasts, put, turn, spawned, agentDone, startTurn, store } = await project($, on, { door: DOOR })
+  expect((await spec('critic')).text).toMatch(/^The critic is off\./)
+  expect((await spec('critic auto')).text).toMatch(/after each turn that changes it/)
+  expect(store.get('critic-mode')).toBe('auto')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(1)
+  // The type it asks for, Explore, the test engine does not resolve: the model it does.
+  expect(spawned[0]).toMatchObject({ model: 'sonnet' })
+  expect(spawned[0]!.prompt).toMatch(/OpenSpec change "door" \(\/proj\/openspec\/changes\/door\)/)
+  expect(await bandText($)).toMatch(/· looking for holes/)
+  // A turn that leaves the change as it was starts no other.
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(1)
+
+  // Found while the main loop works: sent once its turn ends.
+  await startTurn()
+  await agentDone('critic-1', 'Read it all.\n```json\n[{"hole": "No task revokes access", "where": "tasks.md", "fix": "Add a revoke task"}]\n```')
+  await settle()
+  expect(submitted).toHaveLength(0)
+  expect(await bandText($)).toMatch(/· 1 hole/)
+  await turn()
+  await settle()
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]).toMatchObject({ asUser: true })
+  expect(submitted[0]!.text).toMatch(/found these holes[\s\S]*1\. No task revokes access \(tasks\.md\)\n   Fix: Add a revoke task/)
+  expect(toasts.at(-1)).toBe('1 hole went to Claude to close.')
+
+  // Claude closes them: the critic reads again, told what went before, and its holes go too.
+  for (const round of [2, 3]) {
+    put('door', 'tasks.md', `${TASKS}- [ ] 1.${round + 1} Revoke access, round ${round}\n`)
+    await turn()
+    await settle()
+    expect(spawned).toHaveLength(round)
+    expect(spawned.at(-1)!.prompt).toMatch(/reported before and sent to be closed[^\n]*\n- No task revokes access \(tasks\.md\)\n  Decision: Add a revoke task/)
+    await agentDone(`critic-${round}`, `[{"hole": "Hole ${round}", "where": "design.md", "fix": "Say it"}]`)
+    await settle()
+    expect(submitted).toHaveLength(round)
+  }
+  // Three rounds went: what the last changed is left to the person.
+  put('door', 'design.md', '# Design\n\nSaid.\n')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(3)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  expect(await pane.find({ type: 'Text', text: /^3 rounds of holes went to Claude/ })).toBeDefined()
+  // What each round sent stays in view, by its round.
+  expect(await pane.find({ type: 'Text', text: /^Sent to Claude to close:$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^round 1$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^• No task revokes access \(tasks\.md\)$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^round 3$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^• Hole 3 \(design\.md\)$/ })).toBeDefined()
+  await pane.unmount()
+  // The text changed after that starts over.
+  put('door', 'design.md', '# Design\n\nSaid again.\n')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(4)
+})
+
+test('the critic on a button: f looks for holes, h sends them; off, the tab says how to turn it on', async ($, on) => {
+  const { spec, settle, submitted, turn, spawned, agentDone } = await project($, on, { door: DOOR })
+  await spec()
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  expect(await pane.find({ type: 'Text', text: /^An agent can read the change against the code for holes/ })).toBeDefined()
+  expect(await pane.find({ key: 'find-holes' })).toBeUndefined()
+
+  await spec('critic button')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(0)
+  await pane.press({ key: 'find-holes' })
+  expect(spawned).toHaveLength(1)
+  expect(await pane.find({ type: 'Text', text: /^◌ The agent is reading the change against the code/ })).toBeDefined()
+  expect(await pane.find({ key: 'find-holes' })).toBeUndefined()
+  await agentDone('critic-1', 'I could not finish.')
+  expect(await pane.find({ type: 'Text', text: /^✗ The agent gave no list of holes\.$/ })).toBeDefined()
+
+  await pane.press({ key: 'find-holes' })
+  await agentDone('critic-2', '[{"hole": "No revoke task", "where": "tasks.md", "fix": "Add one"}]')
+  expect(await pane.find({ type: 'Text', text: /^• No revoke task \(tasks\.md\)$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^  → Add one$/ })).toBeDefined()
+  expect(submitted).toHaveLength(0)
+  await pane.press({ key: 'close-holes' })
+  expect(submitted).toHaveLength(1)
+  expect(await pane.find({ type: 'Text', text: /^→ sent to Claude to close · round 1 of 3$/ })).toBeDefined()
+  expect(await pane.find({ key: 'close-holes' })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /^round 1$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^• No revoke task \(tasks\.md\)$/ })).toBeDefined()
+  await pane.press({ key: 'find-holes' })
+  await agentDone('critic-3', 'All closed.\n[]')
+  expect(await pane.find({ type: 'Text', text: /^✓ The agent found no holes\.$/ })).toBeDefined()
   await pane.unmount()
 })

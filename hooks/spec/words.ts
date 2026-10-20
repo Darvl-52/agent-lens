@@ -189,6 +189,41 @@ No more than 350 words.`,
   closePrompt: (change: string, file: string, cases: readonly { id: string; title: string; mark: TestCase['mark']; files?: string[] }[]) =>
     `Close these test cases of the OpenSpec change "${change}" (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.files?.join(', ') ?? 'the file its line names'})` : c.mark === 'manual' ? ' (Manual)' : ' (no mark yet)'}`).join('\n')}\n\nRead each case whole, its steps and what it covers, and the change's specs. For a case marked Automated, write the test its steps describe in the file its Automated line names, its id in the test's name and tags as the other tests there have them, run it and make it pass; where it fails on a bug the spec rules out, fix the code, and where the spec itself is in doubt, ask me. For a case marked Manual, automate it where that can be done, and mark it Automated; where it cannot, say why. For a case with no mark, decide which it is first and write the mark into test-cases.md. Touch nothing the cases do not need, and end by saying which cases are closed and which are not.`,
   // Sent to the session as the person's own prompt: Claude edits the change's files.
+  // The critic agent: what it is told, what the pane and the row say of it, and /spec critic.
+  criticTask: (change: string) => `Holes in ${change}`,
+  criticPrompt: (change: string, dir: string, decided: readonly { point: string; answer: string }[]) =>
+    `Look for holes in the OpenSpec change "${change}" (${dir}) before it is built. Read every file of the change, then the code it names or will touch. Report what would make the work go wrong or the tests miss something:
+- a file, component, API or setting the change names that does not exist, or works otherwise than it says;
+- code the change will touch or break that it does not mention: callers, other platforms, roles, data;
+- proposal, design, specs, tasks and test cases that contradict each other;
+- a requirement or scenario no task builds or no test case checks;
+- a case the specs leave undefined that the code will have to decide.
+Not wording, style or what would merely be nice. Five at most, the most serious first; none is a good answer when there are none. Do not change any file.${decided.length > 0 ? `\n\nDecided already, or reported before and sent to be closed: report one again only where the files still leave it open.\n${decided.map(x => `- ${x.point}\n  Decision: ${x.answer}`).join('\n')}` : ''}
+
+End your answer with JSON alone: [{"hole": "what is missing or wrong", "where": "the file and section, or the code path, that shows it", "fix": "how to close it in the change, one sentence"}], or [] when there are none.`,
+  closeHolesPrompt: (change: string, dir: string, holes: readonly { text: string; where: string; fix: string }[]) =>
+    `An agent read the OpenSpec change "${change}" (${dir}) against the code and found these holes. Close each in the change's files, where it belongs (proposal.md, design.md, the specs, tasks.md, test-cases.md): write what is missing, with its reason. Where closing one needs a decision only I can make, ask me instead of guessing. Change only the change's files.\n\n${holes.map((h, i) => `${i + 1}. ${h.text} (${h.where})\n   Fix: ${h.fix}`).join('\n')}`,
+  criticOff: 'An agent can read the change against the code for holes: /spec critic auto, or /spec critic button.',
+  criticRunning: 'The agent is reading the change against the code for holes…',
+  criticBusy: 'looking for holes',
+  criticFailed: 'The agent gave no list of holes.',
+  criticNone: 'The agent found no holes.',
+  criticFound: (n: number) => `The agent found ${n} ${n === 1 ? 'hole' : 'holes'}:`,
+  holes: (n: number) => `${n} ${n === 1 ? 'hole' : 'holes'}`,
+  holesSent: (round: number, of: number) => `sent to Claude to close · round ${round} of ${of}`,
+  criticCapped: (of: number) => `${of} rounds of holes went to Claude: what they changed is yours to look at. f looks again.`,
+  sentHoles: 'Sent to Claude to close:',
+  round: (n: number) => `round ${n}`,
+  findHoles: 'find holes',
+  closeHoles: (n: number) => `close them (${n})`,
+  holesToast: (n: number) => `${n} ${n === 1 ? 'hole' : 'holes'} went to Claude to close.`,
+  criticUsage: (mode: string) => `The critic is ${mode}. Usage: /spec critic off, /spec critic button, /spec critic auto`,
+  criticSet: (mode: string) =>
+    mode === 'off'
+      ? 'The critic is off.'
+      : mode === 'button'
+        ? 'The critic reads the change for holes when you press f on Decide.'
+        : 'The critic reads the change for holes after each turn that changes it, and sends what it finds to Claude to close: three rounds in a row at most.',
   decideAllPrompt: (change: string, dir: string, points: readonly string[]) =>
     `Decide these open points of the OpenSpec change "${change}" (${dir}) yourself:\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nFirst read proposal.md, design.md, tasks.md and the change's specs, and the project's code where a point turns on it. For each point take the answer the change and the code argue for best, write it where it belongs (proposal.md, design.md, the specs, tasks.md) with its reason in a sentence, and take it out of the open questions and assumptions. Where a point cannot be settled without me (a product choice, a cost, something no file says), leave it open and ask me about it at the end. Touch nothing else, and end with a line per point: what you decided, or what you need from me.`,
   applyPrompt: (change: string, dir: string, items: { point: string; answer: string }[]) =>
@@ -371,6 +406,40 @@ const RU: typeof EN = {
     `${isAlone ? `Покрой тест-кейсами эти сценарии изменения OpenSpec «${change}» (${file}), у которых тест-кейса ещё нет:` : 'Потом покрой эти сценарии его спек, у которых тест-кейса ещё нет:'}\n${scenarios.map(s => `- ${s.capability}: Requirement: ${s.requirement} / Scenario: ${s.scenario}`).join('\n')}\n\nДля каждого добавь в test-cases.md тест-кейс в том же виде, что у остальных там (следующий id TC, строка Covers с его требованием и сценарием, шаги, строка Automated или Manual)${isAlone ? ', затем, если он Automated, напиши тест по его шагам в файле из этой строки, с id кейса в названии и тегах, как у остальных тестов там, прогони его и добейся зелёного. Не трогай ничего, что сценариям не нужно, и в конце скажи, какие покрыты, а какие нет.' : ', а затем закрой его, как кейсы выше.'}`,
   closePrompt: (change, file, cases) =>
     `Закрой эти тест-кейсы изменения OpenSpec «${change}» (${file}):\n${cases.map(c => `- ${c.id}: ${c.title}${c.mark === 'automated' ? ` (Automated: ${c.files?.join(', ') ?? 'файл из его строки'})` : c.mark === 'manual' ? ' (Manual)' : ' (без пометки)'}`).join('\n')}\n\nПрочитай каждый кейс целиком, его шаги и что он покрывает, и specs изменения. Для кейса с Automated напиши тест по его шагам в файле из строки Automated, с id кейса в названии и тегах теста, как у остальных тестов там, прогони его и добейся зелёного; если он падает на ошибке, которую спека исключает, поправь код, а если под вопросом сама спека, спроси меня. Кейс с Manual автоматизируй, если это возможно, и поменяй пометку на Automated; если нельзя, объясни почему. Для кейса без пометки сначала реши, какой он, и впиши пометку в test-cases.md. Не трогай ничего, что кейсам не нужно, и в конце скажи, какие кейсы закрыты, а какие нет.`,
+  criticTask: change => `Дыры в ${change}`,
+  criticPrompt: (change, dir, decided) =>
+    `Найди дыры в изменении OpenSpec «${change}» (${dir}), пока его не начали делать. Прочитай все файлы изменения, потом код, который оно называет или затронет. Сообщи о том, из-за чего работа пойдёт не так или тесты что-то пропустят:
+- файл, компонент, API или настройка, которых нет или которые работают не так, как сказано;
+- код, который изменение затронет или сломает, но не упоминает: вызовы, другие платформы, роли, данные;
+- proposal, design, спеки, задачи и тест-кейсы противоречат друг другу;
+- требование или сценарий, который не строит ни одна задача или не проверяет ни один тест-кейс;
+- случай, который спеки не определяют, а коду придётся решить.
+Не формулировки, не стиль и не «было бы неплохо». Не больше пяти, самые серьёзные первыми; если дыр нет, так и ответь. Файлы не меняй.${decided.length > 0 ? `\n\nУже решено или уже найдено и отправлено закрыть: сообщай снова, только если файлы всё ещё оставляют это открытым.\n${decided.map(x => `- ${x.point}\n  Решение: ${x.answer}`).join('\n')}` : ''}
+
+Закончи ответ только JSON: [{"hole": "чего не хватает или что не так", "where": "файл и раздел или путь в коде, где это видно", "fix": "как закрыть в изменении, одним предложением"}], или [], если дыр нет.`,
+  closeHolesPrompt: (change, dir, holes) =>
+    `Агент сверил изменение OpenSpec «${change}» (${dir}) с кодом и нашёл эти дыры. Закрой каждую в файлах изменения, там, где ей место (proposal.md, design.md, спеки, tasks.md, test-cases.md): допиши, чего не хватает, с обоснованием. Если для закрытия нужно решение, которое могу принять только я, спроси меня, а не угадывай. Меняй только файлы изменения.\n\n${holes.map((h, i) => `${i + 1}. ${h.text} (${h.where})\n   Как закрыть: ${h.fix}`).join('\n')}`,
+  criticOff: 'Агент может сверить спеку с кодом и найти дыры: /spec critic auto или /spec critic button.',
+  criticRunning: 'Агент сверяет спеку с кодом, ищет дыры…',
+  criticBusy: 'ищет дыры',
+  criticFailed: 'Агент не вернул список дыр.',
+  criticNone: 'Агент дыр не нашёл.',
+  criticFound: n => `Агент нашёл ${n} ${plural(n, 'дыру', 'дыры', 'дыр')}:`,
+  holes: n => `${n} ${plural(n, 'дыра', 'дыры', 'дыр')}`,
+  holesSent: (round, of) => `отправлено Claude закрыть · круг ${round} из ${of}`,
+  criticCapped: of => `Прошло ${of} круга: что они поменяли, посмотри сам. f — поискать ещё раз.`,
+  sentHoles: 'Ушло Claude закрыть:',
+  round: n => `круг ${n}`,
+  findHoles: 'найти дыры',
+  closeHoles: n => `закрыть (${n})`,
+  holesToast: n => `${n} ${plural(n, 'дыра ушла', 'дыры ушли', 'дыр ушло')} Claude закрыть.`,
+  criticUsage: mode => `Критик сейчас: ${mode}. Как вызвать: /spec critic off, /spec critic button, /spec critic auto`,
+  criticSet: mode =>
+    mode === 'off'
+      ? 'Критик выключен.'
+      : mode === 'button'
+        ? 'Критик ищет дыры, когда нажмёшь f на вкладке «Решить».'
+        : 'Критик ищет дыры после каждого хода, который меняет спеку, и отправляет найденное Claude закрыть: не больше трёх кругов подряд.',
   decideAllPrompt: (change, dir, points) =>
     `Реши сам эти открытые пункты изменения OpenSpec «${change}» (${dir}):\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nСначала прочитай proposal.md, design.md, tasks.md и specs изменения, а где пункт упирается в код проекта, и код. Для каждого пункта выбери ответ, за который больше говорят изменение и код, впиши его туда, где ему место (proposal.md, design.md, specs, tasks.md), с причиной в одном предложении, и убери пункт из открытых вопросов и допущений. Если пункт без меня не решить (продуктовый выбор, деньги, то, чего нет ни в одном файле), оставь его открытым и спроси меня о нём в конце. Больше ничего не трогай и в конце напиши по строке на пункт: что решил или что тебе нужно от меня.`,
   applyPrompt: (change, dir, items) =>

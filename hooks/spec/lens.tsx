@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Hook, MatchedHook } from 'claude-code'
+import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-code'
 
-import type { Brief, Busy, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
+import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { sentWithSkill, specSkill } from '../router/catalog'
@@ -10,6 +10,7 @@ import {
   blocksArchive,
   capabilityOf,
   changesText,
+  criticPrint,
   deltasOf,
   fingerprintOf,
   hasCase,
@@ -17,6 +18,7 @@ import {
   parseAdvice,
   parseCovers,
   parseIssues,
+  parseHoles,
   parseOptions,
   parseRequirements,
   parseTaskList,
@@ -50,6 +52,8 @@ const queuedAtom = atom({ plugin: 'agent-lens', key: 'spec.queued' } as const, [
 const errorAtom = atom({ plugin: 'agent-lens', key: 'spec.error' } as const, null)
 const failedAtom = atom({ plugin: 'agent-lens', key: 'spec.failed' } as const, null)
 const tabAtom = atom({ plugin: 'agent-lens', key: 'spec.tab' } as const, 'brief')
+const criticAtom = atom({ plugin: 'agent-lens', key: 'spec.critic' } as const, {} as Record<string, Critic>)
+const criticModeAtom = atom({ plugin: 'agent-lens', key: 'spec.criticMode' } as const, null)
 
 export const PANE = 'agent-lens-spec'
 const TABS: readonly Tab[] = ['brief', 'changes', 'decide', 'tasks', 'tests', 'spec', 'ask']
@@ -58,6 +62,10 @@ const MODEL = 'sonnet'
 const TIMEOUT_MS = 180_000
 // The most decided points of a change the next brief is told of.
 const DECIDED_KEPT = 40
+// The critic agent: how many times in a row what it finds goes to Claude to close, and how long one
+// that never answered is taken as still reading (a session that ended took it with it).
+const CRITIC_ROUNDS = 3
+const CRITIC_STALE_MS = 20 * 60_000
 
 // Store keys, per project folder and change: the change picked in the pane, the text read last
 // time (what changes are counted from), and the brief in each language.
@@ -66,6 +74,9 @@ const seenKey = (root: string, change: string) => `seen:${keyOf(root)}:${change}
 const briefKey = (root: string, lang: string, change: string) => `brief:${lang}:${keyOf(root)}:${change}`
 // The points of a change sent to Claude decided, or for it to decide, the latest last.
 const decidedKey = (root: string, change: string) => `decided:${keyOf(root)}:${change}`
+// The critic agent's last look at a change, and the mode /spec critic set, for every project.
+const criticKey = (root: string, change: string) => `critic:${keyOf(root)}:${change}`
+const CRITIC_MODE_KEY = 'critic-mode'
 
 // The files of the change in view as last read: what the model is sent. Kept out of state, as
 // they can run to a few hundred kilobytes.
@@ -90,6 +101,19 @@ const waiting = new Map<string, Promise<void>>()
 let jobs = 0
 // The brief being made and the version it reads: asked for that version again, it is the same call.
 let briefing: { fingerprint: string; done: Promise<void> } | undefined
+
+// The critic's mode as /config sets it; /spec critic overrides it.
+let criticDefault: CriticMode = 'off'
+// Whether the main loop is in a turn: holes found meanwhile wait for its end to go to Claude, for
+// the change named here.
+let isMainTurn = false
+let holesWaiting: string | undefined
+
+const criticModeOf = (value: unknown): CriticMode | undefined => (value === 'off' || value === 'button' || value === 'auto' ? value : undefined)
+
+export function configureSpec(options: PluginOptions) {
+  criticDefault = criticModeOf(options.specCritic) ?? 'off'
+}
 
 async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]
@@ -313,8 +337,9 @@ async function testCasesOf($: EngineInterface, md: string): Promise<TestCase[]> 
 async function forgetArchived($: EngineInterface, root: string, changes: readonly string[]) {
   const at = keyOf(root)
   for (const key of await $.store.keys().catch(() => [] as string[])) {
-    const change = key.startsWith(`seen:${at}:`)
-      ? key.slice(`seen:${at}:`.length)
+    const kept = ['seen', 'decided', 'critic'].find(kind => key.startsWith(`${kind}:${at}:`))
+    const change = kept
+      ? key.slice(`${kept}:${at}:`.length)
       : /^brief:\w+:/.test(key) && key.includes(`:${at}:`)
         ? key.slice(key.indexOf(`:${at}:`) + at.length + 2)
         : undefined
@@ -769,11 +794,95 @@ async function archiveChange($: EngineInterface) {
   await $.ui.toast(w.archiveSent)
 }
 
+async function criticMode($: EngineInterface) {
+  return (await read($, criticModeAtom)) ?? criticDefault
+}
+
+// The critic's last look at `change`: this session's, else the one kept from an earlier session.
+async function criticOf($: EngineInterface, root: string, change: string) {
+  return (await read($, criticAtom))[change] ?? ((await $.store.get(criticKey(root, change)).catch(() => undefined)) as Critic | undefined)
+}
+
+async function keepCritic($: EngineInterface, root: string, critic: Critic) {
+  await update($, criticAtom, all => ({ ...all, [critic.change]: critic }))
+  await $.store.set(criticKey(root, critic.change), critic)
+}
+
+// The critic agent reads the change in view against the code for holes: when asked, or in auto mode
+// at a main turn's end once the change's text moved on from what it read last. Rounds whose holes
+// went to Claude count up while Claude's turns close them; once CRITIC_ROUNDS went, what the last
+// changed is left to the person, and the next change to the text starts over.
+async function critique($: EngineInterface, isAsked: boolean) {
+  const lens = await lensNow($)
+  if (!lens) return
+  const mode = await criticMode($)
+  if (mode === 'off' || (!isAsked && mode !== 'auto')) return
+  const was = await criticOf($, lens.root, lens.current)
+  const at = await $.clock.now()
+  if (was?.status === 'running' && at - was.at < CRITIC_STALE_MS) return
+  const fingerprint = criticPrint(files)
+  if (!isAsked && was?.fingerprint === fingerprint) return
+  if (!isAsked && was?.isSent && was.round >= CRITIC_ROUNDS) {
+    const { isSent: _sent, ...rest } = was
+    await keepCritic($, lens.root, { ...rest, fingerprint, isCapped: true })
+    return
+  }
+  const round = was?.isSent ? was.round : 0
+  const w = await wordsIn($)
+  const dir = join(lens.root, 'changes', lens.current)
+  const task = w.criticTask(lens.current)
+  const spawned = await $.agent.spawn({ prompt: w.criticPrompt(lens.current, dir, await decidedOf($, lens)), description: task, subagentType: 'Explore', model: MODEL }).catch(() => undefined)
+  // A spawn a hook answered carries no id: the agent is found in the list, as this mod's run of the task.
+  const agentId =
+    spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
+  // What the rounds before sent stays in view while they go on.
+  const sent = was?.isSent ? (was.sent ?? []) : []
+  await keepCritic($, lens.root, { change: lens.current, fingerprint, at, holes: [], round, status: agentId ? 'running' : 'failed', ...(agentId ? { agentId } : {}), ...(sent.length > 0 ? { sent } : {}) })
+}
+
+// What the critic agent answered, once its run ends: its holes, sent to Claude to close in auto mode.
+async function heardCritic($: EngineInterface, agentId: string, answer: string) {
+  const lens = await read($, lensAtom)
+  const critic = Object.values(await read($, criticAtom)).find(c => c.status === 'running' && c.agentId === agentId)
+  if (!lens || !critic) return
+  const holes = parseHoles(answer)
+  const { agentId: _id, ...rest } = critic
+  await keepCritic($, lens.root, { ...rest, status: holes ? 'done' : 'failed', holes: holes ?? [] })
+  if (holes && holes.length > 0 && (await criticMode($)) === 'auto') await closeHoles($, critic.change)
+}
+
+// The holes found go to the session as the person's prompt: Claude closes them in the change's
+// files, and asks where one wants a decision only the person can make. Kept as decided, so neither
+// the brief nor the critic raises them again. While the main loop is in a turn they wait for its end.
+async function closeHoles($: EngineInterface, change: string) {
+  if (isMainTurn) {
+    holesWaiting = change
+    return
+  }
+  const lens = await read($, lensAtom)
+  const critic = (await read($, criticAtom))[change]
+  if (!lens || !critic || critic.status !== 'done' || critic.holes.length === 0 || critic.isSent) return
+  const w = await wordsIn($)
+  const r = await $.prompt.submit({ text: w.closeHolesPrompt(change, join(lens.root, 'changes', change), critic.holes), asUser: true })
+  if (r.drop !== undefined) {
+    await fail($, w.notSent(r.drop))
+    return
+  }
+  await keepDecided($, { ...lens, current: change }, critic.holes.map(hole => ({ point: `${hole.text} (${hole.where})`, answer: hole.fix })))
+  const round = critic.round + 1
+  await keepCritic($, lens.root, { ...critic, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes: critic.holes }] })
+  await $.ui.toast(w.holesToast(critic.holes.length))
+}
+
 // After a turn the row follows what agents ticked and rewrote; a spec that moved on from the
 // decisions sent gets its brief made again, so the Decide tab shows what is left. One still where
 // it was says so, and the decisions can be sent again or changed.
 async function afterTurn($: EngineInterface) {
   await scan($)
+  const waiting = holesWaiting
+  holesWaiting = undefined
+  if (waiting !== undefined) await closeHoles($, waiting)
+  else await critique($, false)
   const lens = await read($, lensAtom)
   const refreshing = await read($, refreshingAtom)
   if (!lens || !refreshing || refreshing.change !== lens.current) return
@@ -885,7 +994,7 @@ async function statusOf($: EngineInterface, lens: Lens) {
 }
 
 export async function registerCommand($: EngineInterface) {
-  await $.command.register({ name: 'spec', description: (await wordsIn($)).description, argumentHint: '[<change> | lang en|ru]' })
+  await $.command.register({ name: 'spec', description: (await wordsIn($)).description, argumentHint: '[<change> | critic off|button|auto | lang en|ru]' })
 }
 
 // What the model said in another language is not this one's: the explanation and the answer go,
@@ -903,18 +1012,35 @@ export async function startSpec($: EngineInterface, isInteractive: boolean) {
     await update($, queuedAtom, () => [])
   }
   await registerCommand($)
+  await restoreCriticMode($)
   if (isInteractive) await scan($).catch(() => {})
+}
+
+async function restoreCriticMode($: EngineInterface) {
+  const mode = criticModeOf(await $.store.get(CRITIC_MODE_KEY).catch(() => undefined))
+  await update($, criticModeAtom, () => mode ?? null)
 }
 
 // A /clear or /resume empties the session's values: the change in view is read again, so the row
 // is back before the first prompt.
 export async function rescanSpec($: EngineInterface) {
+  await restoreCriticMode($)
   await scan($).catch(() => {})
 }
 
 // Agents tick tasks and rewrite the spec as they go: the row follows them.
+export function startSpecTurn() {
+  isMainTurn = true
+}
+
 export function endSpecTurn($: EngineInterface) {
+  isMainTurn = false
   void afterTurn($).catch(() => {})
+}
+
+// A subagent's run ended: the critic's, its answer is read.
+export function endSpecAgent($: EngineInterface, agentId: string, answer: string) {
+  void heardCritic($, agentId, answer).catch(() => {})
 }
 
 export function afterSpecEdit($: EngineInterface, path: string) {
@@ -922,11 +1048,18 @@ export function afterSpecEdit($: EngineInterface, path: string) {
 }
 
 export async function command($: Parameters<MatchedHook<'command.run', { command: 'spec' }>>[0], e: Parameters<MatchedHook<'command.run', { command: 'spec' }>>[1]) {
-  const [verb = ''] = e.args.trim().split(/\s+/)
+  const [verb = '', arg = ''] = e.args.trim().split(/\s+/)
   const w = await wordsIn($)
   await scan($)
   const lens = await read($, lensAtom)
   if (!lens) return { text: w.noSpec }
+  if (verb === 'critic' && !lens.changes.includes(verb)) {
+    const mode = criticModeOf(arg.toLowerCase())
+    if (!mode) return { text: w.criticUsage(await criticMode($)) }
+    await update($, criticModeAtom, () => mode)
+    await $.store.set(CRITIC_MODE_KEY, mode)
+    return { text: w.criticSet(mode) }
+  }
   if (verb !== '' && !lens.changes.includes(verb)) return { text: w.unknownChange(verb, lens.changes) }
   if (verb !== '') await pickChange($, verb)
   await openPane($, 'brief')
@@ -953,6 +1086,9 @@ export async function specLine($: EngineInterface, e: AbovePromptEvent, taken: n
   add(s.decisions > 0, 'decide', () => w.toDecide(s.decisions), 'decide', 'warning')
   add(s.isDecideUnknown, 'decide-unknown', () => w.decideUnknown, 'decide', 'warning')
   add(s.toApply > 0, 'apply', () => w.toApply(s.toApply), 'decide', 'warning')
+  const critic = (await read($, criticAtom))[lens.current]
+  add(critic?.status === 'running', 'critic', () => w.criticBusy, 'decide', 'warning')
+  add(critic?.status === 'done' && critic.holes.length > 0 && !critic.isSent, 'holes', () => w.holes(critic!.holes.length), 'decide', 'warning')
   add(lens.deltas.length > 0, 'changed', () => w.changed, 'changes', 'warning')
   add(s.warnings > 0, 'warnings', () => w.specWarnings(s.warnings), 'spec', 'warning')
   add(s.untested > 0, 'untested', () => w.untested(s.untested), 'tests', 'warning')
@@ -1111,9 +1247,59 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     const refreshing = await read($, refreshingAtom)
     const isRefreshing = refreshing?.change === lens.current && refreshing.fingerprint === lens.fingerprint && busy !== 'brief'
     const hasSent = Object.values(deciding?.verdicts ?? {}).some(v => v.isSent)
+    // The critic agent's last look at the change: what it found, and where that stands.
+    const mode = await criticMode($)
+    const critic = (await read($, criticAtom))[lens.current]
+    const holes = critic?.status === 'done' && !critic.isSent ? critic.holes : []
+    const sentHoles = critic?.sent ?? []
+    const criticRow =
+      mode === 'off' ? (
+        <Text dimColor>{w.criticOff}</Text>
+      ) : (
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={1}>
+            {critic?.status === 'running' ? (
+              <Text color="warning">{`◌ ${w.criticRunning}`}</Text>
+            ) : critic?.status === 'failed' ? (
+              <Text color="error">{`✗ ${w.criticFailed}`}</Text>
+            ) : critic?.status === 'done' && critic.holes.length === 0 ? (
+              <Text color="success">{`✓ ${w.criticNone}`}</Text>
+            ) : holes.length > 0 ? (
+              <Text color="warning">{w.criticFound(holes.length)}</Text>
+            ) : null}
+            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'h', run(() => closeHoles($, lens.current)), { variant: 'primary' }) : null}
+            {critic?.status === 'running' ? null : keyed('find-holes', w.findHoles, 'f', run(() => critique($, true)), { dimColor: true })}
+          </Box>
+          {holes.map(hole => (
+            <Box flexDirection="column" paddingLeft={2}>
+              <Text>{`• ${hole.text}${hole.where ? ` (${hole.where})` : ''}`}</Text>
+              {hole.fix ? <Text dimColor>{`  → ${hole.fix}`}</Text> : null}
+            </Box>
+          ))}
+          {critic?.isSent ? <Text color="warning">{`→ ${w.holesSent(critic.round, CRITIC_ROUNDS)}`}</Text> : null}
+          {critic?.isCapped ? <Text dimColor>{w.criticCapped(CRITIC_ROUNDS)}</Text> : null}
+          {sentHoles.length > 0 ? (
+            <Box flexDirection="column" marginTop={1}>
+              <Text dimColor>{w.sentHoles}</Text>
+              {sentHoles.map(r => (
+                <Box flexDirection="column" paddingLeft={2}>
+                  <Text bold>{w.round(r.round)}</Text>
+                  {r.holes.map(hole => (
+                    <Box flexDirection="column" paddingLeft={2}>
+                      <Text>{`• ${hole.text}${hole.where ? ` (${hole.where})` : ''}`}</Text>
+                      {hole.fix ? <Text dimColor>{`  → ${hole.fix}`}</Text> : null}
+                    </Box>
+                  ))}
+                </Box>
+              ))}
+            </Box>
+          ) : null}
+        </Box>
+      )
     body = (
       <Box flexDirection="column" gap={1}>
         {staleRow}
+        {criticRow}
         {!brief ? (
           busy === 'brief' ? null : <Text dimColor>{w.noBrief}</Text>
         ) : brief.isUnsplit && !isStale ? (

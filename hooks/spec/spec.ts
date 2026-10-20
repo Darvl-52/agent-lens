@@ -1,4 +1,4 @@
-import type { Delta, Issue, Progress, Requirement, Task, Tests, TestCase } from '../../types/spec'
+import type { Delta, Hole, Issue, Progress, Requirement, Task, Tests, TestCase } from '../../types/spec'
 
 // A change's Markdown files by their path inside the change folder: `proposal.md`,
 // `specs/web/dark-mode/spec.md`.
@@ -317,4 +317,31 @@ export const parseOptions = (text: string, count: number): string[][] =>
 export const parseAdvice = (text: string, count: number): (string | null)[] => {
   const options = parseOptions(text, count)
   return optionLists(text, count).map(({ why }, i) => (typeof why === 'string' && why.trim() !== '' && options[i]!.length > 0 ? why.trim() : null))
+}
+
+// The change's files as the critic agent reads them: a task ticked or not is not a new version of
+// the change.
+export const criticPrint = (files: Files) =>
+  fingerprintOf(Object.fromEntries(Object.entries(files).map(([path, text]) => [path, /(^|\/)tasks\.md$/.test(path) ? text.replace(/^(\s*[-*]\s+)\[[xX]\]/gm, '$1[ ]') : text])))
+
+// The holes the critic agent reported, from the JSON array its answer ends with, fenced or not, the
+// most serious first and five at most; undefined where it holds no such array.
+export const parseHoles = (text: string): Hole[] | undefined => {
+  const end = text.lastIndexOf(']')
+  for (let at = text.indexOf('['); at >= 0 && at < end; at = text.indexOf('[', at + 1)) {
+    let list: unknown
+    try {
+      list = JSON.parse(text.slice(at, end + 1))
+    } catch {
+      continue
+    }
+    if (!Array.isArray(list)) continue
+    const said = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+    return list
+      .filter((h): h is Record<string, unknown> => typeof h === 'object' && h !== null)
+      .map(h => ({ text: said(h.hole), where: said(h.where), fix: said(h.fix) }))
+      .filter(h => h.text !== '')
+      .slice(0, 5)
+  }
+  return undefined
 }

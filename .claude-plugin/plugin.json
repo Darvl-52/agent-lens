@@ -1,6 +1,6 @@
 {
   "name": "agent-lens",
-  "version": "0.4.11",
+  "version": "0.5.0",
   "description": "Work with the agent in one place: each edit checked against your CLAUDE.md as it is made and each turn's diff reviewed (/changes); the OpenSpec change read for you (/spec); the skill each prompt needs loaded for it (/router).",
   "types": "./types/index.d.ts",
   "author": {
@@ -41,6 +41,17 @@
       "title": "Include ~/.claude/CLAUDE.md",
       "description": "Also check edits and reviews against your personal CLAUDE.md",
       "default": false
+    },
+    "specCritic": {
+      "type": "string",
+      "title": "Critic for the spec",
+      "description": "An agent that reads the OpenSpec change against the code for holes. off; button: when you press f on Decide; auto: also after each turn that changes the change, sending what it finds to Claude to close, three rounds in a row at most. /spec critic overrides it",
+      "default": "off",
+      "options": [
+        "off",
+        "button",
+        "auto"
+      ]
     },
     "routerUseModel": {
       "type": "boolean",

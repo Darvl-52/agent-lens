@@ -232,6 +232,18 @@ brief, say) waits its turn, and the pane says what comes next.
    is made again by itself, told the points already decided so it does not ask them again, and the
    tab shows what is left. A turn that ends with the spec as it was
    says so: `w` sends the decisions again, `change the answers` brings them back to the tab.
+
+   **The critic**, off unless you turn it on (`/spec critic button` or `auto`, or in Settings): an
+   agent (Explore, on `sonnet`) reads the change and the code it names or will touch, and lists up to
+   five holes at the top of the tab, each with where it shows and how to close it: something the
+   change names that is not there, code it will touch and does not mention, its files contradicting
+   each other, a requirement no task builds or no case checks, a case the specs leave undefined.
+   `f` sends it to look; `h` sends what it found to the session as your prompt, and Claude closes
+   each hole in the change's files, asking you where only you can decide. In `auto` it also looks
+   after each turn that changed the change's text (a task ticked is not a change), and what it finds
+   goes to Claude by itself, once the turn running has ended. Each round is told what was decided and
+   sent before, so it does not report it again; after three rounds in a row it stops, and what the
+   last one changed is yours to look at. The next change to the text starts over.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
    the session as your prompt, `do` on a task sends that one: Claude reads the change, does the
    task alone, runs its check if it names one, and ticks it. A task sent is marked so until it is
@@ -271,6 +283,10 @@ the whole change: about 10k tokens for a small one, 40k for a large one. The cha
 and marked for the prompt cache, so a question asked within five minutes of a brief reads it from
 the cache. Nothing is sent until you open the pane, press `g` or `e`, open a point to decide, or
 ask. The decisions you send with `a` are a turn of the session itself, on its own model.
+
+The critic is an agent that reads the code, not one call: from about 100k tokens for a small change
+to 300k for a large one, most of them from the cache. In `auto` mode that is once per version of the
+change's text, and three rounds at most in a row, each followed by Claude's turn closing what it found.
 
 ## The skill for each prompt
 
@@ -347,6 +363,7 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | `/changes rules`           | How edits are checked, and the rule files that apply.               |
 | `/spec`                    | Open the pane on the OpenSpec change in view.                        |
 | `/spec <change>`           | Pick another active change and open the pane on it.                  |
+| `/spec critic off\|button\|auto` | Whether an agent looks for holes in the change, as under Decide.  |
 | `/router`                  | Open the router's pane; `rules`, `skills`, `history` open that tab.  |
 | `/router auto\|suggest\|off` | How the router acts on a pick.                                      |
 | `/router add`, `when`, `ignore`, `rm`, `list` | Your routing rules, as under The skill for each prompt. |
@@ -362,6 +379,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit; an edit refused twice in a turn for one rule goes through on the next try, on Findings for you to judge); `off` leaves the rules to the review |
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
+| Critic for the spec         | `off`   | `button`: an agent looks for holes in the change when you press `f` on Decide; `auto`: also after each turn that changes it, and what it finds goes to Claude to close, three rounds in a row at most; `/spec critic` overrides it |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |
 | Model for routing           | `haiku` | An alias or a full model id                                                                                                                          |
 

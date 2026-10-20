@@ -36,7 +36,7 @@ import {
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
 import { langCommand } from './switch'
-import { afterSpecEdit, endSpecTurn, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec } from './spec/lens'
+import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
 // Three parts in one module, each in its own folder, sharing the language: the review of what the
 // agent changed (with the check of each edit as it is made), the OpenSpec change in view, and the
@@ -58,6 +58,7 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
 export const register: Register = (on, options) => {
   configureLang(options)
   configureReview(options)
+  configureSpec(options)
   configureRouter(options)
 
   on('session.start', async ($, e, next) => {
@@ -93,11 +94,15 @@ export const register: Register = (on, options) => {
   on('prompt.submit', ($, e, next) => promptSubmit($, e, next))
   on('prompt.autocomplete', ($, e, next) => promptAutocomplete($, e, next))
   on('skill.prompt', ($, e, next) => skillPrompt($, e, next))
-  on('turn.start', ($, e, next) => turnStart($, e, next))
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) startSpecTurn()
+    return turnStart($, e, next)
+  })
 
   on('turn.complete', async ($, e, next) => {
     endRouterTurn(e.agentId, e.answer)
     if (e.agentId === undefined) endSpecTurn($)
+    else endSpecAgent($, e.agentId, e.answer)
     const result = await next(e)
     await endReviewTurn($, e.agentId, e.reason).catch(() => {})
     return result
