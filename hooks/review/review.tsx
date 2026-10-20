@@ -103,6 +103,10 @@ const REPO_FILES_LIMIT = 300
 // The repository each folder is in, by `git rev-parse`, each path in its one spelling (`canonical`);
 // null outside any.
 const repos = new Map<string, string | null>()
+// The repositories of their own in the project's top folders, by the project's folder: dev-env
+// keeps its clones so (`__front`), ignored by its own repository. So many folders looked in at most.
+const nestedAt = new Map<string, Promise<string[]>>()
+const NESTED_LIMIT = 40
 // A review asked for while one runs: made once that one is done.
 let reviewNext: Diff | undefined
 // The model's context for the last few diffs, by `blocksOf`'s key.
@@ -197,6 +201,21 @@ async function sessionRepos($: EngineInterface) {
     if (repo) found.add(repo)
   }
   return [...found]
+}
+
+// Every repository of its own in a top folder of the project, as the shell may edit one no tool did.
+function nestedRepos($: EngineInterface, root: string) {
+  const key = canonical(root)
+  if (!nestedAt.has(key))
+    nestedAt.set(
+      key,
+      (async () => {
+        const dirs = (await $.fs.list(root).catch(() => [])).filter(x => x.kind === 'dir' && !x.name.startsWith('.')).slice(0, NESTED_LIMIT)
+        const found = await Promise.all(dirs.map(async d => ((await $.fs.exists(joinPath(root, `${d.name}/.git`)).catch(() => false)) ? joinPath(root, d.name) : null)))
+        return found.filter((d): d is string => d !== null).map(canonical)
+      })(),
+    )
+  return nestedAt.get(key)!
 }
 
 // What is uncommitted in every repository the session edited a file in, and in the project's own:
@@ -742,10 +761,15 @@ async function beforeShell($: EngineInterface) {
     const dirty: Record<string, string[]> = {}
     // Each file goes into the session's values whole: so much of them, and none past a size.
     let room = SHELL_TAKE.total
-    for (const repo of await sessionRepos($)) {
+    const edited = await sessionRepos($)
+    for (const repo of edited) {
       dirty[repo] = await uncommittedIn($, repo)
       for (const path of dirty[repo].slice(0, SHELL_LIMIT)) if (room > 0) room -= await remember($, path, Math.min(room, SHELL_TAKE.file))
     }
+    // A repository of its own in the project that the session has not edited is only named: a file
+    // uncommitted there after the command and not before, the shell changed, from what is committed.
+    const others = (await nestedRepos($, await $.session.root())).filter(repo => !edited.some(r => samePath(r, repo)))
+    await Promise.all(others.map(async repo => (dirty[repo] = await uncommittedIn($, repo))))
     await update($, turnDirtyAtom, d => d ?? dirty)
   })()
   await shellTaking

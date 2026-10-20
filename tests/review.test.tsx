@@ -212,6 +212,9 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   const head = new Map(disk)
   // What each Bash call does to the disk, in turn.
   const shells: ((disk: Map<string, string>) => void)[] = []
+  // Repositories of their own inside the project, as dev-env holds its clones: by their folder.
+  const nested: string[] = []
+  const repoOfPath = (path: string) => nested.find(r => path === r || path.startsWith(`${r}/`))
   const asked: ModelCompleteInput[] = []
   // What the check of each edit was asked, apart from the review's calls, and what it answers.
   const checked: ModelCompleteInput[] = []
@@ -231,7 +234,17 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   on('session.root', () => ({ value: root }))
   on('fs.exists', ($, e) => {
     if (probing) root = e.path.replace(/[\\/]probe$/, '')
-    return { value: disk.has(posix(e.path)) }
+    return { value: disk.has(posix(e.path)) || nested.some(r => posix(e.path) === `${r}/.git`) }
+  })
+  on('fs.list', ($, e) => {
+    const dir = posix(e.path).replace(/\/$/, '')
+    const names = new Map<string, 'file' | 'dir'>()
+    for (const p of [...disk.keys(), ...nested.map(r => `${r}/.git`)])
+      if (p.startsWith(`${dir}/`)) {
+        const [name, ...rest] = p.slice(dir.length + 1).split('/')
+        names.set(name!, rest.length > 0 ? 'dir' : 'file')
+      }
+    return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
   })
   // What was read, file by file; how often the language was.
   const reads: string[] = []
@@ -263,16 +276,18 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     runs.push([...e.argv])
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     // As git for Windows says it: `D:/proj`, never `D:\proj`.
-    if (e.argv.includes('rev-parse')) return ok(`${root.replace(/\\/g, '/')}\n`)
+    const at = posix(e.argv[e.argv.indexOf('-C') + 1] ?? '/proj')
+    const repo = repoOfPath(at) ?? '/proj'
+    if (e.argv.includes('rev-parse')) return ok(`${repoOfPath(at) ?? root.replace(/\\/g, '/')}\n`)
     if (e.argv.includes('status'))
       return ok(
         [...new Set([...head.keys(), ...disk.keys()])]
-          .filter(p => head.get(p) !== disk.get(p))
-          .map(p => `${!head.has(p) ? '??' : disk.has(p) ? ' M' : ' D'} ${p.slice('/proj/'.length)}\0`)
+          .filter(p => head.get(p) !== disk.get(p) && (repoOfPath(p) ?? '/proj') === repo)
+          .map(p => `${!head.has(p) ? '??' : disk.has(p) ? ' M' : ' D'} ${p.slice(repo.length + 1)}\0`)
           .join(''),
       )
     if (e.argv.includes('show')) {
-      const committed = head.get(`/proj/${e.argv.at(-1)!.replace(/^HEAD:/, '')}`)
+      const committed = head.get(`${repo}/${e.argv.at(-1)!.replace(/^HEAD:/, '')}`)
       if (committed === undefined) return { value: { exitCode: 128, stdout: '', stderr: 'fatal: not in HEAD', isStdoutTruncated: false, isStderrTruncated: false } }
       return ok(committed)
     }
@@ -381,6 +396,7 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     setDelay: (ms: number) => (delay = ms),
     clock,
     reads,
+    nest: (repo: string) => nested.push(repo),
     langReads: () => langReads,
   }
 }
@@ -769,6 +785,14 @@ test('what a shell command changes is in the turn and the session, as it was bef
   await pane.select({ key: 'mode', value: 'session' })
   expect(await labels()).toEqual(['src/app.ts', 'src/new.ts', 'src/old.ts', 'src/words.ts', undefined])
   await pane.unmount()
+})
+
+test('a shell command in a repository of its own inside the project, edited by no tool before, is in the turn', async ($, on) => {
+  const { asked, nest, shellTurn } = await project($, on, { 'src/app.ts': APP, '__front/src/cart.ts': 'export const total = 0\n' })
+  nest('/proj/__front')
+  await shellTurn('fix the cart total in the front', [d => d.set('/proj/__front/src/cart.ts', 'export const total = 0\nexport const tax = 1\nexport const sum = 2\nexport const fee = 3\n')])
+  const prompt = asked.find(a => /Review the diff/.test(a.prompt))?.prompt
+  expect(prompt).toMatch(/src\/cart\.ts ===\n\[hunk \w+\]\n@@ -1 \+1 @@\n export const total = 0\n\+export const tax = 1/)
 })
 
 test('a turn with no shell command reads no git status', async ($, on) => {
