@@ -221,7 +221,7 @@ brief, say) waits its turn, and the pane says what comes next.
 3. **Decide.** The brief's list of what needs a person: open questions, TODOs, choices made without
    a reason or on an assumption, each with the file it is in. `decide` on a point opens two or three
    ways to settle it, offered by the model for all the points at once, and a field for your own;
-   picking one opens the next point, `change` and `clear` take it back. `a` sends what you decided
+   the one the model recommends comes first, marked `★`, with why under it. Picking one opens the next point, `change` and `clear` take it back. `a` sends what you decided
    to the session as your prompt: Claude writes it into the change's files and asks you where a
    decision contradicts the spec. `d`, `Claude decides all`, sends every point not decided yet:
    Claude takes the answer the change and the code argue for, writes it in with its reason, and

@@ -149,9 +149,10 @@ export type SpecLens = {
 }
 
 // The model's brief of a change, kept per change in the store; `options`, once asked for, the
-// ways the model offers to settle each decision, in their order.
+// ways the model offers to settle each decision, in their order, the one it recommends first;
+// `advice` beside them, why it recommends that one, null where it recommends none.
 // `isUnsplit` where the model left out the section of what is left to decide: that is not known.
-export type SpecBrief = { fingerprint: string; summary: string; decisions: string[]; at: number; options?: string[][]; isUnsplit?: true }
+export type SpecBrief = { fingerprint: string; summary: string; decisions: string[]; at: number; options?: string[][]; advice?: (string | null)[]; isUnsplit?: true }
 
 // What the person settled of one decision, and whether it went to Claude to write into the spec;
 // `isByClaude` where the person left it for Claude to decide.

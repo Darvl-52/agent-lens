@@ -660,6 +660,37 @@ test('every piece of every file looked at in one press, the button there only fo
   await pane.unmount()
 })
 
+test('a new file looked at whole in the session diff leaves no piece of the last turn on it unseen', async ($, on) => {
+  const { turn, review } = await project($, on, { 'src/app.ts': APP })
+  await turn('write the plan', { 'docs/plan.md': '# Plan\n\n- one\n- two\n', 'docs/notes.md': 'notes\n' })
+  await turn('rename two', { 'docs/plan.md': '# Plan\n\n- one\n- 2\n', 'docs/notes.md': 'more notes\n' })
+  expect(await bandText($)).toMatch(/^✎ 2 files \+2 −2 .*2 pieces not looked at$/)
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.select({ key: 'mode', value: 'session' })
+  await pane.press({ key: 'seen-all' })
+  expect(await pane.find({ type: 'Text', text: /looked at 2 of 2$/ })).toBeDefined()
+  // What the last turn took away was never on the disk to be looked at: its lines added are.
+  expect(await bandText($)).not.toMatch(/not looked at/)
+  await pane.unmount()
+})
+
+test('a line there before the session and taken away by the last turn counts only once looked at', async ($, on) => {
+  const { turn, review } = await project($, on, { 'src/app.ts': APP })
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.select({ key: 'mode', value: 'session' })
+  await pane.press({ key: 'seen-file' })
+  // The name goes for a line looked at already: what is added was seen, what is taken away was not.
+  await turn('drop the name', { 'src/app.ts': DARK.replace('export const name = "app"\n', 'export const accent = "blue"\n') })
+  expect(await bandText($)).toMatch(/1 piece not looked at$/)
+  // The session's diff shows it taken away: looked at there, it counts.
+  await pane.press({ key: 'seen-file' })
+  expect(await bandText($)).not.toMatch(/not looked at/)
+  await pane.unmount()
+})
+
 test('a narrow pane gives the path its room, never the buttons', async ($, on) => {
   const { native, turn, review } = await project($, on, { 'src/app.ts': APP })
   await turn('add dark mode', { 'src/app.ts': DARK })

@@ -10,6 +10,7 @@ import {
   fingerprintOf,
   parseCovers,
   parseIssues,
+  parseAdvice,
   parseOptions,
   parseRequirements,
   parseTaskList,
@@ -176,6 +177,11 @@ test('the options the model offers are read from its JSON, fenced or not', () =>
   expect(parseOptions('```json\n[["Midnight", " A week ", "Midnight"], ["The manager"]]\n```', 2)).toEqual([['Midnight', 'A week'], ['The manager']])
   expect(parseOptions('[["Midnight"]]', 3)).toEqual([['Midnight'], [], []])
   expect(parseOptions('No idea.', 1)).toEqual([[]])
+  // With the one it recommends first, and why; a point given only options, or none, has no why.
+  const advised = '[{"options": ["Midnight", "A week"], "why": " It is what the design says. "}, ["The manager"], {"options": [], "why": "No way."}]'
+  expect(parseOptions(advised, 3)).toEqual([['Midnight', 'A week'], ['The manager'], []])
+  expect(parseAdvice(advised, 3)).toEqual(['It is what the design says.', null, null])
+  expect(parseAdvice('No idea.', 1)).toEqual([null])
 })
 
 const BAND = {
@@ -460,7 +466,9 @@ test('what is left to decide is settled in the pane and goes to Claude to write 
   const { asked, spec, settle, setReply, submitted, toasts, store, put, turn } = await project($, on, { door: DOOR })
   await spec()
   await settle()
-  setReply(e => (e.prompt.includes('JSON') ? '```json\n[["At midnight", "After a week"], ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN))
+  setReply(e =>
+    e.prompt.includes('JSON') ? '```json\n[{"options": ["At midnight", "After a week"], "why": "The design says midnight."}, ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN,
+  )
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await pane.press({ key: 'tab-decide' })
   expect(await pane.find({ key: 'tab-decide' })).toMatchObject({ props: { label: 'Decide (2)' } })
@@ -470,6 +478,10 @@ test('what is left to decide is settled in the pane and goes to Claude to write 
   expect(asked.at(-1)!.prompt).toMatch(/1\. Pick the expiry \(design\.md\)\n2\. Who may revoke/)
   expect(asked.at(-1)!.promptBlocks?.[0]).toMatchObject({ cache: true })
   expect((store.get('brief:en:/proj/openspec:door') as { options?: string[][] }).options).toHaveLength(2)
+  // The one the model recommends is marked, and why is said under it.
+  expect(await pane.find({ key: 'option-0-0' })).toMatchObject({ props: { label: '★ At midnight' } })
+  expect(await pane.find({ type: 'Text', text: /^Claude recommends it: The design says midnight\.$/ })).toBeDefined()
+  expect(await pane.find({ key: 'option-0-1' })).toMatchObject({ props: { label: 'After a week' } })
   const calls = asked.length
   await pane.press({ key: 'option-0-1' })
   // The next one opens by itself; its own words go in the field.
@@ -845,7 +857,9 @@ test('Claude decides all the points left, one decided by hand aside, and the bri
   const { asked, spec, settle, setReply, submitted, toasts, put, turn } = await project($, on, { door: DOOR })
   await spec()
   await settle()
-  setReply(e => (e.prompt.includes('JSON') ? '```json\n[["At midnight", "After a week"], ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN))
+  setReply(e =>
+    e.prompt.includes('JSON') ? '```json\n[{"options": ["At midnight", "After a week"], "why": "The design says midnight."}, ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN,
+  )
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await pane.press({ key: 'tab-decide' })
   expect(await pane.find({ key: 'decide-all' })).toMatchObject({ props: { label: 'Claude decides all (2)', hotkey: 'd', variant: 'primary' } })
@@ -903,7 +917,9 @@ test('decisions a turn did not write in are offered again, or come back to be ch
   const { spec, settle, setReply, submitted, toasts, turn } = await project($, on, { door: DOOR })
   await spec()
   await settle()
-  setReply(e => (e.prompt.includes('JSON') ? '```json\n[["At midnight", "After a week"], ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN))
+  setReply(e =>
+    e.prompt.includes('JSON') ? '```json\n[{"options": ["At midnight", "After a week"], "why": "The design says midnight."}, ["Only the manager", "Anyone with admin"]]\n```' : BRIEF_EN,
+  )
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await pane.press({ key: 'tab-decide' })
   await pane.press({ key: 'decide-0' })

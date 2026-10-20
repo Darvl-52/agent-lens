@@ -293,15 +293,28 @@ export const splitBrief = (text: string, heading: string, none: string) => {
   return { summary: `${text.slice(0, at)}${after}`.trim(), decisions }
 }
 
-// The model's options for `count` decisions, from its JSON array of arrays, fenced or not; a
-// decision it gave nothing usable for gets none.
-export const parseOptions = (text: string, count: number): string[][] => {
+// The model's options for `count` decisions, from its JSON array, fenced or not: per decision an
+// object of `options` and `why`, or the options alone; a decision it gave nothing usable for gets
+// none.
+const optionLists = (text: string, count: number) => {
   let lists: unknown = []
   try {
     lists = JSON.parse(text.slice(text.indexOf('['), text.lastIndexOf(']') + 1))
   } catch {}
   return Array.from({ length: count }, (_, i) => {
-    const list = Array.isArray(lists) ? lists[i] : undefined
-    return Array.isArray(list) ? [...new Set(list.filter((o): o is string => typeof o === 'string').map(o => o.trim()).filter(o => o !== ''))].slice(0, 4) : []
+    const item: unknown = Array.isArray(lists) ? lists[i] : undefined
+    return Array.isArray(item) ? { options: item, why: undefined } : typeof item === 'object' && item !== null ? (item as { options?: unknown; why?: unknown }) : {}
   })
+}
+
+export const parseOptions = (text: string, count: number): string[][] =>
+  optionLists(text, count).map(({ options }) =>
+    Array.isArray(options) ? [...new Set(options.filter((o): o is string => typeof o === 'string').map(o => o.trim()).filter(o => o !== ''))].slice(0, 4) : [],
+  )
+
+// Why the model recommends the first of its options for each decision; null where it gave no
+// reason, or no options to recommend.
+export const parseAdvice = (text: string, count: number): (string | null)[] => {
+  const options = parseOptions(text, count)
+  return optionLists(text, count).map(({ why }, i) => (typeof why === 'string' && why.trim() !== '' && options[i]!.length > 0 ? why.trim() : null))
 }

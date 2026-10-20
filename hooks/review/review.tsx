@@ -566,23 +566,32 @@ async function markSeen($: EngineInterface, ids: readonly string[]) {
   await update($, seenAtom, seen => [...new Set([...seen, ...ids])])
   const keys = ((await read($, shownAtom))?.files ?? []).flatMap(f => f.hunks.filter(h => ids.includes(h.id)).flatMap(h => changedKeys(f, h)))
   if (keys.length > 0) await update($, seenLinesAtom, lines => [...new Set([...(lines ?? []), ...keys])].slice(-SEEN_LINES))
+  // The row counts the last turn, whatever mode the pane is in: what was looked at here counts there.
+  if (keys.length > 0 && (await read($, modeAtom)) !== 'turn') await carrySeen($, await read($, turnAtom))
 }
 
 // A diff coming into view takes "looked at" from the hunks of other modes: a hunk every line of
-// which changes as one looked at did is looked at too. Done as the diff changes, not as it is
-// drawn, so drawing reads no more than it did.
+// which changes as one looked at did is looked at too. A line taken away that the file did not have
+// before the session, an earlier turn wrote: it is in no other mode's diff, so is not asked for.
+// Done as the diff changes, not as it is drawn, so drawing reads no more than it did.
 async function carrySeen($: EngineInterface, diff: Diff | null) {
   const lines = new Set((await read($, seenLinesAtom)) ?? [])
   if (!diff || lines.size === 0) return
   const seen = new Set(await read($, seenAtom))
-  const carried = diff.files.flatMap(f =>
-    f.hunks
+  const before = await read($, beforeAtom)
+  const carried = diff.files.flatMap(f => {
+    // The file's lines before the session; a file not kept by then is taken as having them all.
+    const key = keyIn(before, f.path)
+    const was = key in before ? before[key] : undefined
+    const old = typeof was === 'string' ? new Set(was.split(/\r?\n/)) : null
+    const had = (text: string) => was === undefined || (old?.has(text) ?? false)
+    return f.hunks
       .filter(hunk => {
-        const keys = changedKeys(f, hunk)
+        const keys = changedKeys(f, { ...hunk, lines: hunk.lines.filter(l => l.kind !== '-' || had(l.text)) })
         return !seen.has(hunk.id) && keys.length > 0 && keys.every(k => lines.has(k))
       })
-      .map(hunk => hunk.id),
-  )
+      .map(hunk => hunk.id)
+  })
   if (carried.length > 0) await update($, seenAtom, all => [...new Set([...all, ...carried])])
 }
 

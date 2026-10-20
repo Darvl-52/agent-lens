@@ -80,6 +80,7 @@ const EN = {
   ownPlaceholder: 'Or your own decision',
   finding: 'Finding options…',
   noOptions: 'No options offered: write your own.',
+  recommended: (why: string) => `Claude recommends it: ${why}`,
   sent: 'sent to Claude',
   apply: (n: number) => `write ${n} into the spec`,
   decideAll: (n: number) => `Claude decides all (${n})`,
@@ -172,7 +173,7 @@ No more than 350 words.`,
   askPrompt: (question: string) =>
     `Question: ${question}\n\nAnswer briefly from the change alone, and end with where it says so (file and section). If the change does not say, say that.`,
   optionsPrompt: (items: string[]) =>
-    `These points of the change are left for a person to decide. For each, offer two or three concrete ways to settle it, each under 12 words; first the one the change itself leans toward, if it leans. Answer with JSON alone: an array holding one array of strings per point, in their order.\n\n${items.map((d, i) => `${i + 1}. ${d}`).join('\n')}`,
+    `These points of the change are left for a person to decide. For each, offer two or three concrete ways to settle it, each under 12 words, and recommend one: put it first and say in one sentence, under 25 words, why it is better than the others; weigh what the change itself leans toward. Answer with JSON alone: an array holding one object per point, in their order: {"options": ["recommended", "other", …], "why": "why the first"}.\n\n${items.map((d, i) => `${i + 1}. ${d}`).join('\n')}`,
   archivePrompt: (change: string, dir: string) =>
     `Archive the OpenSpec change "${change}" (${dir}). Where the project has its own skill or command for archiving OpenSpec changes (openspec-archive-change, /opsx:archive), follow it; otherwise run \`openspec archive ${change}\`. First check that every task is ticked and \`openspec validate ${change} --strict\` is clean, and stop and ask me if not. Then tell me what changed in the main specs.`,
   // Sent to the session as the person's own prompt: Claude does one task of the change.
@@ -264,6 +265,7 @@ const RU: typeof EN = {
   ownPlaceholder: 'Или своё решение',
   finding: 'Подбираю варианты…',
   noOptions: 'Вариантов нет — напиши своё.',
+  recommended: why => `Claude советует этот: ${why}`,
   sent: 'отправлено Claude',
   apply: n => `внести в спеку (${n})`,
   decideAll: n => `Claude решит все (${n})`,
@@ -353,7 +355,7 @@ const RU: typeof EN = {
   askPrompt: question =>
     `Вопрос: ${question}\n\nОтветь кратко, только по изменению, и в конце укажи, где это сказано (файл и раздел). Если в изменении ответа нет — так и скажи.`,
   optionsPrompt: items =>
-    `Эти пункты изменения оставлены на решение человеку. Для каждого предложи два-три конкретных варианта решения, каждый не длиннее 12 слов; первым — тот, к которому склоняется само изменение, если склоняется. Ответь только JSON: массив, в нём по массиву строк на пункт, в том же порядке.\n\n${items.map((d, i) => `${i + 1}. ${d}`).join('\n')}`,
+    `Эти пункты изменения оставлены на решение человеку. Для каждого предложи два-три конкретных варианта решения, каждый не длиннее 12 слов, и порекомендуй один: поставь его первым и одним предложением, не длиннее 25 слов, скажи, чем он лучше остальных; учти, к чему склоняется само изменение. Ответь только JSON: массив, в нём по объекту на пункт, в том же порядке: {"options": ["рекомендуемый", "другой", …], "why": "почему первый"}.\n\n${items.map((d, i) => `${i + 1}. ${d}`).join('\n')}`,
   archivePrompt: (change, dir) =>
     `Заархивируй изменение OpenSpec «${change}» (${dir}). Если в проекте есть свой скилл или команда архивации изменений OpenSpec (openspec-archive-change, /opsx:archive), действуй по нему; иначе — \`openspec archive ${change}\`. Сначала проверь, что все задачи отмечены и \`openspec validate ${change} --strict\` чист, а если нет — остановись и спроси меня. Потом скажи, что изменилось в основных спеках.`,
   withSkill: skill => `Сначала загрузи навык \`${skill}\` через Skill и следуй ему.`,

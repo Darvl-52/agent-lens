@@ -14,6 +14,7 @@ import {
   fingerprintOf,
   hasCase,
   lf,
+  parseAdvice,
   parseCovers,
   parseIssues,
   parseOptions,
@@ -465,12 +466,13 @@ async function changeDeciding($: EngineInterface, fn: (d: Deciding, brief: Brief
   await update($, decidingAtom, () => deciding)
 }
 
-// The model's options for every decision at once, asked for when the first one is opened.
+// The model's options for every decision at once, asked for when the first one is opened; asked
+// again once for a brief kept from before the model said which it recommends.
 function makeOptions($: EngineInterface) {
   return inTurn($, 'options', 'options', async () => {
     const lens = await lensNow($)
     const brief = await read($, briefAtom)
-    if (lens && brief && !brief.options && brief.decisions.length > 0) await optionsOf($, lens, brief)
+    if (lens && brief && (!brief.options || !brief.advice) && brief.decisions.length > 0) await optionsOf($, lens, brief)
   })
 }
 
@@ -488,7 +490,7 @@ async function optionsOf($: EngineInterface, lens: Lens, brief: Brief) {
     await fail($, w.failed(whyNot(w, r)), { what: 'options' })
     return
   }
-  const withOptions: Brief = { ...brief, options: parseOptions(r.text, brief.decisions.length) }
+  const withOptions: Brief = { ...brief, options: parseOptions(r.text, brief.decisions.length), advice: parseAdvice(r.text, brief.decisions.length) }
   await $.store.set(briefKey(lens.root, lang, lens.current), withOptions)
   if ((await read($, briefAtom))?.at === brief.at) await update($, briefAtom, () => withOptions)
 }
@@ -1101,6 +1103,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               const verdict = deciding?.verdicts[i]
               const isOpen = deciding?.open === i
               const options = brief?.options?.[i]
+              const why = brief?.advice?.[i]
               return (
                 <Box flexDirection="column" marginTop={1}>
                   <Text>
@@ -1131,7 +1134,17 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                       ) : options.length === 0 ? (
                         <Text dimColor>{w.noOptions}</Text>
                       ) : (
-                        options.map((o, j) => <Button key={`option-${i}-${j}`} label={o} onPress={run(() => settle($, i, o))} />)
+                        // The one the model recommends is first, and why under it.
+                        options.map((o, j) => (
+                          <Box flexDirection="column">
+                            <Button key={`option-${i}-${j}`} label={j === 0 && why ? `★ ${o}` : o} onPress={run(() => settle($, i, o))} />
+                            {j === 0 && why ? (
+                              <Box paddingLeft={2}>
+                                <Text dimColor>{w.recommended(why)}</Text>
+                              </Box>
+                            ) : null}
+                          </Box>
+                        ))
                       )}
                       {Input ? (
                         <Input
