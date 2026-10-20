@@ -139,6 +139,8 @@ export const register: Register = (on, options) => {
 
   // One row above the prompt: the OpenSpec change in view, then what the agent's last turn changed,
   // each opening its pane. Where the change cannot keep its name beside the turn, each has a row.
+  // They go before what the plugins beneath drew: a band taller than its room scrolls from the top,
+  // and rows of theirs that do not count their room would push these out of view.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const below = await next(e)
     if (e.props.hasSurvey || e.props.maxRows < 2) return below
@@ -168,8 +170,8 @@ export const register: Register = (on, options) => {
     if (rows.length === 0) return below
     return (
       <Box flexDirection="column">
-        {below}
         {rows}
+        {below}
       </Box>
     )
   })
