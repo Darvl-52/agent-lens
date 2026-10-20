@@ -248,6 +248,12 @@ declare module 'claude-code' {
       'review.failed': Record<string, string>
       // Hunk ids looked at, and finding or hunk ids sent to Claude or put aside, this session.
       'review.seen': string[]
+      // The changed lines of the hunks looked at, each hashed with its file: what carries "looked
+      // at" from one diff mode to another, where the hunks are cut otherwise.
+      'review.seenLines': string[]
+      // When each review was made and the files its diff held, by the diff's fingerprint: a later
+      // review of a file speaks for it, and an earlier one's findings there close.
+      'review.reviewed': Record<string, { at: number; files: string[] }>
       'review.sent': string[]
       'review.dismissed': string[]
       'review.spent': ReviewSpent

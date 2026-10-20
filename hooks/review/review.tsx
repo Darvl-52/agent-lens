@@ -5,9 +5,9 @@ import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode,
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { specInView } from '../spec/lens'
-import { below, canonical, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
+import { below, canonical, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
-import { caughtOf, describeEdit, describeWrite, isRuleFile, LIVE_SYSTEM, lineOf, noteFor, parseViolations, refusalFor, RULE_NAMES } from './rules'
+import { caughtOf, describeEdit, describeWrite, isRuleFile, LIVE_SYSTEM, lineNear, noteFor, parseViolations, refusalFor, RULE_NAMES } from './rules'
 import { WORDS } from './words'
 
 const beforeAtom = atom({ plugin: 'agent-lens', key: 'review.before' } as const, {} as Record<string, string | null>)
@@ -28,6 +28,8 @@ const busyAtom = atom({ plugin: 'agent-lens', key: 'review.busy' } as const, [] 
 const errorAtom = atom({ plugin: 'agent-lens', key: 'review.error' } as const, null)
 const failedAtom = atom({ plugin: 'agent-lens', key: 'review.failed' } as const, {} as Record<string, string>)
 const seenAtom = atom({ plugin: 'agent-lens', key: 'review.seen' } as const, [] as string[])
+const seenLinesAtom = atom({ plugin: 'agent-lens', key: 'review.seenLines' } as const, [] as string[])
+const reviewedAtom = atom({ plugin: 'agent-lens', key: 'review.reviewed' } as const, {} as Record<string, { at: number; files: string[] }>)
 const sentAtom = atom({ plugin: 'agent-lens', key: 'review.sent' } as const, [] as string[])
 const dismissedAtom = atom({ plugin: 'agent-lens', key: 'review.dismissed' } as const, [] as string[])
 const expandedAtom = atom({ plugin: 'agent-lens', key: 'review.expanded' } as const, {} as Record<string, number>)
@@ -81,6 +83,11 @@ const GUTTER = 10
 const UNTRACKED_LIMIT = 40
 // Uncommitted files taken before a shell command, and found changed by it, at most, per repository.
 const SHELL_LIMIT = 100
+// An edit refused this many times for one rule goes through on the next try, in `block`: a check
+// that is wrong does not hold Claude up for good.
+const REFUSALS = 2
+// The changed lines of hunks looked at kept, at most.
+const SEEN_LINES = 20_000
 // What of them is taken before the shell, at most, in characters: a file, and all of them.
 const SHELL_TAKE = { file: 200_000, total: 1_000_000 }
 // What a review reads beside the diff, so it does not call a change unasked for or a step undone:
@@ -112,6 +119,12 @@ const stopped = new Set<string>()
 let sentBack = false
 // A note for Claude and the caught rules it tells of, marked told once it reaches Claude.
 type Note = { text: string; ids: string[] }
+
+// How often an edit to a file was refused for a rule, by file and rule; how many checks gave no
+// answer, and whether the turn was told of one yet.
+const refusals = new Map<string, number>()
+let checksFailed = 0
+let isFailureTold = false
 
 // Counted up by each /clear or /resume: a check still running from the conversation before finds
 // its note has no one to go to.
@@ -216,6 +229,7 @@ async function diffFor($: EngineInterface, mode: Mode): Promise<Diff | null> {
 // The pane follows the mode picked; the file picked stays while the diff still has it.
 async function refreshShown($: EngineInterface) {
   const shown = await diffFor($, await read($, modeAtom))
+  await carrySeen($, shown)
   await update($, shownAtom, () => shown)
   const picked = await read($, fileAtom)
   if (!shown?.files.some(f => f.path === picked)) await update($, fileAtom, () => shown?.files[0]?.path ?? null)
@@ -418,6 +432,8 @@ async function reviewDiff($: EngineInterface, diff: Diff) {
     const checked = findings.length === 0 ? undefined : await complete($, diff, w.verifyPrompt(findings.map(f => ({ where: findingAt(f), text: f.text }))), 4000, 'medium')
     const kept = (checked === undefined ? undefined : keptFindings(checked, findings)) ?? findings
     await update($, reviewsAtom, all => ({ ...all, [diff.fingerprint]: kept }))
+    const at = await $.clock.now()
+    await update($, reviewedAtom, all => ({ ...all, [diff.fingerprint]: { at, files: diff.files.flatMap(f => [f.path, f.shown]) } }))
   })
   const next = reviewNext
   reviewNext = undefined
@@ -521,8 +537,31 @@ async function revertHunk($: EngineInterface, f: FileDiff, hunk: Hunk) {
   await sendToClaude($, [hunk.id], w.revertPrompt(f.shown, hunkPatch(f, hunk)))
 }
 
+// A hunk's changed lines, each hashed with its file.
+const changedKeys = (f: FileDiff, hunk: Hunk) => hunk.lines.filter(l => l.kind !== ' ').map(l => hash(`${f.path}\0${l.kind}${l.text}`))
+
 async function markSeen($: EngineInterface, ids: readonly string[]) {
   await update($, seenAtom, seen => [...new Set([...seen, ...ids])])
+  const keys = ((await read($, shownAtom))?.files ?? []).flatMap(f => f.hunks.filter(h => ids.includes(h.id)).flatMap(h => changedKeys(f, h)))
+  if (keys.length > 0) await update($, seenLinesAtom, lines => [...new Set([...(lines ?? []), ...keys])].slice(-SEEN_LINES))
+}
+
+// A diff coming into view takes "looked at" from the hunks of other modes: a hunk every line of
+// which changes as one looked at did is looked at too. Done as the diff changes, not as it is
+// drawn, so drawing reads no more than it did.
+async function carrySeen($: EngineInterface, diff: Diff | null) {
+  const lines = new Set((await read($, seenLinesAtom)) ?? [])
+  if (!diff || lines.size === 0) return
+  const seen = new Set(await read($, seenAtom))
+  const carried = diff.files.flatMap(f =>
+    f.hunks
+      .filter(hunk => {
+        const keys = changedKeys(f, hunk)
+        return !seen.has(hunk.id) && keys.length > 0 && keys.every(k => lines.has(k))
+      })
+      .map(hunk => hunk.id),
+  )
+  if (carried.length > 0) await update($, seenAtom, all => [...new Set([...all, ...carried])])
 }
 
 // Each tab asks the model only when it is looked at, and once per version of the diff.
@@ -614,7 +653,10 @@ async function afterTurn($: EngineInterface, taken: TurnTaken) {
   await update($, changedAtom, names => [...names.filter(n => !again.has(n)), ...session.flatMap(f => [f.path, f.shown])])
   if (files.length === 0) return
   const turn: Diff = { mode: 'turn', files, request, earlier, shell, fingerprint: fingerprintOf(files), at: await $.clock.now() }
+  const isFirst = (await read($, turnAtom)) === null
   await update($, turnAtom, () => turn)
+  if (isFirst && (await read($, modeAtom)) === 'uncommitted') await update($, modeAtom, () => 'turn')
+  await carrySeen($, turn)
   if ((await read($, modeAtom)) === 'turn') await update($, shownAtom, () => turn)
   await refreshShown($)
   if (!isSmall(turn)) await reviewDiff($, turn)
@@ -705,7 +747,16 @@ async function inspect($: EngineInterface, change: Change) {
     timeoutMs: LIVE_TIMEOUT_MS,
   })
   await spend($, r.usage)
+  if (!r.isAnswered) await checkFailed($, whyNot(r))
   return r.isAnswered ? (parseViolations(r.text) ?? []) : []
+}
+
+// A check that gave no answer let its edit through unchecked: counted, and said once a turn.
+async function checkFailed($: EngineInterface, why: string) {
+  checksFailed++
+  if (isFailureTold) return
+  isFailureTold = true
+  await $.ui.toast((await wordsIn($)).checkFailed(why))
 }
 
 // What the check caught joins the findings, a toast says so; caught again, it is told again.
@@ -715,6 +766,10 @@ async function keepCaught($: EngineInterface, change: Change, violations: readon
   const now = state === 'refused' ? null : await readOrNull($, path)
   const caught = violations.map(v => caughtOf(path, shown, v, change, now, state))
   await update($, caughtAtom, all => [...caught, ...all.filter(c => !caught.some(n => n.id === c.id))].slice(0, CAUGHT_LIMIT))
+  // Put aside or sent to Claude before, and broken again: it is open again, not hidden.
+  const ids = new Set(caught.map(c => c.id))
+  if ((await read($, dismissedAtom)).some(id => ids.has(id))) await update($, dismissedAtom, d => d.filter(id => !ids.has(id)))
+  if ((await read($, sentAtom)).some(id => ids.has(id))) await update($, sentAtom, s => s.filter(id => !ids.has(id)))
   await $.ui.toast((await wordsIn($)).caughtToast(violations.length, nameOf(path)))
   return caught.map(c => c.id)
 }
@@ -811,7 +866,7 @@ async function resolveCaught($: EngineInterface) {
     all.map(c => {
       const text = now.get(c.path)
       if (c.evidence === undefined || text === undefined || !isLive(c)) return c
-      const line = text === null ? undefined : lineOf(text, c.evidence)
+      const line = text === null ? undefined : lineNear(text, c.evidence, c.line)
       const { line: _was, ...rest } = c
       return line === undefined ? { ...rest, state: 'fixed' as const } : { ...rest, line, state: 'open' as const }
     }),
@@ -838,13 +893,19 @@ const isOn = (f: Finding, names: readonly string[]) => {
 // to Claude or put aside, while its file is still changed in the session (or uncommitted, in view).
 async function earlierFindings($: EngineInterface, diff: Diff | null) {
   const reviews = await read($, reviewsAtom)
+  const reviewed = (await read($, reviewedAtom)) ?? {}
   const sent = await read($, sentAtom)
   const dismissed = await read($, dismissedAtom)
   const names = [...(await read($, changedAtom)), ...(diff?.mode === 'uncommitted' ? diff.files.flatMap(f => [f.path, f.shown]) : [])]
   const taken = new Set((diff ? (reviews[diff.fingerprint] ?? []) : []).map(f => f.id))
+  // A later review that read the finding's file speaks for it: what it did not find again is gone.
+  const isOutdated = (f: Finding, fingerprint: string) => {
+    const at = reviewed[fingerprint]?.at
+    return at !== undefined && Object.values(reviewed).some(r => r.at > at && isOn(f, r.files))
+  }
   return Object.entries(reviews)
     .filter(([fingerprint]) => fingerprint !== diff?.fingerprint)
-    .flatMap(([, findings]) => findings)
+    .flatMap(([fingerprint, findings]) => findings.filter(f => !isOutdated(f, fingerprint)))
     .filter(f => {
       if (taken.has(f.id) || !open(f, sent, dismissed) || !isOn(f, names)) return false
       taken.add(f.id)
@@ -879,10 +940,12 @@ export async function restartReview($: EngineInterface) {
   reviewNext = undefined
   shellTaking = undefined
   contexts.clear()
+  refusals.clear()
 }
 
 export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Parameters<Hook<'turn.start'>>[1], next: Parameters<Hook<'turn.start'>>[2]) {
   if (e.agentId === undefined) {
+    isFailureTold = false
     await update($, turnBeforeAtom, () => ({}))
     await update($, turnDirtyAtom, () => null)
     await update($, turnShellAtom, () => [])
@@ -930,10 +993,21 @@ const changeOf = (e: ToolCallEvent) =>
 export async function checkBefore($: EngineInterface, e: ToolCallEvent) {
   const change = changeOf(e)
   if (!change || settings.live !== 'block') return undefined
-  const violations = await inspect($, change).catch(() => [])
+  const found = await inspect($, change).catch(() => [])
+  const keyOf = (v: Violation) => `${canonical(change.file)}\0${v.rule}`
+  const tries = (v: Violation) => refusals.get(keyOf(v)) ?? 0
+  const violations = found.filter(v => tries(v) < REFUSALS)
+  // Refused for these as often as it may be: let through, for the person to judge on Findings.
+  const passed = found.filter(v => tries(v) >= REFUSALS)
+  if (passed.length > 0) {
+    for (const v of passed) refusals.delete(keyOf(v))
+    await keepCaught($, change, passed, 'open').catch(() => {})
+    await $.ui.toast((await wordsIn($)).letThrough(nameOf(change.file)))
+  }
   if (violations.length === 0) return undefined
+  for (const v of violations) refusals.set(keyOf(v), tries(v) + 1)
   await keepCaught($, change, violations, 'refused').catch(() => {})
-  return refusalFor(change.file, violations)
+  return refusalFor(change.file, violations, REFUSALS)
 }
 
 // Or beside the turn once it has landed, in `warn`. What the checks found rides on the loop's next
@@ -997,10 +1071,15 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
     const found = await ruleFilesFor($, [])
     const running = [...pending.values()].reduce((n, r) => n + r.size, 0)
     const files = found.length > 0 ? `${w.rulesHere}\n${found.map(f => `  ${f.path}`).join('\n')}` : w.noRulesHere
-    return { text: `${w.liveHeader(settings.live, settings.liveModel, running)}\n\n${files}` }
+    const failed = checksFailed > 0 ? `\n${w.checksFailed(checksFailed)}` : ''
+    return { text: `${w.liveHeader(settings.live, settings.liveModel, running)}${failed}\n\n${files}` }
   }
+  // Before Claude edits anything, what is uncommitted is what there is to look at.
   const hasEdits = (await read($, turnAtom)) !== null || Object.keys(await read($, beforeAtom)).length > 0
-  if (!hasEdits && (await read($, modeAtom)) !== 'uncommitted') return { text: w.nothing }
+  if (!hasEdits) {
+    await update($, modeAtom, () => 'uncommitted')
+    if ((await uncommittedDiff($)).length === 0) return { text: w.nothing }
+  }
   await openPane($)
   return { text: w.opened }
 }

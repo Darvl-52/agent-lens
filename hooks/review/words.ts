@@ -81,6 +81,9 @@ const EN = {
   sent: 'Sent to Claude.',
   // The check of each edit as it is made.
   caughtToast: (n: number, file: string) => `CLAUDE.md: ${n} rule${n === 1 ? '' : 's'} broken in ${file}`,
+  checkFailed: (why: string) => `The rule check of an edit gave no answer (${why}): it went unchecked. /changes rules says more.`,
+  checksFailed: (n: number) => `${n} ${n === 1 ? 'check' : 'checks'} gave no answer this session: those edits went unchecked.`,
+  letThrough: (file: string) => `${file}: an edit refused twice for one rule went through. It is on Findings for you to decide.`,
   caught: 'Caught while Claude edited:',
   caughtState: { found: 'not told Claude yet', told: 'told Claude', open: 'still there', fixed: 'fixed', refused: 'edit refused' } as Record<CaughtRule['state'], string>,
   found: (evidence: string) => `found: ${evidence}`,
@@ -189,6 +192,9 @@ const RU: typeof EN = {
   forget: 'про всё',
   ask: 'спросить',
   sent: 'Отправлено Claude.',
+  checkFailed: why => `Проверка правки по правилам не ответила (${why}): правка прошла без проверки. Подробнее: /changes rules.`,
+  checksFailed: n => `За сессию без ответа: ${n} ${plural(n, 'проверка', 'проверки', 'проверок')}; эти правки прошли без проверки.`,
+  letThrough: file => `${file}: правку, дважды отклонённую за одно правило, пропустил. Она в «Замечаниях» — решать тебе.`,
   caughtToast: (n, file) =>
     `CLAUDE.md: в ${file} ${plural(n, 'нарушено', 'нарушены', 'нарушено')} ${n} ${plural(n, 'правило', 'правила', 'правил')}`,
   caught: 'Поймано, пока Claude правил:',

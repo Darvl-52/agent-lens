@@ -61,13 +61,27 @@ const listed = (violations: readonly Violation[]) =>
 export const noteFor = (file: string, violations: readonly Violation[]) =>
   `agent-lens: your edit to ${file} breaks the project's CLAUDE.md rules.\n${listed(violations)}\nFix this before moving on.`
 
-export const refusalFor = (file: string, violations: readonly Violation[]) =>
-  `agent-lens refused this edit to ${file}: it breaks the project's CLAUDE.md rules.\n${listed(violations)}\nRedo the edit following these rules.`
+export const refusalFor = (file: string, violations: readonly Violation[], tries: number) =>
+  `agent-lens refused this edit to ${file}: it breaks the project's CLAUDE.md rules.\n${listed(violations)}\nRedo the edit following these rules. If you are sure the check is wrong, make the same edit again: after ${tries} refusals of it, it goes through and the developer decides.`
 
 // The line of `text` the evidence starts on, counted from 1.
 export const lineOf = (text: string, evidence: string) => {
   const at = text.indexOf(evidence)
   return at < 0 ? undefined : text.slice(0, at).split('\n').length
+}
+
+// Evidence shorter than this (`//`, `any`) is found in most files: looked for near its line alone.
+const SHORT_EVIDENCE = 12
+const NEAR_LINES = 5
+
+// Where the evidence is in `text` now: anywhere, for evidence long enough to tell; else within a few
+// lines of where it was.
+export const lineNear = (text: string, evidence: string, was: number | undefined) => {
+  if (evidence.trim().length >= SHORT_EVIDENCE || was === undefined) return lineOf(text, evidence)
+  const lines = text.split('\n')
+  for (let d = 0; d <= NEAR_LINES; d++)
+    for (const n of d === 0 ? [was] : [was - d, was + d]) if (n >= 1 && lines[n - 1]?.includes(evidence)) return n
+  return undefined
 }
 
 // A violation as a finding on `path`, shown as `shown`: on the line its evidence is on in `now`,

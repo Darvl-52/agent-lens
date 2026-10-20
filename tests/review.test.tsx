@@ -215,7 +215,8 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   const asked: ModelCompleteInput[] = []
   // What the check of each edit was asked, apart from the review's calls, and what it answers.
   const checked: ModelCompleteInput[] = []
-  let violations = '{"violations":[]}'
+  // null: the check gives no answer.
+  let violations: string | null = '{"violations":[]}'
   const submitted: string[] = []
   const toasts: string[] = []
   let gitDiff = ''
@@ -286,7 +287,9 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     if (delay > 0 && !e.system?.startsWith('You review one change')) await clock.sleep(delay)
     if (e.system?.startsWith('You review one change')) {
       checked.push(e)
-      return { value: { isAnswered: true as const, text: violations, usage: USAGE } }
+      return violations === null
+        ? { value: { isAnswered: false as const, reason: 'api-error' as const, status: 529, error: 'overloaded' as const, usage: USAGE } }
+        : { value: { isAnswered: true as const, text: violations, usage: USAGE } }
     }
     asked.push(e)
     const ids = [...e.prompt.matchAll(/\[hunk (\w+)\]/g)].map(m => m[1]!)
@@ -373,7 +376,7 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     setGitDiff: (d: string) => (gitDiff = d),
     setReviewed: (r: string) => (reviewed = r),
     setKept: (k: string) => (kept = k),
-    setViolations: (v: string) => (violations = v),
+    setViolations: (v: string | null) => (violations = v),
     setDelay: (ms: number) => (delay = ms),
     clock,
     reads,
@@ -918,7 +921,7 @@ test('block refuses an edit that breaks a rule before it lands', { options: { li
   const { disk, native, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
   setViolations(COMMENT)
   const ran = await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
-  expect(ran.deny).toMatch(/^agent-lens refused this edit to .*app\.ts[\s\S]*Redo the edit following these rules\.$/)
+  expect(ran.deny).toMatch(/^agent-lens refused this edit to .*app\.ts[\s\S]*Redo the edit following these rules\. If you are sure the check is wrong, make the same edit again: after 2 refusals of it, it goes through and the developer decides\.$/)
   expect(disk.get('/proj/src/app.ts')).toBe(APP)
   expect(toasts).toEqual(['CLAUDE.md: 1 rule broken in app.ts'])
 })
@@ -989,4 +992,98 @@ test('the language is read once at the start, and once after a /clear', async ($
   expect(langReads()).toBe(1)
   await $.session.end({ reason: 'clear', sessionId: 'one', resume: { id: 'one' } })
   expect(langReads()).toBe(2)
+})
+
+test('/changes before Claude edits anything opens on what is uncommitted; the first turn with edits shows itself', async ($, on) => {
+  const { review, setGitDiff, turn, settle } = await project($, on, { 'src/app.ts': APP })
+  expect((await review()).text).toBe(WORDS.en.nothing)
+  setGitDiff(UNIFIED.replace(/__front\//g, ''))
+  expect((await review()).text).toBe('Opened the review.')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await settle()
+  expect(await pane.find({ key: 'mode' })).toMatchObject({ props: { value: 'uncommitted' } })
+  expect(await pane.find({ key: 'file-0' })).toMatchObject({ props: { label: 'gone.ts' } })
+  setGitDiff('')
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  expect(await pane.find({ key: 'mode' })).toMatchObject({ props: { value: 'turn' } })
+  await pane.unmount()
+})
+
+test('block lets an edit refused twice for one rule through on the next try, for the person to judge', { options: { live: 'block' } }, async ($, on) => {
+  const { disk, native, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  const write = () => $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  expect((await write()).deny).toBeUndefined()
+  expect(disk.get('/proj/src/app.ts')).toBe(COMMENTED)
+  expect(toasts.at(-1)).toBe('app.ts: an edit refused twice for one rule went through. It is on Findings for you to decide.')
+})
+
+test('a check that gives no answer is said once a turn, and counted by /changes rules', async ($, on) => {
+  const { native, settle, setViolations, toasts, review } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(null)
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: DARK })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
+  await settle()
+  expect(toasts.filter(t => t.startsWith('The rule check of an edit gave no answer'))).toEqual([
+    'The rule check of an edit gave no answer (api-error 529): it went unchecked. /changes rules says more.',
+  ])
+  expect((await review('rules')).text).toMatch(/\n2 checks gave no answer this session: those edits went unchecked\.\n/)
+})
+
+test('"looked at" carries over to the session diff, where the turns are one piece', async ($, on) => {
+  const { turn, review, settle } = await project($, on, { 'src/app.ts': APP })
+  await turn('dark theme', { 'src/app.ts': DARK })
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  const keysOf = async (prefix: string) => (await pane.findAll({ type: 'Button' })).map(b => b.key ?? '').filter(k => k.startsWith(prefix) && k !== 'seen-all' && k !== 'seen-file')
+  for (const key of await keysOf('seen-')) await pane.press({ key })
+  await turn('a bigger name', { 'src/app.ts': DARK.replace('"app"', '"application"') })
+  for (const key of await keysOf('seen-')) await pane.press({ key })
+  await pane.select({ key: 'mode', value: 'session' })
+  await settle()
+  expect(await pane.find({ type: 'Text', text: /looked at 1 of 1$/ })).toBeDefined()
+  expect(await pane.find({ key: 'tab-changes' })).toMatchObject({ props: { label: 'Changes' } })
+  await pane.unmount()
+})
+
+test('a later review of a file speaks for it: what an earlier one found there and it did not is gone', async ($, on) => {
+  const { turn, setReviewed } = await project($, on, { 'src/app.ts': APP })
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  expect(await bandText($)).toMatch(/1 likely bug · 1 finding/)
+  setReviewed('[]')
+  await turn('and a contrast toggle', { 'src/app.ts': DARK.replace('"high"', '"low"\nexport const toggle = true\nexport const more = 1') })
+  expect(await bandText($)).not.toMatch(/likely bug|finding/)
+})
+
+test('short evidence is looked for near where it was: gone from there, the rule is fixed', async ($, on) => {
+  const SHORT = JSON.stringify({ violations: [{ rule: 'No comments in code', evidence: '//', fix: 'Remove the comment.' }] })
+  const tail = `${'export const filler = 0\n'.repeat(20)}// footer\n`
+  const { turn, review, setViolations } = await project($, on, { ...RULES, 'src/app.ts': APP + tail })
+  setViolations(SHORT)
+  await turn('add dark mode', { 'src/app.ts': COMMENTED + tail })
+  setViolations('{"violations":[]}')
+  await turn('drop the comment', { 'src/app.ts': DARK + tail })
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-findings' })
+  expect(await pane.find({ type: 'Text', text: /^fixed$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a rule put aside and broken again shows again', async ($, on) => {
+  const { turn, review, setViolations } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  await turn('add dark mode', { 'src/app.ts': COMMENTED })
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-findings' })
+  const key = (await pane.findAll({ type: 'Button' })).map(b => b.key ?? '').filter(k => k.startsWith('dismiss-')).at(-1)!
+  await pane.press({ key })
+  expect(await pane.find({ key })).toBeUndefined()
+  await turn('bigger', { 'src/app.ts': COMMENTED.replace('12', '14') })
+  expect(await pane.find({ key })).toBeDefined()
+  await pane.unmount()
 })

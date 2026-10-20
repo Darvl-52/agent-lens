@@ -58,8 +58,9 @@ Once a turn has edited a file:
 - `3 files +120 −30` what the last turn with edits changed, a subagent's edits included.
 - `1 likely bug`, in red, `2 findings`, in yellow: what the review found, made by itself after the
   turn, and those of earlier reviews still open, with every rule an edit broke that is still in the
-  code. A finding stays until it is sent to Claude or put aside, or its file is back as it was
-  before the session.
+  code. A finding stays until it is sent to Claude or put aside, its file is back as it was
+  before the session, or a later review of its file does not find it again. A rule put aside and
+  broken again shows again.
 - `not reviewed: small change`, dim: the turn touched a line or two, so it was not reviewed by
   itself; `r` on Findings reviews it.
 - `review failed`, in red: the model gave no review (the API failed, or its reply could not be
@@ -75,7 +76,9 @@ otherwise.
 
 `/changes` opens it. Four tabs, `1`–`4`, and the diff's mode at the bottom: the **last turn**,
 the whole **session**, or what is **uncommitted** (`git diff HEAD` and untracked files) in every
-repository the session touched and the project's own.
+repository the session touched and the project's own. Before Claude has edited anything it opens
+on what is uncommitted, and the first turn with edits switches it to that turn. A piece marked
+looked at stays so in the other modes, where the turns are cut into pieces otherwise.
 
 1. **Changes.** The files, then the picked one's hunks, each headed by a line on what it does and
    why, in terms of your request. On a hunk: `looked at`, `ask` (a question about this piece), and
@@ -349,7 +352,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Setting                     | Default | What it does                                                                                                                                         |
 | --------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Language                    | `en`    | Every part's language until `lang` sets one                                                                                                          |
-| Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit); `off` leaves the rules to the review |
+| Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit; an edit refused twice for one rule goes through on the next try, on Findings for you to judge); `off` leaves the rules to the review |
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |
