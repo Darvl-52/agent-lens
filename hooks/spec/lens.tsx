@@ -56,12 +56,16 @@ const TABS: readonly Tab[] = ['brief', 'changes', 'decide', 'tasks', 'tests', 's
 // A brief and an answer want reading, not speed: the session's mid-sized model.
 const MODEL = 'sonnet'
 const TIMEOUT_MS = 180_000
+// The most decided points of a change the next brief is told of.
+const DECIDED_KEPT = 40
 
 // Store keys, per project folder and change: the change picked in the pane, the text read last
 // time (what changes are counted from), and the brief in each language.
 const pickedKey = (root: string) => `picked:${keyOf(root)}`
 const seenKey = (root: string, change: string) => `seen:${keyOf(root)}:${change}`
 const briefKey = (root: string, lang: string, change: string) => `brief:${lang}:${keyOf(root)}:${change}`
+// The points of a change sent to Claude decided, or for it to decide, the latest last.
+const decidedKey = (root: string, change: string) => `decided:${keyOf(root)}:${change}`
 
 // The files of the change in view as last read: what the model is sent. Kept out of state, as
 // they can run to a few hundred kilobytes.
@@ -409,6 +413,25 @@ async function makeBrief($: EngineInterface): Promise<void> {
   return run
 }
 
+type Decided = { point: string; answer: string }
+
+async function decidedOf($: EngineInterface, lens: Lens) {
+  return ((await $.store.get(decidedKey(lens.root, lens.current)).catch(() => undefined)) as Decided[] | undefined) ?? []
+}
+
+// Kept so a brief made again does not ask them again: a point said again goes in place of what it
+// said before, and only the latest are kept.
+async function keepDecided($: EngineInterface, lens: Lens, items: readonly Decided[]) {
+  const points = new Set(items.map(x => x.point))
+  const kept = [...(await decidedOf($, lens)).filter(x => !points.has(x.point)), ...items].slice(-DECIDED_KEPT)
+  await $.store.set(decidedKey(lens.root, lens.current), kept)
+}
+
+async function dropDecided($: EngineInterface, lens: Lens, points: readonly string[]) {
+  const kept = (await decidedOf($, lens)).filter(x => !points.includes(x.point))
+  await $.store.set(decidedKey(lens.root, lens.current), kept)
+}
+
 async function briefOf($: EngineInterface, lens: Lens) {
   // Decisions sent for an older version are in the files the brief is made from now.
   const refreshing = await read($, refreshingAtom)
@@ -416,11 +439,12 @@ async function briefOf($: EngineInterface, lens: Lens) {
   const w = await wordsIn($)
   const lang = await langIn($)
   const text = specText(lens.current, files)
+  const decided = await decidedOf($, lens)
   const r = await $.model.complete({
     model: MODEL,
     system: w.system,
     // The change first and marked, so a question asked soon after reads it from the cache.
-    prompt: [{ text, cache: true }, { text: w.briefPrompt(lens.current) }],
+    prompt: [{ text, cache: true }, { text: [w.briefPrompt(lens.current), ...(decided.length > 0 ? [w.decidedPrompt(decided)] : [])].join('\n\n') }],
     maxTokens: 3000,
     timeoutMs: TIMEOUT_MS,
   })
@@ -537,6 +561,7 @@ async function decideAll($: EngineInterface) {
     return
   }
   await update($, refreshingAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint }))
+  await keepDecided($, lens, open.map(x => ({ point: x.point, answer: w.byClaude })))
   await changeDeciding($, d => ({
     ...d,
     open: null,
@@ -572,6 +597,12 @@ async function resendDecisions($: EngineInterface) {
 // here waits to be written in, and either can be changed.
 async function reopenDecisions($: EngineInterface) {
   await update($, refreshingAtom, () => null)
+  const lens = await read($, lensAtom)
+  const brief = await read($, briefAtom)
+  if (lens && brief) {
+    const verdicts = (await decidingOf($, brief)).verdicts
+    await dropDecided($, lens, brief.decisions.filter((_, i) => verdicts[i]?.isSent))
+  }
   await changeDeciding($, d => ({
     ...d,
     verdicts: Object.fromEntries(Object.entries(d.verdicts).flatMap(([i, v]) => (v.isByClaude ? [] : [[i, { ...v, isSent: false }]]))),
@@ -595,6 +626,7 @@ async function applyDecisions($: EngineInterface) {
     return
   }
   await update($, refreshingAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint }))
+  await keepDecided($, lens, ready.map(x => ({ point: x.point, answer: x.answer })))
   const sent = new Set(ready.map(x => String(x.i)))
   await changeDeciding($, d => ({
     ...d,

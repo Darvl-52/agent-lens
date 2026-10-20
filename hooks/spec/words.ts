@@ -168,6 +168,8 @@ Up to three, or "none".
 ## Up to you
 What needs a person's decision: open questions, TODOs, places where the author picked an option without a reason or on an assumption. One line each, the file in brackets. If there is none, the single line "Nothing".
 No more than 350 words.`,
+  decidedPrompt: (items: { point: string; answer: string }[]) =>
+    `These points were decided already and sent to be written into the change: do not put them under "Up to you" again, nor a rewording of them, nor how the decision is worded in the files. Raise one again only where the files now go against its decision, and say so.\n\n${items.map(x => `- ${x.point}\n  Decision: ${x.answer}`).join('\n')}`,
   explainPrompt: (change: string) =>
     `This is what changed in the OpenSpec change "${change}" since I last read it: lines with - were removed, with + added. Explain in plain words what changed in substance, as a list of up to seven points; skip rewordings.`,
   askPrompt: (question: string) =>
@@ -350,6 +352,8 @@ const RU: typeof EN = {
 ## Решить тебе
 Что требует решения человека: открытые вопросы, TODO, места, где автор выбрал вариант без обоснования или с допущением. По строке на пункт, файл в скобках. Если такого нет — одна строка «Ничего».
 Не больше 350 слов.`,
+  decidedPrompt: items =>
+    `Эти пункты уже решены и отправлены, чтобы их внесли в изменение: не выноси их снова в «Решить тебе» — ни их, ни их перефразировки, ни то, как решение записано в файлах. Подними пункт снова, только если файлы теперь противоречат решению, и так и скажи.\n\n${items.map(x => `- ${x.point}\n  Решение: ${x.answer}`).join('\n')}`,
   explainPrompt: change =>
     `Вот что изменилось в изменении OpenSpec «${change}» с тех пор, как я его читал: строки с - убраны, с + добавлены. Объясни простыми словами, что поменялось по сути, списком до семи пунктов; правки формулировок пропусти.`,
   askPrompt: question =>

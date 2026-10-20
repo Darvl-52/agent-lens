@@ -521,6 +521,10 @@ test('what is left to decide is settled in the pane and goes to Claude to write 
   await turn()
   await settle()
   expect(briefs()).toBe(before + 1)
+  // The brief made again is told what was decided, so it does not ask it again.
+  expect(asked.filter(e => e.prompt.includes('## Up to you')).at(-1)!.prompt).toMatch(
+    /decided already[^\n]*\n\n- Pick the expiry \(design\.md\)\n  Decision: After a week\n- Who may revoke \(proposal\.md\)\n  Decision: Only the manager/,
+  )
   expect(await pane.find({ key: 'decide-0' })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /brief is made again/ })).toBeUndefined()
   await pane.unmount()
@@ -792,12 +796,16 @@ test('a task the session refused is not kept as routed', async ($, on) => {
 })
 
 test('the review reads the change in view beside the diff, and the row says both on one line', async ($, on) => {
-  const { asked, spec, settle, put, turn } = await project($, on, { door: DOOR })
+  const { asked, spec, settle, put, putAt, turn } = await project($, on, { door: DOOR })
   await spec()
   await settle()
   const design = '# Design\n\nThe grant is a row in door_access.\nIt expires at midnight.\nA manager may revoke it.\nRevoking is logged.\n'
   await $.tool.call({ tool: 'Write', file_path: '/proj/openspec/changes/door/design.md', content: design })
   put('door', 'design.md', design)
+  // The code the turn wrote: the change's own Markdown is left to /spec, so this is what is reviewed.
+  const door = 'export const grant = () => {}\nexport const revoke = () => {}\nexport const log = () => {}\n'
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/door.ts', content: door })
+  putAt('/proj/src/door.ts', door)
   await settle()
   await turn()
   await settle()
@@ -806,12 +814,12 @@ test('the review reads the change in view beside the diff, and the row says both
     /The OpenSpec change in progress in this project, "door"; the diff may work on it\.\nIts tasks not done yet:\n- 1\.2 Cover it with e2e\nWhat its specs require, each requirement with its scenarios:\n- added: api\/access: grant/,
   )
   expect(review?.promptBlocks?.at(-1)?.text).toMatch(/Where the diff works on the OpenSpec change above/)
-  expect(await bandText($)).toMatch(/^◆ door · .* {2}│ {2}✎ 1 file \+3 −0/)
+  expect(await bandText($)).toMatch(/^◆ door · .* {2}│ {2}✎ 2 files \+6 −0/)
   // Too narrow for both: each on its own row.
   const narrow = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 60 } })
   // On a row of its own the change has the whole row, not what is left beside the review.
   expect(textOf(await narrow.find({ key: 'lens-row' }))).toBe('◆ door · spec changed · tasks 1/2 · +1 more')
-  expect(textOf(await narrow.find({ key: 'review-row' }))).toMatch(/^✎ 1 file/)
+  expect(textOf(await narrow.find({ key: 'review-row' }))).toMatch(/^✎ 2 files/)
   await narrow.unmount()
 })
 

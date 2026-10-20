@@ -691,6 +691,19 @@ test('a line there before the session and taken away by the last turn counts onl
   await pane.unmount()
 })
 
+test('edits to the OpenSpec change are left to /spec: a turn of them alone is not reviewed, beside code they are not sent', async ($, on) => {
+  const { asked, turn } = await project($, on, { 'src/app.ts': APP, 'openspec/changes/door/design.md': '# Design\n' })
+  const design = `# Design\n\n${lines(12)}\n`
+  await turn('write the decisions in', { 'openspec/changes/door/design.md': design })
+  expect(asked).toHaveLength(0)
+  expect(await bandText($)).toBe('✎ 1 file +13 −0 · not reviewed: spec edits, /spec reads them · 1 piece not looked at')
+  await turn('add dark mode', { 'src/app.ts': DARK, 'openspec/changes/door/design.md': `${design}line 13\n` })
+  expect(asked.at(-1)!.prompt).toMatch(/=== src\/app\.ts ===/)
+  // Named in the project's file listing, neither its text nor its diff.
+  expect(asked.every(e => !e.prompt.includes('=== openspec/changes/door/design.md ==='))).toBe(true)
+  expect(await bandText($)).toMatch(/^✎ 2 files \+4 −1 · 1 likely bug/)
+})
+
 test('a narrow pane gives the path its room, never the buttons', async ($, on) => {
   const { native, turn, review } = await project($, on, { 'src/app.ts': APP })
   await turn('add dark mode', { 'src/app.ts': DARK })

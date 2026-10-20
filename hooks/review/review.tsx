@@ -302,6 +302,12 @@ async function rulesFor($: EngineInterface, files: readonly FileDiff[]) {
   return text === '' ? w.noRules : `${w.rulesHeading}\n\n${text}`
 }
 
+// The OpenSpec change's own Markdown: /spec reads it, so the review of a turn leaves it out, and a
+// turn that edited it alone is not reviewed.
+const isSpecDoc = (f: FileDiff) => /(?:^|[\\/])openspec[\\/].+\.md$/i.test(f.path)
+const codeOf = (diff: Diff): Diff => ({ ...diff, files: diff.files.filter(f => !isSpecDoc(f)) })
+const isSpecOnly = (diff: Diff) => diff.files.length > 0 && diff.files.every(isSpecDoc)
+
 const isSmall = (diff: Diff) =>
   Math.max(
     diff.files.reduce((n, f) => n + f.added, 0),
@@ -368,7 +374,7 @@ async function spend($: EngineInterface, u: ModelUsage) {
 // disk and the git listing are read once, and every call on the diff sends the same text, which the
 // prompt cache then holds.
 function blocksOf($: EngineInterface, diff: Diff, lang: string) {
-  const key = `${lang}:${diff.mode}:${diff.fingerprint}:${diff.request.length}`
+  const key = `${lang}:${diff.mode}:${diff.fingerprint}:${diff.files.length}:${diff.request.length}`
   let held = contexts.get(key)
   if (!held) {
     held = (async () => ({ rules: await rulesFor($, diff.files), context: await contextFor($, diff) }))()
@@ -398,10 +404,13 @@ async function complete($: EngineInterface, diff: Diff, ask: string, maxTokens: 
   return r.isAnswered ? r.text : undefined
 }
 
-async function reviewDiff($: EngineInterface, diff: Diff) {
+// `whole`: the diff as shown; what is reviewed of it is its code, the change's Markdown aside, unless
+// that is all it holds. Kept by the fingerprint of the whole.
+async function reviewDiff($: EngineInterface, whole: Diff) {
+  const diff = isSpecOnly(whole) ? whole : codeOf(whole)
   if (diff.files.length === 0 || (await read($, reviewsAtom))[diff.fingerprint]) return
   if ((await read($, busyAtom)).includes('review')) {
-    reviewNext = diff
+    reviewNext = whole
     return
   }
   await withBusy($, 'review', async () => {
@@ -690,7 +699,7 @@ async function afterTurn($: EngineInterface, taken: TurnTaken) {
   await carrySeen($, turn)
   if ((await read($, modeAtom)) === 'turn') await update($, shownAtom, () => turn)
   await refreshShown($)
-  if (!isSmall(turn)) await reviewDiff($, turn)
+  if (!isSmall(codeOf(turn))) await reviewDiff($, turn)
 }
 
 // The key `path` is kept by in `kept`: one there that is the same path spelled otherwise (Windows
@@ -1138,7 +1147,7 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
   const bugs = findings.filter(f => f.severity === 'bug').length
   const unseen = turn.files.flatMap(f => f.hunks).filter(hunk => !seen.includes(hunk.id)).length
   const isReviewing = (await read($, busyAtom)).includes('review') && !review
-  const isSkipped = !review && !isReviewing && isSmall(turn)
+  const isSkipped = !review && !isReviewing && isSmall(codeOf(turn))
   // A review that failed, red; one that is neither there nor running (a reload cut it short), yellow.
   const isFailed = !review && !isReviewing && (await read($, failedAtom))[turn.fingerprint] !== undefined
   const isLost = !review && !isReviewing && !isSkipped && !isFailed
@@ -1150,7 +1159,7 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
   const said = [
     `✎ ${w.files(turn.files.length)} +${added} −${removed}`,
     ...(isReviewing ? [w.reviewing] : []),
-    ...(isSkipped ? [w.small] : []),
+    ...(isSkipped ? [isSpecOnly(turn) ? w.specOnly : w.small] : []),
     ...(isFailed ? [w.reviewFailed] : []),
     ...(isLost ? [w.unreviewed] : []),
     ...(bugs > 0 ? [w.bugs(bugs)] : []),
@@ -1175,7 +1184,7 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
         {isSkipped ? (
           <Text>
             {sep}
-            <Text>{w.small}</Text>
+            <Text>{isSpecOnly(turn) ? w.specOnly : w.small}</Text>
           </Text>
         ) : null}
         {isFailed ? (
@@ -1510,7 +1519,13 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         ) : !review && failure !== undefined ? (
           <Text color="error">{`✗ ${w.failedNote(failure)}`}</Text>
         ) : !review && diff?.mode === 'turn' ? (
-          isSmall(diff) ? <Text dimColor>{w.smallNote}</Text> : <Text color="warning">{w.lostNote}</Text>
+          isSpecOnly(diff) ? (
+            <Text dimColor>{w.specOnlyNote}</Text>
+          ) : isSmall(codeOf(diff)) ? (
+            <Text dimColor>{w.smallNote}</Text>
+          ) : (
+            <Text color="warning">{w.lostNote}</Text>
+          )
         ) : !review ? (
           <Text color="warning">{w.notReviewed}</Text>
         ) : all.length === 0 ? (

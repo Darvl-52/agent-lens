@@ -64,6 +64,9 @@ Once a turn has edited a file:
 - `reviewing…`, in yellow, while the review runs.
 - `not reviewed: small change`, as plain text: the turn touched a line or two, so it was not reviewed by
   itself; `r` on Findings reviews it.
+- `not reviewed: spec edits, /spec reads them`, as plain text: the turn edited only the Markdown of
+  `openspec/`; `/spec` reads that, and the review leaves it out of every turn it reviews, so the two
+  do not pick at the same text. `r` on Findings reviews it anyway.
 - `review failed`, in red: the model gave no review (the API failed, or its reply could not be
   read); `not reviewed`, in yellow: the review stopped before it finished, as a reload of the mod
   cuts one short. Either opens Findings, which says why, and `r` there runs it again.
@@ -226,7 +229,8 @@ brief, say) waits its turn, and the pane says what comes next.
    decision contradicts the spec. `d`, `Claude decides all`, sends every point not decided yet:
    Claude takes the answer the change and the code argue for, writes it in with its reason, and
    asks you about a point it cannot settle alone. Once Claude's turn has changed the spec, the brief
-   is made again by itself, and the tab shows what is left. A turn that ends with the spec as it was
+   is made again by itself, told the points already decided so it does not ask them again, and the
+   tab shows what is left. A turn that ends with the spec as it was
    says so: `w` sends the decisions again, `change the answers` brings them back to the tab.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
    the session as your prompt, `do` on a task sends that one: Claude reads the change, does the
