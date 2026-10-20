@@ -873,8 +873,7 @@ export async function startSpec($: EngineInterface, isInteractive: boolean) {
 }
 
 // A /clear or /resume empties the session's values: the change in view is read again, so the row
-// is back before the first prompt. Heard as the old session's end, which runs where an
-// organization manages Claude Code (classic.SessionStart does not there).
+// is back before the first prompt.
 export async function rescanSpec($: EngineInterface) {
   await scan($).catch(() => {})
 }

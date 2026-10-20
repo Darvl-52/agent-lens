@@ -177,7 +177,9 @@ test('a /clear or /resume forgets what was said and the pick on the status line,
   // Another session turned it off meanwhile.
   r.store.set('mode', 'off')
   await $.session.end({ reason: 'resume', sessionId: 'one', resume: { id: 'two' } })
-  expect(r.status.at(-1)).toBeUndefined()
+  // The pick before is gone from the status line; off, read back, is said there.
+  expect(r.status.at(-2)).toBeUndefined()
+  expect(r.status.at(-1)).toBe('skill router: off')
   await r.send('Сделай регистрацию через email')
   expect(r.asked).toHaveLength(1)
   expect(r.entered[1]!.context).toEqual([])

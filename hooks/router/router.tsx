@@ -134,13 +134,18 @@ export async function sessionCompact($: Parameters<Hook<'session.compact'>>[0], 
 }
 
 // A /clear or /resume starts another conversation: nothing said before it, no skill loaded, no pick
-// on the status line. Its values emptied, the mode, the setup and the skills are read again.
+// on the status line.
 export async function clearRouter($: EngineInterface) {
   previous = ''
   answer = ''
   $.ui.status(undefined)
   await forgetLoaded($)
+}
+
+// Its values emptied, the mode, the setup and the skills are read again, and off says so.
+export async function restoreRouter($: EngineInterface) {
   await refreshHeld($)
+  await showMode($, await modeIn($))
   void lookAround($, true).catch(() => undefined)
 }
 

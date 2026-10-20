@@ -42,7 +42,9 @@ export type ReviewDiff = {
 
 // One thing the review found. `severity`: a likely bug, a project rule broken, or a note worth a
 // look (leftover debugging, a change outside the request, a test missing).
-export type ReviewFinding = { id: string; file: string; line?: number; severity: 'bug' | 'rule' | 'note'; text: string; rule?: string }
+// `lineText`: the text of its line as the review read it, so a later diff that changes that line
+// is known to have looked at it.
+export type ReviewFinding = { id: string; file: string; line?: number; severity: 'bug' | 'rule' | 'note'; text: string; rule?: string; lineText?: string }
 
 // How each edit is checked against the project's rules as it is made: `warn` lets it land and
 // tells Claude what it broke, `block` refuses it before it lands, `off` leaves it to the review.
@@ -252,9 +254,10 @@ declare module 'claude-code' {
       // The changed lines of the hunks looked at, each hashed with its file: what carries "looked
       // at" from one diff mode to another, where the hunks are cut otherwise.
       'review.seenLines': string[]
-      // When each review was made and the files its diff held, by the diff's fingerprint: a later
-      // review of a file speaks for it, and an earlier one's findings there close.
-      'review.reviewed': Record<string, { at: number; files: string[] }>
+      // When each review was made, the files its diff held and the lines it took out or rewrote
+      // (hashed), by the diff's fingerprint: an earlier finding whose line a later review saw change,
+      // and did not find again, is closed.
+      'review.reviewed': Record<string, { at: number; files: string[]; changed?: string[] }>
       'review.sent': string[]
       'review.dismissed': string[]
       'review.spent': ReviewSpent

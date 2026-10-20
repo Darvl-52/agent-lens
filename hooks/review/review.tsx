@@ -83,8 +83,9 @@ const GUTTER = 10
 const UNTRACKED_LIMIT = 40
 // Uncommitted files taken before a shell command, and found changed by it, at most, per repository.
 const SHELL_LIMIT = 100
-// An edit refused this many times for one rule goes through on the next try, in `block`: a check
-// that is wrong does not hold Claude up for good.
+// An edit refused this many times in a turn for one rule goes through on the next try, in `block`:
+// a check that is wrong does not hold Claude up for good. Claude is not told so, and the count
+// starts over each turn and once an edit to the file passes clean.
 const REFUSALS = 2
 // The changed lines of hunks looked at kept, at most.
 const SEEN_LINES = 20_000
@@ -430,14 +431,35 @@ async function reviewDiff($: EngineInterface, diff: Diff) {
     // A second, doubting look at what the first found, over the same cached text: it drops a
     // finding that an earlier request, a command run or a file listed shows to be no problem.
     const checked = findings.length === 0 ? undefined : await complete($, diff, w.verifyPrompt(findings.map(f => ({ where: findingAt(f), text: f.text }))), 4000, 'medium')
-    const kept = (checked === undefined ? undefined : keptFindings(checked, findings)) ?? findings
+    const kept = await withLineText($, diff, (checked === undefined ? undefined : keptFindings(checked, findings)) ?? findings)
     await update($, reviewsAtom, all => ({ ...all, [diff.fingerprint]: kept }))
     const at = await $.clock.now()
-    await update($, reviewedAtom, all => ({ ...all, [diff.fingerprint]: { at, files: diff.files.flatMap(f => [f.path, f.shown]) } }))
+    const changed = [...new Set(diff.files.flatMap(f => f.hunks.flatMap(h => h.lines.filter(l => l.kind === '-').map(l => lineKey(l.text)))))]
+    await update($, reviewedAtom, all => ({ ...all, [diff.fingerprint]: { at, files: diff.files.flatMap(f => [f.path, f.shown]), changed } }))
   })
   const next = reviewNext
   reviewNext = undefined
   if (next) await reviewDiff($, next)
+}
+
+// A line as a later diff is matched against it: its text, spaces at the ends aside, hashed.
+const lineKey = (text: string) => hash(text.trim())
+
+// Each finding on a line, with the text of that line as the file holds it now.
+async function withLineText($: EngineInterface, diff: Diff, findings: readonly Finding[]) {
+  const texts = new Map<string, string[] | null>()
+  const out: Finding[] = []
+  for (const f of findings) {
+    const file = diff.files.find(x => isOn(f, [x.path, x.shown]))
+    if (f.line === undefined || !file) {
+      out.push(f)
+      continue
+    }
+    if (!texts.has(file.path)) texts.set(file.path, (await readOrNull($, file.path))?.split('\n') ?? null)
+    const text = texts.get(file.path)?.[f.line - 1]
+    out.push(text !== undefined && text.trim() !== '' ? { ...f, lineText: text } : f)
+  }
+  return out
 }
 
 async function explainHunks($: EngineInterface) {
@@ -898,10 +920,13 @@ async function earlierFindings($: EngineInterface, diff: Diff | null) {
   const dismissed = await read($, dismissedAtom)
   const names = [...(await read($, changedAtom)), ...(diff?.mode === 'uncommitted' ? diff.files.flatMap(f => [f.path, f.shown]) : [])]
   const taken = new Set((diff ? (reviews[diff.fingerprint] ?? []) : []).map(f => f.id))
-  // A later review that read the finding's file speaks for it: what it did not find again is gone.
+  // A later review whose diff changed the finding's line read it again: what it did not find again
+  // there is gone. A finding on a line no later diff touched, or on no line, stays.
   const isOutdated = (f: Finding, fingerprint: string) => {
     const at = reviewed[fingerprint]?.at
-    return at !== undefined && Object.values(reviewed).some(r => r.at > at && isOn(f, r.files))
+    if (at === undefined || f.lineText === undefined) return false
+    const key = lineKey(f.lineText)
+    return Object.values(reviewed).some(r => r.at > at && isOn(f, r.files) && (r.changed ?? []).includes(key))
   }
   return Object.entries(reviews)
     .filter(([fingerprint]) => fingerprint !== diff?.fingerprint)
@@ -946,6 +971,7 @@ export async function restartReview($: EngineInterface) {
 export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Parameters<Hook<'turn.start'>>[1], next: Parameters<Hook<'turn.start'>>[2]) {
   if (e.agentId === undefined) {
     isFailureTold = false
+    refusals.clear()
     await update($, turnBeforeAtom, () => ({}))
     await update($, turnDirtyAtom, () => null)
     await update($, turnShellAtom, () => [])
@@ -994,7 +1020,9 @@ export async function checkBefore($: EngineInterface, e: ToolCallEvent) {
   const change = changeOf(e)
   if (!change || settings.live !== 'block') return undefined
   const found = await inspect($, change).catch(() => [])
-  const keyOf = (v: Violation) => `${canonical(change.file)}\0${v.rule}`
+  const file = `${canonical(change.file)}\0`
+  const keyOf = (v: Violation) => `${file}${v.rule}`
+  if (found.length === 0) for (const key of [...refusals.keys()]) if (key.startsWith(file)) refusals.delete(key)
   const tries = (v: Violation) => refusals.get(keyOf(v)) ?? 0
   const violations = found.filter(v => tries(v) < REFUSALS)
   // Refused for these as often as it may be: let through, for the person to judge on Findings.
@@ -1007,7 +1035,7 @@ export async function checkBefore($: EngineInterface, e: ToolCallEvent) {
   if (violations.length === 0) return undefined
   for (const v of violations) refusals.set(keyOf(v), tries(v) + 1)
   await keepCaught($, change, violations, 'refused').catch(() => {})
-  return refusalFor(change.file, violations, REFUSALS)
+  return refusalFor(change.file, violations)
 }
 
 // Or beside the turn once it has landed, in `warn`. What the checks found rides on the loop's next

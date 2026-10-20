@@ -331,6 +331,7 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('classic.Stop', () => ({}))
+  on('classic.SessionStart', () => ({}))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   await $.tool.call({ tool: 'Write', file_path: '/proj/probe', content: '' })
   probing = false
@@ -921,7 +922,7 @@ test('block refuses an edit that breaks a rule before it lands', { options: { li
   const { disk, native, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
   setViolations(COMMENT)
   const ran = await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
-  expect(ran.deny).toMatch(/^agent-lens refused this edit to .*app\.ts[\s\S]*Redo the edit following these rules\. If you are sure the check is wrong, make the same edit again: after 2 refusals of it, it goes through and the developer decides\.$/)
+  expect(ran.deny).toMatch(/^agent-lens refused this edit to .*app\.ts[\s\S]*Redo the edit following these rules\.$/)
   expect(disk.get('/proj/src/app.ts')).toBe(APP)
   expect(toasts).toEqual(['CLAUDE.md: 1 rule broken in app.ts'])
 })
@@ -1049,13 +1050,19 @@ test('"looked at" carries over to the session diff, where the turns are one piec
   await pane.unmount()
 })
 
-test('a later review of a file speaks for it: what an earlier one found there and it did not is gone', async ($, on) => {
+test("a later review that saw a finding's line change, and did not find it again, closes it; one on lines it did not touch stays", async ($, on) => {
   const { turn, setReviewed } = await project($, on, { 'src/app.ts': APP })
   await turn('add dark mode', { 'src/app.ts': DARK })
   expect(await bandText($)).toMatch(/1 likely bug · 1 finding/)
   setReviewed('[]')
-  await turn('and a contrast toggle', { 'src/app.ts': DARK.replace('"high"', '"low"\nexport const toggle = true\nexport const more = 1') })
-  expect(await bandText($)).not.toMatch(/likely bug|finding/)
+  // Lines below the bug's: the bug was not looked at again, and stays.
+  const toggled = DARK.replace('"high"', '"low"\nexport const toggle = true\nexport const more = 1')
+  await turn('and a contrast toggle', { 'src/app.ts': toggled })
+  expect(await bandText($)).toMatch(/1 likely bug · 1 finding/)
+  // The bug's own line rewritten and reviewed clean: it closes; the note on no line stays.
+  await turn('follow the system', { 'src/app.ts': toggled.replace('export const theme = "dark"', 'export const theme = system()\nexport const system = () => (dark() ? "dark" : "light")\nexport const dark = () => true\nexport const fallback = "light"') })
+  expect(await bandText($)).toMatch(/· 1 finding ·/)
+  expect(await bandText($)).not.toMatch(/likely bug/)
 })
 
 test('short evidence is looked for near where it was: gone from there, the rule is fixed', async ($, on) => {
@@ -1109,4 +1116,33 @@ test('states read at a glance: running yellow, with Claude yellow, put aside gre
   expect(await pane.find({ type: 'Text', text: /^✓ put aside$/ })).toMatchObject({ props: { color: 'success' } })
   await pane.unmount()
   expect([1, 2, 5, 21].map(WORDS.ru.unseen)).toEqual(['1 кусок не просмотрен', '2 куска не просмотрены', '5 кусков не просмотрено', '21 кусок не просмотрен'])
+})
+
+test("in block the count of refusals is the turn's, and a clean edit to the file starts it over", { options: { live: 'block' } }, async ($, on) => {
+  const { native, setViolations } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  const write = (content = COMMENTED) => $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content })
+  setViolations(COMMENT)
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  // A new turn: refused again, not let through.
+  await $.turn.start({ text: 'go on', turnId: 't2' })
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  // A clean edit between: the count starts over.
+  setViolations('{"violations":[]}')
+  expect((await write(DARK)).deny).toBeUndefined()
+  setViolations(COMMENT)
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  expect((await write()).deny).toMatch(/^agent-lens refused/)
+  expect((await write()).deny).toBeUndefined()
+})
+
+test('after a /clear the parts read back what they show on the classic SessionStart, its values emptied by then', async ($, on) => {
+  const { store, turn } = await project($, on, { 'src/app.ts': APP })
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  await $.session.end({ reason: 'clear', sessionId: 'one', resume: { id: 'one' } })
+  // Another session switched the language once the old one had ended.
+  store.set('lang', 'ru')
+  await $.classic.SessionStart({ source: 'clear' })
+  expect(await bandText($)).toMatch(/^✎ 1 файл/)
 })

@@ -59,7 +59,7 @@ Once a turn has edited a file:
 - `1 likely bug`, in red, `2 findings`, in yellow: what the review found, made by itself after the
   turn, and those of earlier reviews still open, with every rule an edit broke that is still in the
   code. A finding stays until it is sent to Claude or put aside, its file is back as it was
-  before the session, or a later review of its file does not find it again. A rule put aside and
+  before the session, or a later review that saw its line change does not find it again. A rule put aside and
   broken again shows again.
 - `reviewing…`, in yellow, while the review runs.
 - `not reviewed: small change`, as plain text: the turn touched a line or two, so it was not reviewed by
@@ -286,7 +286,7 @@ and the list of skills, and picks the one that fits, or none. Claude is then tol
 - Every skill the Skill tool can run is a candidate: plugin skills (`mattpocock-skills:tdd`), your `~/.claude/skills` and `~/.claude/commands`, the project's `.claude/skills` and `.claude/commands` (OpenSpec puts its own there). Install or write a skill and it is routed from the next prompt on.
 - Your rules are checked first; a word matches at the start of a word in any case, so `test` finds `tests` but not `latest`, and `тест` finds `тесты`. A rule that fires skips the model, its skill loaded already or not.
 - Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change. It reads at most the first 4,000 characters of a prompt and 400 of each skill's description.
-- A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, clears the status line, and reads its mode and your rules again.
+- A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, takes the last pick off the status line, and reads its mode and your rules again (off says so there).
 - A prompt that names a skill (`/tdd`, `mattpocock-skills:tdd`), a slash command, and prompts from other plugins or scheduled runs are left alone.
 - If the model fails or is slow (8 seconds), the prompt goes through as typed, and the status line says `skill: model failed`.
 
@@ -355,7 +355,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Setting                     | Default | What it does                                                                                                                                         |
 | --------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Language                    | `en`    | Every part's language until `lang` sets one                                                                                                          |
-| Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit; an edit refused twice for one rule goes through on the next try, on Findings for you to judge); `off` leaves the rules to the review |
+| Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit; an edit refused twice in a turn for one rule goes through on the next try, on Findings for you to judge); `off` leaves the rules to the review |
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |

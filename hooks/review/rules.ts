@@ -61,8 +61,8 @@ const listed = (violations: readonly Violation[]) =>
 export const noteFor = (file: string, violations: readonly Violation[]) =>
   `agent-lens: your edit to ${file} breaks the project's CLAUDE.md rules.\n${listed(violations)}\nFix this before moving on.`
 
-export const refusalFor = (file: string, violations: readonly Violation[], tries: number) =>
-  `agent-lens refused this edit to ${file}: it breaks the project's CLAUDE.md rules.\n${listed(violations)}\nRedo the edit following these rules. If you are sure the check is wrong, make the same edit again: after ${tries} refusals of it, it goes through and the developer decides.`
+export const refusalFor = (file: string, violations: readonly Violation[]) =>
+  `agent-lens refused this edit to ${file}: it breaks the project's CLAUDE.md rules.\n${listed(violations)}\nRedo the edit following these rules.`
 
 // The line of `text` the evidence starts on, counted from 1.
 export const lineOf = (text: string, evidence: string) => {

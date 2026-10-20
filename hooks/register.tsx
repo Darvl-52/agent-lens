@@ -1,4 +1,4 @@
-import type { Register, RenderChildren } from 'claude-code'
+import type { Hook, Register, RenderChildren } from 'claude-code'
 
 import { configureLang, restoreLang } from './core/lang'
 import {
@@ -27,6 +27,7 @@ import {
   endRouterTurn,
   promptAutocomplete,
   promptSubmit,
+  restoreRouter,
   command as routerCommand,
   pane as routerPane,
   sessionCompact,
@@ -46,6 +47,14 @@ import { afterSpecEdit, endSpecTurn, openPane as openSpec, rescanSpec, PANE as S
 const SPLIT = '  │  '
 const MIN_SPEC = 40
 
+// What every part shows, read back into values a /clear or /resume emptied: the language, the change
+// in view, the router's mode, setup and skills.
+async function readBack($: Parameters<Hook<'session.end'>>[0]) {
+  await restoreLang($).catch(() => {})
+  await rescanSpec($).catch(() => {})
+  await restoreRouter($).catch(() => {})
+}
+
 export const register: Register = (on, options) => {
   configureLang(options)
   configureReview(options)
@@ -60,19 +69,25 @@ export const register: Register = (on, options) => {
     return started
   })
 
-  // A /clear or /resume starts a conversation with its values emptied and no session.start; the
-  // old one's end says so, where an organization manages Claude Code too. Each part drops what it
-  // kept of the old conversation and reads back what it shows.
+  // A /clear or /resume starts a conversation with its values emptied and no session.start. The old
+  // one's end drops what each part's module kept of it; its values are emptied after that end, so
+  // what the parts show is read back on the classic SessionStart that follows. Where an organization
+  // manages Claude Code no classic hook runs: the end reads it back too, for as long as it lasts.
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
-      await restoreLang($).catch(() => {})
       await restartReview($).catch(() => {})
-      await rescanSpec($).catch(() => {})
       await clearRouter($).catch(() => {})
+      await readBack($)
     }
     return ended
   })
+
+  on('classic.SessionStart', async ($, e, next) => {
+    const started = await next(e)
+    if (e.source === 'clear' || e.source === 'resume') await readBack($)
+    return started
+  }).catch(($, e, next) => next(e))
 
   on('session.compact', ($, e, next) => sessionCompact($, e, next))
   on('prompt.submit', ($, e, next) => promptSubmit($, e, next))
