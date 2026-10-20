@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { Decision, Mode, Setup, Skill, Tab } from '../../types/router'
+import type { Decision, Mode, Setup, Skill, Stats, Tab } from '../../types/router'
 import { langIn } from '../core/lang'
 import { setupOf } from './route'
 import { WORDS } from './words'
@@ -11,6 +11,8 @@ import type { Words } from './words'
 
 // The router's last few decisions, newest first, for the pane.
 const decisionsAtom = atom({ plugin: 'agent-lens', key: 'router.decisions' } as const, [] as Decision[])
+// Every prompt routed this session, counted: the decisions keep the last few alone.
+const statsAtom = atom({ plugin: 'agent-lens', key: 'router.stats' } as const, null)
 // The skills loaded in this conversation so far: the router does not pick them again.
 const loadedAtom = atom({ plugin: 'agent-lens', key: 'router.loaded' } as const, [] as string[])
 // The mode and the person's own setup, as last read from the store, for the pane, which only reads;
@@ -85,7 +87,23 @@ export async function holdCatalog($: EngineInterface, catalog: Skill[], project:
   await update($, projectAtom, () => project)
 }
 
+const NO_STATS: Stats = { prompts: 0, withSkill: 0, byRule: 0, byModel: 0, bySkill: {} }
+
+// The counts with `d` in them.
+const counted = (s: Stats, d: Decision): Stats => ({
+  prompts: s.prompts + 1,
+  withSkill: s.withSkill + (d.picks.length > 0 ? 1 : 0),
+  byRule: s.byRule + d.picks.filter(p => p.by === 'rule').length,
+  byModel: s.byModel + d.picks.filter(p => p.by === 'model').length,
+  bySkill: d.picks.reduce((all, p) => ({ ...all, [p.skill]: (all[p.skill] ?? 0) + 1 }), s.bySkill),
+})
+
+// The counts as kept, else as the decisions kept say them (oldest first).
+export const statsOf = (stats: Stats | null, decisions: readonly Decision[]) => stats ?? [...decisions].reverse().reduce(counted, NO_STATS)
+
 export async function addDecision($: EngineInterface, decision: Decision, kept: number) {
+  const before = await read($, decisionsAtom)
+  await update($, statsAtom, s => counted(statsOf(s, before), decision))
   await update($, decisionsAtom, list => [decision, ...list].slice(0, kept))
 }
 
@@ -119,7 +137,7 @@ export async function setFormHint($: EngineInterface, text: string) {
 
 // Everything the pane draws, read at once; drawing only reads.
 export async function paneState($: EngineInterface) {
-  const [tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint] = await Promise.all([
+  const [tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats] = await Promise.all([
     read($, tabAtom),
     read($, modeAtom),
     read($, flashAtom),
@@ -132,9 +150,10 @@ export async function paneState($: EngineInterface) {
     read($, formSkillAtom),
     read($, formWordsAtom),
     read($, formHintAtom),
+    read($, statsAtom),
   ])
 
-  return { tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint }
+  return { tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats: statsOf(stats, decisions) }
 }
 
 export async function flash($: EngineInterface, text: string | null) {

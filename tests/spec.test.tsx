@@ -225,6 +225,8 @@ const project = async (
   const asked: ModelCompleteInput[] = []
   const opened: string[] = []
   const submitted: { text: string; asUser?: true; context?: readonly string[] }[] = []
+  // Set: the session refuses the next prompt, for this reason.
+  let refusal: string | undefined
   const toasts: string[] = []
   const ran: { argv: readonly string[]; cwd?: string }[] = []
   if (validate)
@@ -282,6 +284,7 @@ const project = async (
   })
   on('command.register', () => ({ value: { command: 'spec' } }))
   on('prompt.submit', ($, e) => {
+    if (refusal !== undefined) return { drop: refusal }
     submitted.push({ text: e.text, ...(e.origin?.kind === 'plugin' && e.origin.asUser ? { asUser: true as const } : {}), ...(e.context?.length ? { context: e.context } : {}) })
     return { text: e.text }
   })
@@ -307,7 +310,7 @@ const project = async (
     await $.tool.call({ tool: 'Write', file_path: `/proj/openspec/changes/${change}/${file}`, content: text })
   }
   const turn = () => $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms) }
+  return { store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why) }
 }
 
 // The text of a found element and everything under it.
@@ -749,6 +752,22 @@ test('a task sent from /spec gets OpenSpec\'s own skill from the router, no mode
   expect(submitted[0]!.text).toMatch(/^Do task 1\.2 of the OpenSpec change "door"[\s\S]*\n\nLoad the `opsx:apply` skill with the Skill tool first and follow it\.$/)
   expect(asked).toHaveLength(before)
   await pane.unmount()
+})
+
+test('a task the session refused is not kept as routed', async ($, on) => {
+  const { spec, settle, refuse } = await project($, on, { door: DOOR })
+  await spec()
+  await settle()
+  refuse('a Stop hook stands')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-tasks' })
+  await pane.press({ key: 'do-next' })
+  expect(await pane.find({ type: 'Text', text: /^✗ The prompt was not sent: a Stop hook stands\.$/ })).toBeDefined()
+  await pane.unmount()
+  const router = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane', requestId: 'agent-lens-router', props: PANE.props })
+  expect(await router.find({ type: 'Text', text: /sent from \/spec/ })).toBeUndefined()
+  expect(await router.find({ type: 'Text', text: /^Nothing routed yet/ })).toBeDefined()
+  await router.unmount()
 })
 
 test('the review reads the change in view beside the diff, and the row says both on one line', async ($, on) => {

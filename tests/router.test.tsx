@@ -41,10 +41,15 @@ async function router($: Engine, on: On, setup: Setup = {}) {
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
-  on('command.list', () => ({ value: COMMANDS }))
+  let commands = COMMANDS
+  const reads: string[] = []
+  on('command.list', () => ({ value: commands }))
   on('command.register', () => ({ value: { command: 'router' } }))
   on('session.root', () => ({ value: '/proj' }))
-  on('fs.read', ($, e) => (files.has(key(e.path)) ? { value: files.get(key(e.path))! } : { deny: `ENOENT: ${e.path}` }))
+  on('fs.read', ($, e) => {
+    reads.push(key(e.path))
+    return files.has(key(e.path)) ? { value: files.get(key(e.path))! } : { deny: `ENOENT: ${e.path}` }
+  })
   on('fs.list', ($, e) => {
     const dir = key(e.path)
     const names = new Map<string, 'file' | 'dir'>()
@@ -91,7 +96,7 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const run = (args: string) =>
     $.command.run({ command: 'router', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
 
-  return { asked, entered, status, opened, store, send, run }
+  return { asked, entered, status, opened, store, reads, send, run, install: (c: CommandInfo) => (commands = [...commands, c]) }
 }
 
 test('with no rule, the model picks and Claude is told to load the skill', async ($, on) => {
@@ -187,7 +192,8 @@ test('a model that fails lets the prompt through as typed', async ($, on) => {
   const r = await router($, on, { reply: null })
   await r.send('Почини выгрузку отчёта в Excel')
   expect(r.entered[0]).toEqual({ text: 'Почини выгрузку отчёта в Excel', context: [] })
-  expect(r.status.at(-1)).toBeUndefined()
+  // Said where the pick would be, so no pick is not read as nothing fitting.
+  expect(r.status.at(-1)).toBe('skill: model failed')
 })
 
 test('suggest leaves the call to Claude; off routes nothing', async ($, on) => {
@@ -365,5 +371,59 @@ test('the history tab lists every decision; + rule takes a model pick to the rul
   expect((await ui.find({ key: 'tab-rules' }))?.props.label).toBe('[Rules]')
   expect((await ui.find({ key: 'form-skill' }))?.props.value).toBe('mattpocock-skills:diagnosing-bugs')
   expect(await shows(ui, /Type the words for a rule that runs diagnosing-bugs\./)).toBe(true)
+  await ui.unmount()
+})
+
+const SPEC_FILES = { '/proj/openspec/changes/door/tasks.md': '- [x] 1.1 a\n- [ ] 1.2 b\n' }
+const RULES = { setup: { rules: [{ skill: 'tdd', when: ['фильтр'] }], hints: {}, ignored: [] } }
+
+test('a rule that fires settles the prompt even where its skill is loaded: the model is not asked, the changes not read', async ($, on) => {
+  const r = await router($, on, { reply: '{"picks":[{"skill":"diagnosing-bugs"}]}', stored: RULES, files: SPEC_FILES })
+  await r.send('Добавь фильтр по цене в каталог')
+  expect(r.entered[0]!.context.at(-1)).toContain('mattpocock-skills:tdd')
+  await $.skill.prompt({ skill: 'tdd', pluginName: 'mattpocock-skills', text: 'TDD.', frontmatter: {}, source: 'plugin' } as any)
+  await r.send('Ещё фильтр по бренду')
+  expect(r.asked).toHaveLength(0)
+  expect(r.entered[1]!.context).toEqual([])
+  expect(r.reads.filter(p => p.endsWith('tasks.md'))).toEqual([])
+  // Asked, the model is told the changes.
+  await r.send('Почини выгрузку отчёта в Excel, она падает на больших файлах')
+  expect(r.asked[0]!.prompt).toContain('door (1/2)')
+})
+
+test('the model reads at most so much of a pasted prompt', async ($, on) => {
+  const r = await router($, on)
+  await r.send(`Почини это: ${'x'.repeat(20_000)}`)
+  expect(r.asked[0]!.prompt.length).toBeLessThan(6_000)
+  expect(r.asked[0]!.prompt).toMatch(/x…\n<\/request>$/)
+})
+
+test("a skill the project leaves out is said so by list, and unignore sends to the project's file", async ($, on) => {
+  const r = await router($, on, { files: { '/proj/.claude/skill-router.json': JSON.stringify({ ignored: ['tdd'] }) } })
+  expect((await r.run('list')).text).toMatch(/^✗ mattpocock-skills:tdd — Test-driven development\. \(left out by the project\)$/m)
+  expect((await r.run('unignore tdd')).text).toBe("tdd is left out by the project's .claude/skill-router.json: change it there.")
+})
+
+test('a skill installed while the router is off can be given a rule', async ($, on) => {
+  const r = await router($, on, { stored: { mode: 'off' } })
+  await r.run('list')
+  // Installed after the skills were listed, with no prompt routed since.
+  r.install({ name: 'openspec-explore', description: 'Explore an idea before a change.', source: 'user' })
+  expect((await r.run('add openspec-explore идея, explore')).text).toBe('Rule added: openspec-explore ← идея, explore')
+})
+
+test('the session counts every prompt routed, past the last 30 the history keeps', async ($, on) => {
+  const r = await router($, on, { reply: '{"picks":[{"skill":"tdd","why":"feature"}]}' })
+  for (let i = 0; i < 32; i++) await r.send(`Сделай фичу номер ${i} с тестами`)
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /^This session: 32 prompts, 32 with a skill \(0 by rule, 32 by model\)$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane is laid out for its own width, not the terminal', async ($, on) => {
+  const r = await router($, on)
+  await r.send('Сделай фичу с тестами')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
+  expect(await ui.find({ type: 'Text', text: /^─{38}$/ })).toBeDefined()
   await ui.unmount()
 })

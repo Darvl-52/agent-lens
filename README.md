@@ -278,11 +278,11 @@ and the list of skills, and picks the one that fits, or none. Claude is then tol
 ### How it works
 
 - Every skill the Skill tool can run is a candidate: plugin skills (`mattpocock-skills:tdd`), your `~/.claude/skills` and `~/.claude/commands`, the project's `.claude/skills` and `.claude/commands` (OpenSpec puts its own there). Install or write a skill and it is routed from the next prompt on.
-- Your rules are checked first; a word matches at the start of a word in any case, so `test` finds `tests` but not `latest`, and `тест` finds `тесты`. A rule that fires skips the model.
-- Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change.
+- Your rules are checked first; a word matches at the start of a word in any case, so `test` finds `tests` but not `latest`, and `тест` finds `тесты`. A rule that fires skips the model, its skill loaded already or not.
+- Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change. It reads at most the first 4,000 characters of a prompt and 400 of each skill's description.
 - A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, clears the status line, and reads its mode and your rules again.
 - A prompt that names a skill (`/tdd`, `mattpocock-skills:tdd`), a slash command, and prompts from other plugins or scheduled runs are left alone.
-- If the model fails or is slow (8 seconds), the prompt goes through as typed.
+- If the model fails or is slow (8 seconds), the prompt goes through as typed, and the status line says `skill: model failed`.
 
 ### Add your own
 

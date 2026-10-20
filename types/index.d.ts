@@ -200,6 +200,9 @@ export type RouterPick = { skill: string; why: string; args?: string; by: 'rule'
 // picked nothing for a reason worth showing (no skills, the model failed).
 export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; ms: number; note?: string }
 
+// The session's prompts routed, counted whole: the decisions keep only the last few.
+export type RouterStats = { prompts: number; withSkill: number; byRule: number; byModel: number; bySkill: Record<string, number> }
+
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
 
@@ -284,6 +287,8 @@ declare module 'claude-code' {
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]
+      // Null until the first prompt routed since the counts were kept: read from the decisions.
+      'router.stats': RouterStats | null
       'router.loaded': string[]
       'router.mode': RouterMode | null
       'router.setup': RouterSetup | null

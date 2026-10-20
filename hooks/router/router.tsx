@@ -3,7 +3,7 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-c
 import type { Change, Decision, Pick, Setup, Skill } from '../../types/router'
 import type { PaneHook } from '../core/hooks'
 import { restoreLang } from '../core/lang'
-import { catalogNow, isLoaded, KEPT_DECISIONS, lookAround, oneLine } from './catalog'
+import { catalogNow, changesIn, isLoaded, KEPT_DECISIONS, lookAround, oneLine } from './catalog'
 import { drawPane } from './pane'
 import { SYSTEM, directiveOf, isTerse, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf } from './route'
 import {
@@ -33,17 +33,20 @@ const MODEL_TIMEOUT_MS = 8_000
 let previous = ''
 let answer = ''
 
-// What the router picks for a prompt: the person's rules first; where none fits, the model, unless
-// the prompt says too little to go on or the person named a skill themselves.
+// What the router picks for a prompt: the person's rules first, and a rule that fires settles it,
+// its skill loaded already or not; where none fires, the model, unless the prompt says too little to
+// go on or the person named a skill themselves.
 async function routeOf($: EngineInterface, text: string, useModel: boolean, model: string) {
-  const { skills, setup, changes } = await lookAround($)
+  const { skills, setup } = await lookAround($)
   if (skills.length === 0) return { picks: [] as Pick[], note: 'no skills' }
   if (namesSkill(text, skills)) return { picks: [] as Pick[], note: 'named' }
   const loaded = await loadedIn($)
   const fresh = (picks: Pick[]) => picks.filter(p => !isLoaded(p.skill, loaded))
-  const byRule = fresh(ruleHits(text, setup.rules, skills))
-  if (byRule.length > 0 || !useModel || isTerse(text)) return { picks: byRule }
+  const hits = ruleHits(text, setup.rules, skills)
+  if (hits.length > 0) return fresh(hits).length > 0 ? { picks: fresh(hits) } : { picks: [] as Pick[], note: 'loaded' }
+  if (!useModel || isTerse(text)) return { picks: [] as Pick[] }
 
+  const changes = await changesIn($).catch(() => null)
   const prompt = promptOf(text, { skills, hints: setup.hints, loaded, changes, previous, answer })
   const reply = await $.model.complete({
     model,
@@ -96,7 +99,10 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
   }
   await addDecision($, decision, KEPT_DECISIONS)
   const words = await wordsIn($)
-  $.ui.status(routed.picks.length > 0 ? words.status(routed.picks.map(p => shortOf(p.skill)).join(', ')) : undefined)
+  // A model that failed says so where the pick would be, so no pick is not read as nothing fitting.
+  $.ui.status(
+    routed.picks.length > 0 ? words.status(routed.picks.map(p => shortOf(p.skill)).join(', ')) : 'note' in routed && routed.note === 'failed' ? words.status(words.failed) : undefined,
+  )
   if (routed.picks.length === 0) return next(e)
 
   return next({ ...e, context: [...(e.context ?? []), directiveOf(mode, routed.picks)] })
@@ -136,7 +142,7 @@ export async function clearRouter($: EngineInterface) {
   await forgetLoaded($)
   await restoreLang($)
   await refreshHeld($)
-  void lookAround($).catch(() => undefined)
+  void lookAround($, true).catch(() => undefined)
 }
 
 export async function command($: Parameters<MatchedHook<'command.run', { command: 'router' }>>[0], e: Parameters<MatchedHook<'command.run', { command: 'router' }>>[1]) {
@@ -158,19 +164,21 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
 
     return { text: words.opened }
   }
+  // The skills as installed now, whatever the mode: a skill installed while the router was off is
+  // found, and the project's own left-out ones are known.
+  const around = await lookAround($).catch(() => undefined)
+  const byProject = around?.project.ignored ?? []
   if (verb === 'list') {
-    await lookAround($).catch(() => undefined)
     const own = await ownSetup($)
     const lines = catalogNow().map(s => {
-      const isOut = own.ignored.includes(s.name)
+      const isOut = own.ignored.includes(s.name) || byProject.includes(s.name)
 
-      return `${isOut ? '✗' : '·'} ${s.name} — ${oneLine(s.description, 80)}`
+      return `${isOut ? '✗' : '·'} ${s.name} — ${oneLine(s.description, 80)}${byProject.includes(s.name) ? ` (${words.leftOutByProject})` : ''}`
     })
 
     return { text: words.list(lines) }
   }
 
-  if (catalogNow().length === 0) await lookAround($).catch(() => undefined)
   const own = await ownSetup($)
 
   if (verb === 'rm') {
@@ -199,6 +207,7 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
 
       return { text: words.hinted(shortOf(skill)) }
     }
+    if (verb === 'unignore' && byProject.includes(skill)) return { text: words.ignoredByProject(shortOf(skill)) }
     const ignored = own.ignored.filter(s => s !== skill)
     await saveSetup($, { ...own, ignored: verb === 'ignore' ? [...ignored, skill] : ignored })
 
@@ -228,5 +237,6 @@ export async function promptAutocomplete($: Parameters<Hook<'prompt.autocomplete
 }
 
 export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1]) {
-  return drawPane($, $.ui.resolve(e), { columns: e.viewport?.columns ?? 80, rows: e.viewport?.rows ?? 24, surface: e.surface })
+  // The pane's own width, not the terminal's: it may sit beside the chat.
+  return drawPane($, $.ui.resolve(e), { columns: e.props.bodyColumns, rows: e.viewport?.rows ?? 24, surface: e.surface })
 }

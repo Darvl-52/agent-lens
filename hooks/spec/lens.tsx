@@ -4,7 +4,7 @@ import type { EngineInterface, Hook, MatchedHook } from 'claude-code'
 import type { Brief, Busy, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn, restoreLang } from '../core/lang'
-import { specSkill } from '../router/catalog'
+import { sentWithSkill, specSkill } from '../router/catalog'
 import {
   annotateRequirements,
   blocksArchive,
@@ -578,9 +578,11 @@ async function applyDecisions($: EngineInterface) {
 
 // A task or an archiving goes to Claude naming OpenSpec's own skill for it, where the router has one.
 async function send($: EngineInterface, kind: 'task' | 'archive', text: string) {
-  const skill = await specSkill($, kind, text).catch(() => undefined)
+  const skill = await specSkill($, kind).catch(() => undefined)
   const w = await wordsIn($)
-  return $.prompt.submit({ text: skill ? `${text}\n\n${w.withSkill(skill)}` : text, asUser: true })
+  const r = await $.prompt.submit({ text: skill ? `${text}\n\n${w.withSkill(skill)}` : text, asUser: true })
+  if (skill && r.drop === undefined) await sentWithSkill($, skill, text).catch(() => {})
+  return r
 }
 
 // One task goes to the session as the person's prompt: Claude does it and ticks it.

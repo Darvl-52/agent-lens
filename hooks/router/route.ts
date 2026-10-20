@@ -132,6 +132,10 @@ Where the project uses OpenSpec and the request is about one of its changes, nam
 
 Reply with JSON alone: {"picks":[{"skill":"<exact name from the list>","why":"<under 12 words>","args":"<optional>"}]}. No picks: {"picks":[]}.`
 
+// What the model is sent, at most: a skill's description or hint, all the skills, the request. A
+// pasted log or file says what it is in its first lines.
+export const PROMPT_LIMITS = { description: 400, skills: 40_000, request: 4_000 }
+
 export type Context = {
   skills: readonly Skill[]
   hints: Record<string, string>
@@ -144,9 +148,11 @@ export type Context = {
 // The request as the model reads it: the skills (the long part, the same from prompt to prompt, so it
 // opens the message and is cached), then what is going on, then the request.
 export function promptOf(text: string, c: Context): { skills: string; rest: string } {
+  const cut = (s: string, room: number) => (s.length > room ? `${s.slice(0, room - 1)}…` : s)
   const skills = c.skills
-    .map(s => `- ${s.name}: ${s.description}${c.hints[s.name] ? ` [The developer says: use it ${c.hints[s.name]}]` : ''}`)
+    .map(s => `- ${s.name}: ${cut(s.description, PROMPT_LIMITS.description)}${c.hints[s.name] ? ` [The developer says: use it ${cut(c.hints[s.name]!, PROMPT_LIMITS.description)}]` : ''}`)
     .join('\n')
+    .slice(0, PROMPT_LIMITS.skills)
   const changes =
     c.changes === null
       ? ''
@@ -163,7 +169,7 @@ export function promptOf(text: string, c: Context): { skills: string; rest: stri
 
   return {
     skills: `Skills:\n${skills}`,
-    rest: `${changes}${loaded}${before ? `${before}\n\n` : ''}The request to route:\n<request>\n${text}\n</request>`,
+    rest: `${changes}${loaded}${before ? `${before}\n\n` : ''}The request to route:\n<request>\n${cut(text, PROMPT_LIMITS.request)}\n</request>`,
   }
 }
 

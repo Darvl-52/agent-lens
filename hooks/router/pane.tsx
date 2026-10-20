@@ -1,6 +1,6 @@
 import type { Elements, EngineInterface } from 'claude-code'
 
-import type { Decision, Lang, Setup, Skill, Tab } from '../../types/router'
+import type { Decision, Lang, Setup, Skill, Stats, Tab } from '../../types/router'
 import { NO_SETUP, shortOf } from './route'
 import {
   MODES,
@@ -100,6 +100,7 @@ export async function drawPane($: EngineInterface, els: Els, view: View) {
     project: held.project ?? NO_SETUP,
     catalog: held.catalog,
     decisions: held.decisions,
+    stats: held.stats,
     loaded: held.loaded,
     columns: Math.max(30, view.columns - 2),
     canType: view.surface !== 'mobile',
@@ -163,6 +164,7 @@ type Data = {
   project: Setup
   catalog: Skill[]
   decisions: Decision[]
+  stats: Stats
   loaded: string[]
   columns: number
   canType: boolean
@@ -174,11 +176,7 @@ function overviewTab(els: Els, d: Data) {
   const { Box, Text } = els
   const { words } = d
   const last = d.decisions[0]
-  const picked = d.decisions.filter(x => x.picks.length > 0)
-  const picks = d.decisions.flatMap(x => x.picks)
-  const counts = new Map<string, number>()
-  for (const p of picks) counts.set(p.skill, (counts.get(p.skill) ?? 0) + 1)
-  const top = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 3)
+  const top = Object.entries(d.stats.bySkill).sort((a, b) => b[1] - a[1]).slice(0, 3)
   const out = new Set([...d.own.ignored, ...d.project.ignored]).size
 
   if (last === undefined) {
@@ -218,12 +216,7 @@ function overviewTab(els: Els, d: Data) {
         )}
       </Box>
       <Text wrap="truncate-end">
-        {words.sessionStats(
-          d.decisions.length,
-          picked.length,
-          picks.filter(p => p.by === 'rule').length,
-          picks.filter(p => p.by === 'model').length,
-        )}
+        {words.sessionStats(d.stats.prompts, d.stats.withSkill, d.stats.byRule, d.stats.byModel)}
       </Text>
       {top.length > 0 && (
         <Text wrap="truncate-end">

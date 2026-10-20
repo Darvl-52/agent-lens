@@ -57,6 +57,9 @@ export type Words = {
   makeRule: string
   ruleFor: (skill: string) => string
   hintRemoved: (skill: string) => string
+  leftOutByProject: string
+  ignoredByProject: (skill: string) => string
+  fromSpec: string
 }
 
 export const WORDS: Record<Lang, Words> = {
@@ -96,6 +99,9 @@ export const WORDS: Record<Lang, Words> = {
     noSuchRule: n => `No rule ${n}.`,
     list: lines => (lines.length > 0 ? lines.join('\n') : 'No skills found.'),
     failed: 'model failed',
+    leftOutByProject: 'left out by the project',
+    fromSpec: 'sent from /spec',
+    ignoredByProject: skill => `${skill} is left out by the project's .claude/skill-router.json: change it there.`,
     opened: 'Skill router pane opened.',
     langSet: 'Skill router speaks English now.',
     tabs: { overview: 'Overview', rules: 'Rules', skills: 'Skills', history: 'History' },
@@ -110,7 +116,9 @@ export const WORDS: Record<Lang, Words> = {
           ? 'the model failed'
           : note === 'no skills'
             ? 'no skills installed'
-            : 'nothing fit',
+            : note === 'loaded'
+              ? 'the skill its rule names is loaded already'
+              : 'nothing fit',
     sessionStats: (n, withSkill, byRule, byModel) =>
       `This session: ${n} prompts, ${withSkill} with a skill (${byRule} by rule, ${byModel} by model)`,
     top: 'Most picked',
@@ -170,6 +178,9 @@ export const WORDS: Record<Lang, Words> = {
     noSuchRule: n => `Правила ${n} нет.`,
     list: lines => (lines.length > 0 ? lines.join('\n') : 'Скиллов не найдено.'),
     failed: 'ошибка модели',
+    leftOutByProject: 'исключён проектом',
+    fromSpec: 'отправлено из /spec',
+    ignoredByProject: skill => `${skill} исключён проектом в .claude/skill-router.json: это меняется там.`,
     opened: 'Панель роутера открыта.',
     langSet: 'Роутер скиллов теперь на русском.',
     tabs: { overview: 'Обзор', rules: 'Правила', skills: 'Скиллы', history: 'История' },
@@ -184,7 +195,9 @@ export const WORDS: Record<Lang, Words> = {
           ? 'ошибка модели'
           : note === 'no skills'
             ? 'скиллов нет'
-            : 'ничего не подошло',
+            : note === 'loaded'
+              ? 'скилл из правила уже загружен'
+              : 'ничего не подошло',
     sessionStats: (n, withSkill, byRule, byModel) =>
       `За сессию: промптов ${n}, со скиллом ${withSkill} (правилом ${byRule}, моделью ${byModel})`,
     top: 'Чаще всего',

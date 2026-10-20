@@ -9,6 +9,8 @@ export const KEPT_DECISIONS = 30
 // The skills as last listed, for the typeahead after `/router add `: listing them on each key is
 // wasted work.
 let catalog: Skill[] = []
+// What the pane was last handed, so a prompt that finds the same skills writes nothing.
+let held = ''
 
 export function catalogNow() {
   return catalog
@@ -27,7 +29,9 @@ async function projectSetup($: EngineInterface, root: string): Promise<Setup> {
 }
 
 // The OpenSpec changes in progress, with their tasks; null where the project has no OpenSpec folder.
-async function changesIn($: EngineInterface, root: string): Promise<Change[] | null> {
+// Read only for the model, which alone is told of them.
+export async function changesIn($: EngineInterface): Promise<Change[] | null> {
+  const root = await $.session.root()
   const dir = join(join(root, 'openspec'), 'changes')
   const entries = await $.fs.list(dir).catch(() => null)
   if (entries === null) return null
@@ -43,21 +47,22 @@ async function changesIn($: EngineInterface, root: string): Promise<Change[] | n
 }
 
 // The skills to route among and the setup in force, the setup's short names made full; the pane is
-// handed the whole list and the project's setup.
-export async function lookAround($: EngineInterface) {
+// handed the whole list and the project's setup where they changed, or `isForced` where its values
+// were emptied (a /clear).
+export async function lookAround($: EngineInterface, isForced = false) {
   const root = await $.session.root()
-  const [commands, own, project, changes] = await Promise.all([
-    $.command.list(),
-    ownSetup($),
-    projectSetup($, root),
-    changesIn($, root),
-  ])
+  const [commands, own, project] = await Promise.all([$.command.list(), ownSetup($), projectSetup($, root)])
   const all = catalogOf(commands, [])
   const setup = resolveSetup(merge(own, project), all)
+  const projects = resolveSetup(project, all)
   catalog = all
-  await holdCatalog($, all, resolveSetup(project, all))
+  const now = JSON.stringify([all, projects])
+  if (isForced || now !== held) {
+    held = now
+    await holdCatalog($, all, projects)
+  }
 
-  return { skills: all.filter(s => !setup.ignored.includes(s.name)), setup, changes }
+  return { skills: all.filter(s => !setup.ignored.includes(s.name)), setup, project: projects }
 }
 
 export const isLoaded = (skill: string, loaded: readonly string[]) =>
@@ -75,16 +80,17 @@ const SPEC_SKILLS = { task: ['openspec-apply-change', 'opsx:apply'], archive: ['
 
 // The skill for a task or an archiving the spec's pane sends, which the prompt it sends names, as a
 // plugin's own prompt passes by the router: OpenSpec's own, where one is installed, routed among and
-// not loaded yet, and the router is not off. Kept with the router's decisions, with no rule and no
-// model asked.
-export async function specSkill($: EngineInterface, kind: 'task' | 'archive', prompt: string) {
+// not loaded yet, and the router is not off. No rule and no model asked.
+export async function specSkill($: EngineInterface, kind: 'task' | 'archive') {
   if ((await modeIn($)) === 'off') return undefined
-  const startedAt = await $.clock.now()
   const { skills } = await lookAround($)
   const skill = SPEC_SKILLS[kind].map(name => resolve(name, skills)).find(name => name !== undefined)
-  if (skill === undefined || isLoaded(skill, await loadedIn($))) return undefined
-  const picks: Pick[] = [{ skill, why: 'sent from /spec', by: 'rule' }]
-  await addDecision($, { at: startedAt, prompt: oneLine(prompt, 200), picks, ms: (await $.clock.now()) - startedAt }, KEPT_DECISIONS)
+  return skill === undefined || isLoaded(skill, await loadedIn($)) ? undefined : skill
+}
+
+// Once the prompt naming it went to the session, it is kept with the router's decisions.
+export async function sentWithSkill($: EngineInterface, skill: string, prompt: string) {
+  const picks: Pick[] = [{ skill, why: (await wordsIn($)).fromSpec, by: 'rule' }]
+  await addDecision($, { at: await $.clock.now(), prompt: oneLine(prompt, 200), picks, ms: 0 }, KEPT_DECISIONS)
   $.ui.status((await wordsIn($)).status(shortOf(skill)))
-  return skill
 }
