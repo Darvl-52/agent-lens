@@ -60,7 +60,8 @@ Once a turn has edited a file:
   turn, and those of earlier reviews still open, with every rule an edit broke that is still in the
   code. A finding stays until it is sent to Claude or put aside, its file is back as it was
   before the session, or a later review that saw its line change does not find it again. A rule put aside and
-  broken again shows again.
+  broken again shows again. A later review of the same file is told what was put aside or sent to
+  Claude there, so it does not find it again in other words.
 - `reviewing…`, in yellow, while the review runs.
 - `not reviewed: small change`, as plain text: the turn touched a line or two, so it was not reviewed by
   itself; `r` on Findings reviews it.
@@ -127,7 +128,8 @@ the review after the turn is told not to report it a second time.
 
 Only rules about what files contain are judged (style, naming, comments, structure, forbidden
 patterns, hardcoded values); rules about git, workflow or how to talk are not. Edits to `CLAUDE.md`
-and `AGENTS.md` themselves are not checked. A check that fails or answers something unreadable lets
+and `AGENTS.md` themselves are not checked, nor the Markdown of an OpenSpec change, which `/spec`
+reads. A check that fails or answers something unreadable lets
 the edit be.
 
 `/changes rules` says how edits are checked and which rule files apply in the project folder.

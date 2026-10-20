@@ -52,6 +52,8 @@ const LIVE_TIMEOUT_MS = 30_000
 const STOP_WAIT_MS = 8_000
 // What was caught is kept, newest first, up to this many.
 const CAUGHT_LIMIT = 30
+// The findings put aside or sent to Claude a review is told of, the latest.
+const SETTLED_KEPT = 20
 // The main loop's key among the loops whose notes wait for Claude; a subagent's is its id.
 const MAIN = ''
 // A rule file is read up to this, and all of them together up to the second.
@@ -304,7 +306,8 @@ async function rulesFor($: EngineInterface, files: readonly FileDiff[]) {
 
 // The OpenSpec change's own Markdown: /spec reads it, so the review of a turn leaves it out, and a
 // turn that edited it alone is not reviewed.
-const isSpecDoc = (f: FileDiff) => /(?:^|[\\/])openspec[\\/].+\.md$/i.test(f.path)
+const isSpecPath = (path: string) => /(?:^|[\\/])openspec[\\/].+\.md$/i.test(path)
+const isSpecDoc = (f: FileDiff) => isSpecPath(f.path)
 const codeOf = (diff: Diff): Diff => ({ ...diff, files: diff.files.filter(f => !isSpecDoc(f)) })
 const isSpecOnly = (diff: Diff) => diff.files.length > 0 && diff.files.every(isSpecDoc)
 
@@ -425,7 +428,13 @@ async function reviewDiff($: EngineInterface, whole: Diff) {
     const names = diff.files.flatMap(f => [f.path, f.shown])
     const flagged = (await openCaught($)).filter(c => isOn(c, names)).map(c => ({ where: findingAt(c), rule: c.rule ?? c.text }))
     const isSpec = (await specInView($).catch(() => undefined)) !== undefined
-    const ask = [w.reviewPrompt, ...(isSpec ? [w.specPrompt] : []), ...(flagged.length > 0 ? [w.flaggedPrompt(flagged)] : [])].join('\n\n')
+    const settled = await settledOn($, names)
+    const ask = [
+      w.reviewPrompt,
+      ...(isSpec ? [w.specPrompt] : []),
+      ...(flagged.length > 0 ? [w.flaggedPrompt(flagged)] : []),
+      ...(settled.length > 0 ? [w.settledPrompt(settled)] : []),
+    ].join('\n\n')
     // Room for the few sentences it may reason in before the JSON.
     const text = await complete($, diff, ask, 8000, 'high')
     if (text === undefined) {
@@ -773,9 +782,9 @@ async function noteShell($: EngineInterface, command: string, ran: ToolCallResul
 }
 
 // One edit checked against the rules in force for its file by the small model; an edit to a rule
-// file, or to a file no rule applies to, is let be.
+// file, to the OpenSpec change (/spec reads it), or to a file no rule applies to, is let be.
 async function inspect($: EngineInterface, change: Change) {
-  if (isRuleFile(change.file)) return []
+  if (isRuleFile(change.file) || isSpecPath(change.file)) return []
   const rules = rulesText(await ruleFilesFor($, [change.file]), shownFrom(await $.session.root()))
   if (rules === '') return []
   const r = await $.model.complete({
@@ -920,6 +929,19 @@ async function openCaught($: EngineInterface) {
   const sent = await read($, sentAtom)
   const dismissed = await read($, dismissedAtom)
   return (await read($, caughtAtom)).filter(c => c.state === 'open' && open(c, sent, dismissed))
+}
+
+// The findings on `names` the person put aside or sent to Claude, each once: the review is told of
+// them, so what was answered is not found again in other words as new.
+async function settledOn($: EngineInterface, names: readonly string[]) {
+  const sent = new Set(await read($, sentAtom))
+  const dismissed = new Set(await read($, dismissedAtom))
+  const all = [...Object.values(await read($, reviewsAtom)).flat(), ...(await read($, caughtAtom))]
+  const taken = new Set<string>()
+  return all
+    .filter(f => (sent.has(f.id) || dismissed.has(f.id)) && isOn(f, names) && !taken.has(f.id) && taken.add(f.id))
+    .slice(-SETTLED_KEPT)
+    .map(f => ({ where: findingAt(f), text: f.text, isSent: sent.has(f.id) }))
 }
 
 // Whether a finding is on one of `names`, paths and shown paths, as the model named its file: by

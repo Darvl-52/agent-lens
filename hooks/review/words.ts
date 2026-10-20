@@ -116,6 +116,8 @@ const EN = {
     'Where the diff works on the OpenSpec change above, also report code that goes against one of its requirements or scenarios (as "bug"), and a task the request named that the diff leaves half done (as "note").',
   flaggedPrompt: (found: readonly { where: string; rule: string }[]) =>
     `These rules were already flagged while the agent worked, and the developer sees them; do not report them again:\n${found.map(f => `- ${f.where}: ${f.rule}`).join('\n')}`,
+  settledPrompt: (found: readonly { where: string; text: string; isSent: boolean }[]) =>
+    `The developer has already answered these: put aside as no problem, or sent to the agent to fix. Do not report them again, in these words or others; report one only where the diff makes it worse:\n${found.map(f => `- ${f.where}: ${f.text} (${f.isSent ? 'sent to fix' : 'put aside'})`).join('\n')}`,
   verifyPrompt: (found: readonly { where: string; text: string }[]) =>
     `A first look at this diff found these:\n\n${found.map((f, i) => `${i + 1}. ${f.where}: ${f.text}`).join('\n')}\n\nCheck each one again, as a doubting second reviewer, against everything above: every request, the commands run, the files and the file lists. Keep one only where the text above shows it is real. Drop it where a request asked for the change, a command did what it says is not done, a file it says is missing or ignored is there, or it rests on something not shown. Think it through briefly, then end with the JSON: an array of the numbers of the ones to keep, as [1, 3]; [] to keep none.`,
   notesPrompt: (ids: readonly string[] | null) =>
@@ -231,6 +233,8 @@ const RU: typeof EN = {
     'Если дифф относится к изменению OpenSpec выше, сообщи ещё о коде, который идёт против его требования или сценария (как "bug"), и о задаче, названной в просьбе, которую дифф оставил недоделанной (как "note").',
   flaggedPrompt: found =>
     `Эти правила уже отмечены, пока агент работал, и разработчик их видит; не сообщай о них снова:\n${found.map(f => `- ${f.where}: ${f.rule}`).join('\n')}`,
+  settledPrompt: found =>
+    `На эти замечания разработчик уже ответил: отложил как не проблему или отправил агенту исправить. Не сообщай о них снова — ни этими словами, ни другими; сообщи об одном, только если дифф делает его хуже:\n${found.map(f => `- ${f.where}: ${f.text} (${f.isSent ? 'отправлено исправить' : 'отложено'})`).join('\n')}`,
   verifyPrompt: found =>
     `Первый взгляд на этот дифф нашёл вот что:\n\n${found.map((f, i) => `${i + 1}. ${f.where}: ${f.text}`).join('\n')}\n\nПроверь каждое ещё раз, как сомневающийся второй ревьюер, по всему, что выше: всем просьбам, запущенным командам, файлам и спискам файлов. Оставь замечание, только если текст выше показывает, что оно настоящее. Выкинь его, если о правке просили, если команда сделала то, что оно называет несделанным, если файл, который оно называет пропавшим или игнорируемым, на месте, или если оно опирается на то, чего выше нет. Коротко рассуди, затем в конце дай JSON: массив номеров тех, что оставить, например [1, 3]; [] — не оставлять ни одного.`,
   notesPrompt: ids =>

@@ -553,6 +553,24 @@ test('a finding stays open over later turns until it is fixed or put aside, whil
   await pane.unmount()
 })
 
+test('the next review of a file is told what was put aside or sent to Claude on it, not to find it again', async ($, on) => {
+  const { asked, turn } = await project($, on, { 'src/app.ts': APP })
+  await turn('add dark mode', { 'src/app.ts': DARK })
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-findings' })
+  const [bug, note] = parseFindings(REVIEWED)!.map(f => f.id)
+  await pane.press({ key: `fix-${bug}` })
+  await pane.press({ key: `dismiss-${note}` })
+  await pane.unmount()
+  expect(asked[0]!.promptBlocks?.[2]?.text).not.toMatch(/already answered/)
+  await turn('a darker accent', { 'src/app.ts': `${DARK}export const shade = 1\nexport const tint = 2\nexport const glow = 3\n` })
+  const reviews = asked.filter(a => /Review the diff/.test(a.prompt))
+  expect(reviews).toHaveLength(2)
+  expect(reviews[1]!.promptBlocks?.[2]?.text).toMatch(
+    /The developer has already answered these[^\n]*\n- src\/app\.ts:1: The theme no longer follows the system\. \(sent to fix\)\n- src\/app\.ts: No test for the dark theme\. \(put aside\)$/,
+  )
+})
+
 test('the second look drops what it finds no problem, and keeps all when its answer is no list of numbers', async ($, on) => {
   const { turn, setKept } = await project($, on, { 'src/app.ts': APP })
   setKept('[2]')
@@ -987,6 +1005,14 @@ test('an edit where no rule applies, or to a rule file, is not checked; an AGENT
   await turn('say why', { 'src/app.ts': COMMENTED })
   expect(checked).toHaveLength(1)
   expect(checked[0]!.promptBlocks?.[0]?.text).toMatch(/^=== AGENTS\.md ===\nNo comments in code\./)
+})
+
+test('an edit to the OpenSpec change is not checked against the rules: /spec reads it', async ($, on) => {
+  const { checked, turn } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  await turn('write the decisions in', { 'openspec/changes/door/design.md': '# Design\n// a note\n' })
+  expect(checked).toHaveLength(0)
+  await turn('say why', { 'src/app.ts': COMMENTED })
+  expect(checked).toHaveLength(1)
 })
 
 test('/changes rules says how each edit is checked and which rule files apply here', async ($, on) => {
