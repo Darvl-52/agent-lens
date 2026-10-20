@@ -5,7 +5,7 @@ import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode,
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { specInView } from '../spec/lens'
-import { below, canonical, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
+import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
 import { caughtOf, describeEdit, describeWrite, isRuleFile, LIVE_SYSTEM, lineNear, noteFor, parseViolations, refusalFor, RULE_NAMES } from './rules'
 import { WORDS } from './words'
@@ -148,9 +148,15 @@ async function wordsIn($: EngineInterface) {
 }
 const whyNot = (r: { reason: string; status?: number | null }) => (r.status ? `${r.reason} ${r.status}` : r.reason)
 
-async function readOrNull($: EngineInterface, path: string) {
+// A file's text; null where it is not there, undefined where it is and cannot be read (past what
+// one read copies), which is no deletion and no text to compare.
+async function readNow($: EngineInterface, path: string): Promise<string | null | undefined> {
   if (!(await $.fs.exists(path).catch(() => false))) return null
-  return ((await $.fs.read(path).catch(() => null)) as string | null) ?? null
+  return ((await $.fs.read(path).catch(() => undefined)) as string | undefined) ?? undefined
+}
+
+async function readOrNull($: EngineInterface, path: string) {
+  return (await readNow($, path)) ?? null
 }
 
 const shownFrom = (root: string) => (path: string) => below(path, root) ?? path
@@ -181,10 +187,12 @@ async function snapshotDiff($: EngineInterface, before: Readonly<Record<string, 
   const root = await $.session.root()
   const files: FileDiff[] = []
   for (const [path, was] of Object.entries(before)) {
-    const f = fileDiff(path, whereIn(path, root, await repoOf($, path)), was, await readOrNull($, path))
+    const now = await readNow($, path)
+    if (now === undefined) continue
+    const f = fileDiff(path, whereIn(path, root, await repoOf($, path)), was, now)
     if (f.hunks.length > 0) files.push(f)
   }
-  return files.sort(byGroup)
+  return capped(files.sort(byGroup))
 }
 
 function git($: EngineInterface, repo: string, args: string[]) {
@@ -232,11 +240,13 @@ async function uncommittedDiff($: EngineInterface) {
     const untracked = await run(['ls-files', '--others', '--exclude-standard'])
     for (const rel of (untracked?.stdout ?? '').split(/\r?\n/).filter(Boolean).slice(0, UNTRACKED_LIMIT)) {
       const path = joinPath(repo, rel)
-      const f = fileDiff(path, whereIn(path, root, repo), null, await readOrNull($, path))
+      const now = await readNow($, path)
+      if (now === undefined) continue
+      const f = fileDiff(path, whereIn(path, root, repo), null, now)
       if (f.hunks.length > 0) files.push(f)
     }
   }
-  return files.sort(byGroup)
+  return capped(files.sort(byGroup))
 }
 
 async function diffFor($: EngineInterface, mode: Mode): Promise<Diff | null> {
@@ -739,8 +749,8 @@ const keyIn = (kept: Readonly<Record<string, unknown>>, path: string) => Object.
 async function remember($: EngineInterface, named: string, room = Infinity) {
   const path = keyIn(await read($, beforeAtom), named)
   if (path in (await read($, turnBeforeAtom)) && path in (await read($, beforeAtom))) return 0
-  const was = await readOrNull($, path)
-  if ((was?.length ?? 0) > room) return 0
+  const was = await readNow($, path)
+  if (was === undefined || (was?.length ?? 0) > room) return 0
   // Only the first taking of a file counts: an edit made since is not what it was.
   await update($, turnBeforeAtom, b => (path in b ? b : { ...b, [path]: was }))
   await update($, beforeAtom, b => (path in b ? b : { ...b, [path]: was }))
@@ -1363,6 +1373,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                       </Box>
                       <Box flexDirection="row" gap={1} flexShrink={0}>
                         {f.isNew ? <Text color="success">{w.newFile}</Text> : f.isDeleted ? <Text color="error">{w.deletedFile}</Text> : null}
+                        {f.cut ? <Text color="warning">{w.leftOut(f.cut)}</Text> : null}
                         <Text>
                           <Text color="success">+{f.added}</Text> <Text color="error">−{f.removed}</Text>
                         </Text>

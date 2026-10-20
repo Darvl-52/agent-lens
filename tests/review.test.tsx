@@ -251,6 +251,8 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   let langReads = 0
   on('fs.read', ($, e) => {
     reads.push(posix(e.path))
+    // As the engine reads: a file over 4 MiB rejects.
+    if ((disk.get(posix(e.path)) ?? '').length > 4 * 1024 * 1024) return { deny: 'over 4 MiB' }
     return { value: disk.get(posix(e.path)) ?? '' }
   })
   // The engine's walk for nested rules: each folder strictly inside `below`, down to the one `of`
@@ -793,6 +795,32 @@ test('a shell command in a repository of its own inside the project, edited by n
   await shellTurn('fix the cart total in the front', [d => d.set('/proj/__front/src/cart.ts', 'export const total = 0\nexport const tax = 1\nexport const sum = 2\nexport const fee = 3\n')])
   const prompt = asked.find(a => /Review the diff/.test(a.prompt))?.prompt
   expect(prompt).toMatch(/src\/cart\.ts ===\n\[hunk \w+\]\n@@ -1 \+1 @@\n export const total = 0\n\+export const tax = 1/)
+})
+
+test('a turn that deletes a file of a hundred thousand lines is the last turn, its diff kept short and saying how much is left out', async ($, on) => {
+  const big = 'export const row = [1, 2, 3]\n'.repeat(100_000)
+  const { asked, disk, turn, review } = await project($, on, { 'src/data.ts': big, 'src/app.ts': APP })
+  await turn('drop the data, dark mode', { 'src/data.ts': '', 'src/app.ts': DARK })
+  disk.delete('/proj/src/data.ts')
+  await turn('drop the data file', { 'src/app.ts': DARK + 'export const x = 1\n' })
+  expect(await bandText($)).toMatch(/^✎ 1 file \+1 −0/)
+  // The turn before, the one that emptied it: the row said it, and the model was asked about it.
+  const prompt = asked.find(a => /drop the data, dark mode/.test(a.prompt) && /Review the diff/.test(a.prompt))?.prompt ?? ''
+  expect(prompt).toMatch(/=== src\/data\.ts ===/)
+  expect(prompt).toMatch(/98000 more lines left out/)
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.select({ key: 'mode', value: 'session' })
+  expect((await pane.find({ type: 'Text', text: /left out/ }))?.text).toBe('98000 lines left out')
+  await pane.unmount()
+})
+
+test('a file that grows past what can be read is left out, not taken for deleted', async ($, on) => {
+  const big = 'export const row = [1, 2, 3]\n'.repeat(100_000)
+  const { asked, turn } = await project($, on, { 'src/data.ts': big, 'src/app.ts': APP })
+  await turn('add rows and dark mode', { 'src/data.ts': big + 'export const row = [4, 5, 6, 7]\n'.repeat(45_000), 'src/app.ts': DARK })
+  expect(await bandText($)).toMatch(/^✎ 1 file \+3 −1/)
+  expect(asked.find(a => /Review the diff/.test(a.prompt))?.prompt).not.toMatch(/=== src\/data\.ts/)
 })
 
 test('a turn with no shell command reads no git status', async ($, on) => {

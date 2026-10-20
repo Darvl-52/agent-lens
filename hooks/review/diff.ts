@@ -134,6 +134,27 @@ export const fileDiff = (path: string, where: Where, before: string | null, afte
   return { path, ...where, isNew: before === null && after !== null, isDeleted: before !== null && after === null, added: count(hunks, '+'), removed: count(hunks, '-'), hunks }
 }
 
+// A diff is kept in the session's values, and a value has a size it is refused past: a file's hunks
+// are kept up to so many lines, the files of one diff up to so many in all, and the rest counted.
+const FILE_LINES = 2_000
+const DIFF_LINES = 20_000
+
+export const capped = (files: readonly FileDiff[]): FileDiff[] => {
+  let room = DIFF_LINES
+  return files.map(f => {
+    let left = Math.min(FILE_LINES, room)
+    let cut = 0
+    const hunks: Hunk[] = []
+    for (const h of f.hunks) {
+      if (left > 0) hunks.push(h.lines.length <= left ? h : { ...h, lines: h.lines.slice(0, left) })
+      cut += Math.max(0, h.lines.length - Math.max(0, left))
+      left -= h.lines.length
+    }
+    room -= f.hunks.reduce((n, h) => n + h.lines.length, 0) - cut
+    return cut > 0 ? { ...f, hunks, cut } : f
+  })
+}
+
 const ESCAPES: Readonly<Record<string, string>> = { a: '\x07', b: '\b', t: '\t', n: '\n', v: '\v', f: '\f', r: '\r' }
 
 // A path as `git diff` prints it after `--- ` and `+++ `: a tab after one with a space in it, and
@@ -225,6 +246,7 @@ export const diffText = (files: readonly FileDiff[], limit = 80_000) => {
   for (const f of files) {
     text += `=== ${f.shown}${f.isNew ? ' (new file)' : f.isDeleted ? ' (deleted)' : ''} ===\n`
     for (const h of f.hunks) text += `[hunk ${h.id}]\n${hunkText(h)}\n`
+    if (f.cut) text += `… ${f.cut} more lines left out\n`
     text += '\n'
     if (text.length > limit) return `${text.slice(0, limit)}\n… (cut)`
   }

@@ -16,7 +16,9 @@ export type ReviewWhere = { group: string; rel: string; shown: string }
 
 // What changed in one file. `path` is absolute, in its one spelling (`canonical`: on Windows `\`
 // and the drive upper-cased), as the engine and git both name it.
-export type ReviewFileDiff = ReviewWhere & { path: string; isNew: boolean; isDeleted: boolean; added: number; removed: number; hunks: ReviewHunk[] }
+// `cut`: how many of its hunks' lines are left out, past what a diff keeps of one file or of all;
+// `added` and `removed` still count them.
+export type ReviewFileDiff = ReviewWhere & { path: string; isNew: boolean; isDeleted: boolean; added: number; removed: number; hunks: ReviewHunk[]; cut?: number }
 
 // The diff in view: what the last turn with edits changed, all the session changed, or what is
 // uncommitted in every repository it touched.
