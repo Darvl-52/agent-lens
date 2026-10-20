@@ -110,6 +110,25 @@ let isMainTurn = false
 let holesWaiting: string | undefined
 // The critic agents this mod started, by id, as long as it runs.
 const critics = new Set<string>()
+// A critic being started: its record is written once the spawn resolves, and a press or a turn's
+// end meanwhile would start another for the same text.
+let critiquing = false
+// What the pane's buttons sent and is on its way, by button: a prompt waits in the queue while a
+// turn runs, and the button is still there, so a press again is told so and sends nothing.
+const pressing = new Set<string>()
+
+async function pressOnce($: EngineInterface, key: string, fn: () => Promise<unknown>) {
+  if (pressing.has(key)) {
+    await $.ui.toast((await wordsIn($)).sentAlready)
+    return
+  }
+  pressing.add(key)
+  try {
+    await fn()
+  } finally {
+    pressing.delete(key)
+  }
+}
 
 const criticModeOf = (value: unknown): CriticMode | undefined => (value === 'off' || value === 'button' || value === 'auto' ? value : undefined)
 
@@ -815,6 +834,16 @@ async function keepCritic($: EngineInterface, root: string, critic: Critic) {
 // went to Claude count up while Claude's turns close them; once CRITIC_ROUNDS went, what the last
 // changed is left to the person, and the next change to the text starts over.
 async function critique($: EngineInterface, isAsked: boolean) {
+  if (critiquing) return
+  critiquing = true
+  try {
+    await startCritic($, isAsked)
+  } finally {
+    critiquing = false
+  }
+}
+
+async function startCritic($: EngineInterface, isAsked: boolean) {
   const lens = await lensNow($)
   if (!lens) return
   const mode = await criticMode($)
@@ -1176,6 +1205,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const undecided = decisions.filter((_, i) => !deciding?.verdicts[i]).length
   const tasksLeft = lens.tasks.total - lens.tasks.done
   const run = (fn: () => Promise<unknown>) => () => void fn().catch(() => {})
+  // A button that sends to Claude: once, however often it is pressed while that is on its way.
+  const once = (key: string, fn: () => Promise<unknown>) => () => void pressOnce($, key, fn).catch(() => {})
 
   // What each tab holds that wants a look, coloured as the worst of it.
   const specRed = s.errors + lens.tests.unmarked.length
@@ -1288,8 +1319,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             ) : holes.length > 0 ? (
               <Text color="warning">{w.criticFound(holes.length)}</Text>
             ) : null}
-            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'h', run(() => closeHoles($, lens.current)), { variant: 'primary' }) : null}
-            {critic?.status === 'running' ? null : keyed('find-holes', w.findHoles, 'f', run(() => critique($, true)), { dimColor: true })}
+            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'h', once('holes', () => closeHoles($, lens.current)), { variant: 'primary' }) : null}
+            {critic?.status === 'running' ? null : keyed('find-holes', w.findHoles, 'f', once('critic', () => critique($, true)), { dimColor: true })}
           </Box>
           {holes.map(hole => (
             <Box flexDirection="column" paddingLeft={2}>
@@ -1334,8 +1365,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           <Box flexDirection="column">
             <Box flexDirection="row" gap={1}>
               <Text color={undecided > 0 ? 'warning' : 'success'}>{w.decidedOf(decisions.length - undecided, decisions.length)}</Text>
-              {toApply > 0 ? keyed('apply', w.apply(toApply), 'a', run(() => applyDecisions($)), { variant: 'primary' }) : null}
-              {undecided > 0 ? keyed('decide-all', w.decideAll(undecided), 'd', run(() => decideAll($)), toApply > 0 ? {} : { variant: 'primary' }) : null}
+              {toApply > 0 ? keyed('apply', w.apply(toApply), 'a', once('apply', () => applyDecisions($)), { variant: 'primary' }) : null}
+              {undecided > 0 ? keyed('decide-all', w.decideAll(undecided), 'd', once('decide-all', () => decideAll($)), toApply > 0 ? {} : { variant: 'primary' }) : null}
             </Box>
             <Text dimColor>{w.decideNote}</Text>
             {decisions.map((d, i) => {
@@ -1405,7 +1436,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           <Box flexDirection="column">
             <Text color="warning">{`⚠ ${w.notWritten}`}</Text>
             <Box flexDirection="row" gap={1}>
-              {keyed('resend', w.sendAgain, 'w', run(() => resendDecisions($)), { variant: 'primary' })}
+              {keyed('resend', w.sendAgain, 'w', once('resend', () => resendDecisions($)), { variant: 'primary' })}
               <Button key="reopen" label={w.reopen} dimColor onPress={run(() => reopenDecisions($))} />
             </Box>
           </Box>
@@ -1432,7 +1463,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               <Text dimColor>{'━'.repeat(BAR - filled)}</Text>
             </Text>
             {isAllDone ? <Text color="success">{w.allDone}</Text> : <Text>{w.tasksDone(lens.tasks)}</Text>}
-            {next ? keyed('do-next', w.doNext(taskKey(next)), 'n', run(() => doTask($, next)), { variant: 'primary' }) : null}
+            {next ? keyed('do-next', w.doNext(taskKey(next)), 'n', once(`task:${taskKey(next)}`, () => doTask($, next)), { variant: 'primary' }) : null}
           </Box>
           {/* Every task ticked: what is left is the archive, so it comes before the list. */}
           {ready.isOffered ? (
@@ -1440,7 +1471,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               {ready.archive?.isSent ? (
                 <Box flexDirection="row" gap={1}>
                   <Text color="success">{w.archiveSent}</Text>
-                  {ready.isReady ? <Button key="archive-again" label={w.sendAgain} dimColor onPress={run(() => archiveChange($))} /> : null}
+                  {ready.isReady ? <Button key="archive-again" label={w.sendAgain} dimColor onPress={once('archive', () => archiveChange($))} /> : null}
                 </Box>
               ) : !ready.isReady ? (
                 <Box flexDirection="column">
@@ -1453,7 +1484,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 <Box flexDirection="column">
                   <Text dimColor>{w.archiveNote}</Text>
                   <Box flexDirection="row" gap={1}>
-                    <Button key="archive-confirm" label={w.archiveConfirm} variant="primary" onPress={run(() => archiveChange($))} />
+                    <Button key="archive-confirm" label={w.archiveConfirm} variant="primary" onPress={once('archive', () => archiveChange($))} />
                     <Button key="archive-cancel" label={w.cancel} dimColor onPress={run(() => askArchive($, false))} />
                   </Box>
                 </Box>
@@ -1484,10 +1515,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 {t.isDone ? null : isSent(t) ? (
                   <Box flexDirection="row" gap={1} flexShrink={0}>
                     <Text color="warning">{w.taskSent}</Text>
-                    <Button key={`again-${i}`} label={w.sendAgain} dimColor onPress={run(() => doTask($, t))} />
+                    <Button key={`again-${i}`} label={w.sendAgain} dimColor onPress={once(`task:${taskKey(t)}`, () => doTask($, t))} />
                   </Box>
                 ) : (
-                  <Button key={`task-${i}`} label={w.doTask} dimColor onPress={run(() => doTask($, t))} />
+                  <Button key={`task-${i}`} label={w.doTask} dimColor onPress={once(`task:${taskKey(t)}`, () => doTask($, t))} />
                 )}
               </Box>
             </Box>
@@ -1528,9 +1559,9 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Box flexDirection="column">
           <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
             {cases.length > 0 ? <Text>{w.casesSummary(counts)}</Text> : null}
-            {picked.length > 0 ? keyed('send-picked', w.sendPicked(picked.length), 'p', run(() => closeCases($, picked)), { variant: 'primary' }) : null}
+            {picked.length > 0 ? keyed('send-picked', w.sendPicked(picked.length), 'p', once('cases', () => closeCases($, picked)), { variant: 'primary' }) : null}
             {toClose.length > 0
-              ? keyed('close-all', w.closeAll(toClose.length), 'c', run(() => closeCases($, toClose)), picked.length > 0 ? {} : { variant: 'primary' })
+              ? keyed('close-all', w.closeAll(toClose.length), 'c', once('cases', () => closeCases($, toClose)), picked.length > 0 ? {} : { variant: 'primary' })
               : null}
           </Box>
           <Text dimColor>{`${w.casesNote} ${w.pickHint}`}</Text>

@@ -1137,6 +1137,50 @@ test('a turn the person stops sends no holes and starts no critic: they wait for
   expect(submitted[0]!.text).toMatch(/1\. No task revokes access/)
 })
 
+test('a button pressed again while its prompt waits for the turn under way goes to Claude once, and says it went', async ($, on) => {
+  const { spec, settle, submitted, toasts, hold } = await project($, on, { door: DOOR })
+  await spec()
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  let release = () => {}
+  hold(new Promise<void>(r => (release = r)))
+  await pane.press({ key: 'tab-tasks' })
+  await pane.press({ key: 'do-next' })
+  await settle()
+  await pane.press({ key: 'do-next' })
+  await pane.press({ key: 'tab-decide' })
+  await pane.press({ key: 'decide-all' })
+  await settle()
+  await pane.press({ key: 'decide-all' })
+  await settle()
+  expect(toasts.at(-1)).toBe('Sent already: it goes to Claude once the turn under way ends.')
+  hold(undefined)
+  release()
+  await settle()
+  expect(submitted.map(x => x.text.split('\n')[0])).toHaveLength(2)
+  await pane.unmount()
+})
+
+test('the critic starts once however fast f is pressed', async ($, on) => {
+  const { spec, settle, spawned } = await project($, on, { door: DOOR })
+  await spec('critic button')
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  await Promise.all([pane.press({ key: 'find-holes' }), pane.press({ key: 'find-holes' })])
+  await settle()
+  expect(spawned).toHaveLength(1)
+  await pane.unmount()
+})
+
+test('the critic starts once for two turns that end close together', async ($, on) => {
+  const { spec, settle, turn, spawned } = await project($, on, { door: DOOR })
+  await spec('critic auto')
+  await Promise.all([turn(), turn()])
+  await settle()
+  expect(spawned).toHaveLength(1)
+})
+
 test('the critic in auto mode: what it finds goes to Claude to close, three rounds in a row at most', async ($, on) => {
   const { spec, settle, submitted, toasts, put, turn, spawned, agentDone, startTurn, store } = await project($, on, { door: DOOR })
   expect((await spec('critic')).text).toMatch(/^The critic is off\./)
