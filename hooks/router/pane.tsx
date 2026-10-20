@@ -91,7 +91,7 @@ async function ruleFrom($: EngineInterface, skill: string, words: Words) {
 export async function drawPane($: EngineInterface, els: Els, view: View) {
   const { Box, Button, Text } = els
   const held = await paneState($)
-  const { tab, mode, said } = held
+  const { tab, mode, said, saidTone } = held
   const lang = held.lang
   const words = WORDS[lang]
   const data: Data = {
@@ -147,8 +147,8 @@ export async function drawPane($: EngineInterface, els: Els, view: View) {
       {body}
       <Text dimColor>{'─'.repeat(Math.min(data.columns, 72))}</Text>
       {said !== null && (
-        <Text color="success" wrap="truncate-end">
-          ✓ {said}
+        <Text color={saidTone} wrap="truncate-end">
+          {saidTone === 'warning' ? '⚠' : '✓'} {said}
         </Text>
       )}
       <Text dimColor wrap="truncate-end">
@@ -212,7 +212,7 @@ function overviewTab(els: Els, d: Data) {
             </Box>
           ))
         ) : (
-          <Text dimColor>→ {words.noteText(last.note)}</Text>
+          <Text {...(last.note === 'failed' ? { color: 'error' as const } : {})}>→ {words.noteText(last.note)}</Text>
         )}
       </Box>
       <Text wrap="truncate-end">
@@ -334,7 +334,7 @@ function skillsTab($: EngineInterface, els: Els, d: Data) {
                 key={`skill-${s.name}`}
                 plain
                 dimColor={isOut}
-                onPress={() => (byProject ? flash($, words.byProject) : toggleSkill($, s.name, words))}
+                onPress={() => (byProject ? flash($, words.ignoredByProject(shortOf(s.name)), 'warning') : toggleSkill($, s.name, words))}
               >
                 {isOut ? '○' : '●'} {short}
                 {count ? <Text color="claude"> ×{count}</Text> : ''}
@@ -362,7 +362,7 @@ function historyTab($: EngineInterface, els: Els, d: Data) {
             <Text dimColor>{timeOf(x.at)}</Text> «{oneLine(x.prompt, d.columns - 10)}»
           </Text>
           {x.picks.length === 0 ? (
-            <Text dimColor>{'  '}→ {words.noteText(x.note)}</Text>
+            <Text {...(x.note === 'failed' ? { color: 'error' as const } : {})}>{'  '}→ {words.noteText(x.note)}</Text>
           ) : (
             x.picks.map(p => (
               <Box key={`p-${x.at}-${p.skill}`} flexDirection="row" columnGap={1}>

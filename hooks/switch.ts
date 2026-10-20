@@ -28,7 +28,7 @@ export async function langCommand($: EngineInterface, command: 'changes' | 'spec
   const words = (l: Lang) => (command === 'changes' ? REVIEW_WORDS[l] : command === 'spec' ? SPEC_WORDS[l] : ROUTER_WORDS[l])
   if (lang === undefined) {
     const now = words(await langIn($))
-    return { text: 'langUsage' in now ? now.langUsage : now.usage }
+    return { text: now.langUsage }
   }
   await switchLang($, lang)
   return { text: words(lang).langSet }

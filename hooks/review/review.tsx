@@ -1107,7 +1107,7 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
   const isLost = !review && !isReviewing && !isSkipped && !isFailed
   const added = turn.files.reduce((n, f) => n + f.added, 0)
   const removed = turn.files.reduce((n, f) => n + f.removed, 0)
-  const tone = bugs > 0 || isFailed ? 'error' : findings.length > 0 || unseen > 0 || isLost ? 'warning' : 'success'
+  const tone = bugs > 0 || isFailed ? 'error' : findings.length > 0 || unseen > 0 || isLost || isReviewing ? 'warning' : 'success'
   const sep = <Text dimColor> · </Text>
   // What the row says, as plain text: the columns it takes.
   const said = [
@@ -1132,13 +1132,13 @@ export async function reviewLine($: EngineInterface, e: AbovePromptEvent) {
         {isReviewing ? (
           <Text>
             {sep}
-            <Text dimColor>{w.reviewing}</Text>
+            <Text color="warning">{w.reviewing}</Text>
           </Text>
         ) : null}
         {isSkipped ? (
           <Text>
             {sep}
-            <Text dimColor>{w.small}</Text>
+            <Text>{w.small}</Text>
           </Text>
         ) : null}
         {isFailed ? (
@@ -1283,7 +1283,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         </Box>
         {busy.includes('notes') ? (
           <Box marginTop={1}>
-            <Text dimColor>{w.explaining}</Text>
+            <Text color="warning">{`◌ ${w.explaining}`}</Text>
           </Box>
         ) : null}
         {onFile.some(fd => fd.line === undefined) ? (
@@ -1322,7 +1322,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                     }
                   />
                   {isSent ? (
-                    <Text dimColor>{w.sentToClaude}</Text>
+                    <Text color="warning">{`→ ${w.sentToClaude}`}</Text>
                   ) : (
                     <Button key={`revert-${hunk.id}`} label={w.revert} dimColor onPress={() => void revertHunk($, picked, hunk).catch(() => {})} />
                   )}
@@ -1421,29 +1421,30 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     const item = (f: Finding & { evidence?: string }) => {
       const isSent = sent.includes(f.id)
       const isDismissed = dismissed.includes(f.id)
-      const isDone = isSent || isDismissed
+      // With Claude, yellow; put aside by the person, green.
+      const doneColor = isSent ? ('warning' as const) : isDismissed ? ('success' as const) : undefined
       return (
         <Box flexDirection="column" marginTop={1}>
           {/* Only the path gives way to a narrow pane: the kind and the buttons keep their width,
               or each would break across lines, a word or a bracket to a row. */}
           <Box flexDirection="row" gap={1}>
             <Box flexDirection="row" gap={1} flexShrink={0}>
-              <Text color={isDone ? 'inactive' : SEVERITY[f.severity].color}>{SEVERITY[f.severity].icon}</Text>
-              <Text bold color={isDone ? 'inactive' : SEVERITY[f.severity].color}>
+              <Text color={doneColor ?? SEVERITY[f.severity].color}>{SEVERITY[f.severity].icon}</Text>
+              <Text bold color={doneColor ?? SEVERITY[f.severity].color}>
                 {w.severity[f.severity]}
               </Text>
             </Box>
             <Box flexGrow={1} flexShrink={1}>
-              <Text bold wrap="truncate" {...(isDone ? { dimColor: true } : {})}>
+              <Text bold wrap="truncate">
                 {findingAt(f)}
               </Text>
             </Box>
             <Box key={`actions-${f.id}`} flexDirection="row" gap={1} flexShrink={0}>
               <Button key={`code-${f.id}`} label={w.toCode} dimColor onPress={() => void goToCode($, f).catch(() => {})} />
               {isSent ? (
-                <Text dimColor>{w.sentToClaude}</Text>
+                <Text color="warning">{`→ ${w.sentToClaude}`}</Text>
               ) : isDismissed ? (
-                <Text dimColor>{w.putAside}</Text>
+                <Text color="success">{`✓ ${w.putAside}`}</Text>
               ) : (
                 <>
                   <Button key={`fix-${f.id}`} label={w.fix} onPress={() => void fixFinding($, f).catch(() => {})} />
@@ -1453,7 +1454,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             </Box>
           </Box>
           <Box flexDirection="column" paddingLeft={2}>
-            <Text {...(isDone ? { dimColor: true } : {})}>{f.text}</Text>
+            <Text>{f.text}</Text>
             {f.evidence ? <Text dimColor>{w.found(f.evidence)}</Text> : null}
             {f.rule ? (
               <Text dimColor italic>
@@ -1468,13 +1469,13 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
       <Box flexDirection="column">
         <Text dimColor>{w.findingsNote}</Text>
         {busy.includes('review') && !review ? (
-          <Text dimColor>{w.reviewing}</Text>
+          <Text color="warning">{`◌ ${w.reviewing}`}</Text>
         ) : !review && failure !== undefined ? (
           <Text color="error">{`✗ ${w.failedNote(failure)}`}</Text>
         ) : !review && diff?.mode === 'turn' ? (
           isSmall(diff) ? <Text dimColor>{w.smallNote}</Text> : <Text color="warning">{w.lostNote}</Text>
         ) : !review ? (
-          <Text dimColor>{w.notReviewed}</Text>
+          <Text color="warning">{w.notReviewed}</Text>
         ) : all.length === 0 ? (
           <Text color="success">{w.noFindings}</Text>
         ) : (
@@ -1497,12 +1498,12 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 item(c)
               ) : (
                 <Box key={`caught-${c.id}`} flexDirection="row" gap={1}>
-                  <Text color={c.state === 'fixed' ? 'success' : c.state === 'told' || c.state === 'found' ? 'warning' : 'inactive'}>{c.state === 'fixed' ? '✓' : c.state === 'told' || c.state === 'found' ? '●' : '·'}</Text>
+                  <Text color={c.state === 'fixed' ? 'success' : 'warning'}>{c.state === 'fixed' ? '✓' : '●'}</Text>
                   <Box flexGrow={1} flexShrink={1}>
                     <Text wrap="truncate">{`${findingAt(c)} · ${c.rule ?? c.text}`}</Text>
                   </Box>
                   <Box flexShrink={0}>
-                    <Text color={c.state === 'fixed' ? 'success' : c.state === 'told' || c.state === 'found' ? 'warning' : 'inactive'}>{w.caughtState[c.state]}</Text>
+                    <Text color={c.state === 'fixed' ? 'success' : 'warning'}>{w.caughtState[c.state]}</Text>
                   </Box>
                 </Box>
               ),
@@ -1525,7 +1526,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     const text = diff ? (await read($, walkthroughsAtom))[diff.fingerprint] : undefined
     body = (
       <Box flexDirection="column">
-        {busy.includes('walkthrough') ? <Text dimColor>{w.walking}</Text> : null}
+        {busy.includes('walkthrough') ? <Text color="warning">{`◌ ${w.walking}`}</Text> : null}
         {text ? <Markdown text={text} /> : null}
         {text && !busy.includes('walkthrough') ? (
           <Box marginTop={1}>
@@ -1546,7 +1547,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           </Box>
         ) : null}
         {Input ? <Input key="question" placeholder={w.askPlaceholder} submitLabel={w.ask} autoFocus onSubmit={value => void ask($, value).catch(() => {})} /> : null}
-        {busy.includes('answer') ? <Text dimColor>{w.walking}</Text> : null}
+        {busy.includes('answer') ? <Text color="warning">{`◌ ${w.answering}`}</Text> : null}
         {answer ? (
           <Box flexDirection="column" marginTop={1}>
             <Text bold>{answer.question}</Text>

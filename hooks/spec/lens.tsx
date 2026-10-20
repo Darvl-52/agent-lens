@@ -166,8 +166,13 @@ async function check($: EngineInterface, lens: Lens) {
     const run = (cli: string) => $.process.run([cli, ...args], init)
     const r = await run('openspec')
       .catch((err: unknown) => (/time|abort/i.test(String(err)) ? Promise.reject(err) : run('openspec.cmd')))
-      .catch((err: unknown) => (/abort/i.test(String(err)) ? null : undefined))
+      .catch((err: unknown) => (/abort/i.test(String(err)) ? null : /time/i.test(String(err)) ? ('timeout' as const) : undefined))
     if (r === null) return
+    // A run past its time says nothing of whether the CLI is there: said so, not as missing.
+    if (r === 'timeout') {
+      await update($, checkedAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint, issues: null, isTimedOut: true as const }))
+      return
+    }
     const issues = (r && parseIssues(r.stdout)) ?? null
     await update($, checkedAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint, issues }))
   } finally {
@@ -1106,7 +1111,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                   {verdict ? (
                     <Text>
                       <Text color="success">{`  → ${verdict.answer}`}</Text>
-                      {verdict.isSent ? <Text dimColor>{` · ${w.sent}`}</Text> : null}
+                      {verdict.isSent ? <Text color="warning">{` · ${w.sent}`}</Text> : null}
                     </Text>
                   ) : null}
                   {verdict?.isSent ? null : (
@@ -1220,7 +1225,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               ) : null}
               <Box flexDirection="row" gap={1}>
                 <Box flexShrink={1} flexGrow={1}>
-                  <Text wrap="truncate" dimColor={t.isDone}>
+                  <Text wrap="truncate">
                     {t.isDone ? <Text color="success">✓ </Text> : isSent(t) ? <Text color="warning">→ </Text> : <Text>○ </Text>}
                     {t.id ? `${t.id} ${t.text}` : t.text}
                   </Text>
@@ -1284,7 +1289,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 <Box flexDirection="row" gap={1}>
                   {c.state === 'tested' ? <Text color="success">✓</Text> : pick(`case-${i}`, c.id)}
                   <Box flexGrow={1} flexShrink={1}>
-                    <Text wrap="truncate" {...(c.state === 'tested' ? { dimColor: true } : {})}>{`${c.id} ${c.title}`}</Text>
+                    <Text wrap="truncate">{`${c.id} ${c.title}`}</Text>
                   </Box>
                   <Box flexShrink={0}>
                     {isSent(c) ? <Text color="warning">{`→ ${w.taskSent}`}</Text> : <Text color={TONE[c.state]}>{`${ICON[c.state]} ${w.caseState[c.state]}`}</Text>}
@@ -1325,8 +1330,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           <Text bold>{w.checkHeading}</Text>
           {!isChecked ? (
             <Text color="warning">{w.checking}</Text>
+          ) : checked.isTimedOut ? (
+            <Text color="warning">{`⚠ ${w.checkTimedOut}`}</Text>
           ) : checked.issues === null ? (
-            <Text dimColor>{w.checkMissing}</Text>
+            <Text color="warning">{`⚠ ${w.checkMissing}`}</Text>
           ) : checked.issues.length === 0 ? (
             <Text color="success">{`✓ ${w.checkClean}`}</Text>
           ) : (

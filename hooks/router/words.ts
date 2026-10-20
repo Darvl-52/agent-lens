@@ -30,6 +30,8 @@ export type Words = {
   failed: string
   opened: string
   langSet: string
+  langUsage: string
+  offStatus: string
   tabs: Record<Tab, string>
   langButton: (lang: Lang) => string
   keysHelp: string
@@ -89,7 +91,7 @@ export const WORDS: Record<Lang, Words> = {
       '/router rm <rule number> · /router list',
       '/router lang en | ru — the language of /router and the status line',
     ].join('\n'),
-    modeSet: mode => `Skill router: ${mode}.`,
+    modeSet: mode => `Skill router set to ${mode}.`,
     unknownSkill: name => `No skill answers to "${name}". /router list shows them.`,
     added: (skill, when) => `Rule added: ${skill} ← ${when}`,
     hinted: skill => `Noted when ${skill} fits.`,
@@ -103,7 +105,9 @@ export const WORDS: Record<Lang, Words> = {
     fromSpec: 'sent from /spec',
     ignoredByProject: skill => `${skill} is left out by the project's .claude/skill-router.json: change it there.`,
     opened: 'Skill router pane opened.',
-    langSet: 'Skill router speaks English now.',
+    langSet: 'agent-lens speaks English now: /changes, /spec and /router.',
+    langUsage: 'Usage: /router lang en, /router lang ru',
+    offStatus: 'skill router: off',
     tabs: { overview: 'Overview', rules: 'Rules', skills: 'Skills', history: 'History' },
     langButton: lang => `language: ${lang}`,
     keysHelp: 'Tab: move · Enter: press · 1-4: tabs · a/s/o: mode · Esc: close',
@@ -168,7 +172,7 @@ export const WORDS: Record<Lang, Words> = {
       '/router rm <номер правила> · /router list',
       '/router lang en | ru — язык /router и строки статуса',
     ].join('\n'),
-    modeSet: mode => `Роутер скиллов: ${mode}.`,
+    modeSet: mode => `Роутер скиллов переключён: ${mode}.`,
     unknownSkill: name => `Скилла «${name}» нет. Список: /router list.`,
     added: (skill, when) => `Правило добавлено: ${skill} ← ${when}`,
     hinted: skill => `Запомнил, когда брать ${skill}.`,
@@ -182,7 +186,9 @@ export const WORDS: Record<Lang, Words> = {
     fromSpec: 'отправлено из /spec',
     ignoredByProject: skill => `${skill} исключён проектом в .claude/skill-router.json: это меняется там.`,
     opened: 'Панель роутера открыта.',
-    langSet: 'Роутер скиллов теперь на русском.',
+    langSet: 'agent-lens теперь говорит по-русски: /changes, /spec и /router.',
+    langUsage: 'Как вызвать: /router lang en, /router lang ru',
+    offStatus: 'роутер скиллов: выкл',
     tabs: { overview: 'Обзор', rules: 'Правила', skills: 'Скиллы', history: 'История' },
     langButton: lang => `язык: ${lang}`,
     keysHelp: 'Tab — по кнопкам · Enter — нажать · 1–4 — вкладки · a/s/o — режим · Esc — закрыть',

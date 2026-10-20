@@ -198,7 +198,7 @@ test('a model that fails lets the prompt through as typed', async ($, on) => {
 
 test('suggest leaves the call to Claude; off routes nothing', async ($, on) => {
   const r = await router($, on, { reply: '{"picks":[{"skill":"tdd"}]}' })
-  expect((await r.run('suggest')).text).toBe('Skill router: suggest: Claude decides.')
+  expect((await r.run('suggest')).text).toBe('Skill router set to suggest: Claude decides.')
   await r.send('Сделай регистрацию через email')
   expect(r.entered[0]!.context.at(-1)).toContain('may fit')
   await r.run('off')
@@ -230,7 +230,7 @@ test('the language option speaks Russian in /router and the status line', { opti
   const r = await router($, on, { reply: '{"picks":[{"skill":"tdd"}]}' })
   await r.send('Сделай корзину для гостей')
   expect(r.status.at(-1)).toBe('скилл: tdd')
-  expect((await r.run('off')).text).toBe('Роутер скиллов: выкл.')
+  expect((await r.run('off')).text).toBe('Роутер скиллов переключён: выкл.')
 })
 
 test('the model option names the model that picks', { options: { routerModel: 'sonnet' } }, async ($, on) => {
@@ -263,12 +263,12 @@ test('/router add <Tab> offers skill names, short where they are unique', async 
 test('/router lang ru switches /router and the status line to Russian', async ($, on) => {
   const r = await router($, on, { reply: '{"picks":[{"skill":"tdd"}]}' })
   expect((await r.run('')).text).toBe('Skill router pane opened.')
-  expect((await r.run('lang ru')).text).toBe('Роутер скиллов теперь на русском.')
+  expect((await r.run('lang ru')).text).toBe('agent-lens теперь говорит по-русски: /changes, /spec и /router.')
   expect((await r.run('')).text).toBe('Панель роутера открыта.')
   await r.send('Сделай корзину для гостей')
   expect(r.status.at(-1)).toBe('скилл: tdd')
-  expect((await r.run('lang de')).text).toContain('/router lang en | ru')
-  expect((await r.run('lang en')).text).toBe('Skill router speaks English now.')
+  expect((await r.run('lang de')).text).toBe('Как вызвать: /router lang en, /router lang ru')
+  expect((await r.run('lang en')).text).toBe('agent-lens speaks English now: /changes, /spec and /router.')
 })
 
 // Whether any element of the drawing shows text matching `re`.
@@ -304,7 +304,7 @@ test('tabs, mode and language switch by their buttons', async ($, on) => {
   await ui.press({ key: 'mode-auto' })
   await ui.press({ key: 'lang' })
   expect((await ui.find({ key: 'tab-rules' }))?.props.label).toBe('[Правила]')
-  expect((await r.run('off')).text).toBe('Роутер скиллов: выкл.')
+  expect((await r.run('off')).text).toBe('Роутер скиллов переключён: выкл.')
   await ui.unmount()
 })
 
@@ -425,5 +425,18 @@ test('the pane is laid out for its own width, not the terminal', async ($, on) =
   await r.send('Сделай фичу с тестами')
   const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
   expect(await ui.find({ type: 'Text', text: /^─{38}$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('off is said on the status line; a skill the project leaves out says so in yellow, not as done', async ($, on) => {
+  const r = await router($, on, { files: { '/proj/.claude/skill-router.json': JSON.stringify({ ignored: ['tdd'] }) } })
+  await r.run('off')
+  expect(r.status.at(-1)).toBe('skill router: off')
+  await r.run('auto')
+  expect(r.status.at(-1)).toBeUndefined()
+  await r.run('skills')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'skill-mattpocock-skills:tdd' })
+  expect(await ui.find({ type: 'Text', text: /^⚠ tdd is left out by the project's/ })).toMatchObject({ props: { color: 'warning' } })
   await ui.unmount()
 })

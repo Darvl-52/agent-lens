@@ -200,7 +200,8 @@ const project = async (
   validate?: (change: string) => string,
   // The project's folder as the engine spells it; the commands not on the PATH by that name; the
   // changes whose folder is gone by the time the scan lists it.
-  { root = '/proj', missing = [] as readonly string[], gone = [] as readonly string[] } = {},
+  // `slow`: the commands that run past their time.
+  { root = '/proj', missing = [] as readonly string[], gone = [] as readonly string[], slow = [] as readonly string[] } = {},
 ) => {
   // The disk is kept by POSIX path, however the engine spells one: on Windows it hands the hooks
   // `C:\proj\openspec\changes` for `/proj/openspec/changes`, and elsewhere a `C:\proj` the mod was
@@ -233,6 +234,7 @@ const project = async (
     on('process.run', ($, e) => {
       ran.push({ argv: e.argv, ...(e.init?.cwd !== undefined ? { cwd: e.init.cwd } : {}) })
       if (missing.includes(e.argv[0]!)) return { deny: `spawn ${e.argv[0]} ENOENT` }
+      if (slow.includes(e.argv[0]!)) return { deny: 'the process timed out after 30000 ms' }
       return { value: { exitCode: 0, stdout: validate(e.argv[2]!), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     })
   // null: the API is down.
@@ -476,12 +478,12 @@ test('what is left to decide is settled in the pane and goes to Claude to write 
   expect(asked).toHaveLength(calls)
   expect(await pane.find({ type: 'Text', text: /^  → After a week$/ })).toBeDefined()
   expect(await pane.find({ key: 'tab-decide' })).toMatchObject({ props: { label: 'Decide' } })
-  expect(await bandText($)).toBe('◆ door · 2 not in the spec · tasks 1/2 · tests 1 auto, 1 manual')
+  expect(await bandText($)).toBe('◆ door · 2 decided, not sent · tasks 1/2 · tests 1 auto, 1 manual')
 
   // Changed mind, then back: cleared and decided again.
   await pane.press({ key: 'decide-1' })
   await pane.press({ key: 'clear-1' })
-  expect(await bandText($)).toMatch(/· 1 to decide · 1 not in the spec ·/)
+  expect(await bandText($)).toMatch(/· 1 to decide · 1 decided, not sent ·/)
   await pane.press({ key: 'option-1-0' })
 
   await pane.press({ key: 'apply' })
@@ -561,7 +563,7 @@ test('openspec validate, the requirements, and other changes in the same specs',
   await turn()
   await settle()
   expect(ran[0]).toEqual({ argv: ['openspec', 'validate', 'door', '--strict', '--json', '--no-interactive'], cwd: '/proj' })
-  expect(await bandText($)).toBe('◆ door · 1 spec error · 1 scenario untested · 1 not matching the main spec · overlaps revoke · tasks 1/2 · tests 1 auto, 1 manual')
+  expect(await bandText($)).toBe('◆ door · 1 spec error · 1 scenario with no case · 1 not matching the main spec · overlaps revoke · tasks 1/2 · tests 1 auto, 1 manual')
   await spec()
   await settle()
   // Checked once per version of the change, not on every scan.
@@ -667,7 +669,7 @@ test('/spec lang ru: the row, the pane and the model speak Russian', async ($, o
   const { asked, spec, settle, setReply } = await project($, on, { door: DOOR })
   setReply(() => '## Суть\nВыдача доступа к дверям.\n## Решить тебе\n- Срок доступа (design.md)\n')
   expect((await spec('lang de')).text).toBe('Usage: /spec lang en, /spec lang ru')
-  expect((await spec('lang ru')).text).toBe('Язык: русский.')
+  expect((await spec('lang ru')).text).toBe('agent-lens теперь говорит по-русски: /changes, /spec и /router.')
   expect(await bandText($)).toBe('◆ door · задачи 1/2 · тесты 1 авто, 1 вручную')
   await spec()
   await settle()
@@ -810,7 +812,7 @@ test('the Tests tab: each case and whether its test is there; picked ones, or al
   putAt('/proj/__front/e2e/door.spec.ts', "test('TC-01 grant', tags(CHANGE, 'TC-01'), async () => {})\ntest('TC-010 other', async () => {})\n")
   await spec()
   await settle()
-  expect(await bandText($)).toMatch(/TC-04 unmarked[\s\S]*1 case without a test/)
+  expect(await bandText($)).toMatch(/TC-04 unmarked[\s\S]*1 case with no test/)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   expect(await pane.find({ key: 'tab-tests' })).toMatchObject({ props: { label: 'Tests (2)' } })
   await pane.press({ key: 'tab-tests' })
@@ -860,7 +862,7 @@ test('Claude decides all the points left, one decided by hand aside, and the bri
   expect(await pane.find({ key: 'decide-all' })).toBeUndefined()
   // The one decided by hand still waits to be written in.
   expect(await pane.find({ key: 'apply' })).toMatchObject({ props: { label: 'write 1 into the spec' } })
-  expect(await bandText($)).toBe('◆ door · 1 not in the spec · tasks 1/2 · tests 1 auto, 1 manual')
+  expect(await bandText($)).toBe('◆ door · 1 decided, not sent · tasks 1/2 · tests 1 auto, 1 manual')
 
   // Claude writes it into the spec: the brief is made again from it.
   const briefs = asked.filter(a => !a.prompt.includes('JSON')).length
@@ -880,7 +882,7 @@ test('a scenario no test case covers is in the Tests tab, and goes to Claude to 
   const { spec, settle, submitted } = await project($, on, { door })
   await spec()
   await settle()
-  expect(await bandText($)).toMatch(/1 scenario untested/)
+  expect(await bandText($)).toMatch(/1 scenario with no case/)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   expect(await pane.find({ key: 'tab-tests' })).toMatchObject({ props: { label: 'Tests (1)' } })
   await pane.press({ key: 'tab-tests' })
@@ -934,7 +936,7 @@ test('decisions a turn did not write in are offered again, or come back to be ch
   expect(await pane.find({ type: 'Text', text: /^  → After a week$/ })).toBeDefined()
   expect(await pane.find({ key: 'decide-1' })).toMatchObject({ props: { label: 'decide' } })
   expect(await pane.find({ key: 'apply' })).toMatchObject({ props: { label: 'write 1 into the spec' } })
-  expect(await bandText($)).toBe('◆ door · 1 to decide · 1 not in the spec · tasks 1/2 · tests 1 auto, 1 manual')
+  expect(await bandText($)).toBe('◆ door · 1 to decide · 1 decided, not sent · tasks 1/2 · tests 1 auto, 1 manual')
   await pane.unmount()
 })
 
@@ -996,7 +998,7 @@ test('the row, the badges and the archive agree on what wants a look', async ($,
   await spec()
   await settle()
   // A case without its test: yellow, and it stands between the change and the archive.
-  expect(await bandText($)).toBe('◆ door · 1 case without a test · tasks 2/2 · tests 2 auto, 1 manual')
+  expect(await bandText($)).toBe('◆ door · 1 case with no test · tasks 2/2 · tests 2 auto, 1 manual')
   const band = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND })
   expect(JSON.stringify(await band.find({ key: 'row-change' }))).toMatch(/"color":"warning"/)
   await band.unmount()
@@ -1046,4 +1048,15 @@ test('an edit to the change is read beside the tool call, the test files as last
   await turn()
   await settle()
   expect(tests()).toBe(was + 1)
+})
+
+test('openspec validate that runs past its time is said so, not taken for a CLI not installed', async ($, on) => {
+  const { spec, settle } = await project($, on, { door: DOOR }, report([]), { slow: ['openspec'] })
+  await spec()
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-spec' })
+  expect(await pane.find({ type: 'Text', text: /^⚠ openspec validate ran over 30 seconds and was stopped/ })).toMatchObject({ props: { color: 'warning' } })
+  expect(await pane.find({ type: 'Text', text: /did not run here/ })).toBeUndefined()
+  await pane.unmount()
 })

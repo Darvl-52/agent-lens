@@ -28,6 +28,7 @@ const formSkillAtom = atom({ plugin: 'agent-lens', key: 'router.formSkill' } as 
 const formWordsAtom = atom({ plugin: 'agent-lens', key: 'router.formWords' } as const, '')
 const formHintAtom = atom({ plugin: 'agent-lens', key: 'router.formHint' } as const, '')
 const flashAtom = atom({ plugin: 'agent-lens', key: 'router.flash' } as const, null)
+const flashToneAtom = atom({ plugin: 'agent-lens', key: 'router.flashTone' } as const, 'success' as 'success' | 'warning')
 
 export const PANE = 'agent-lens-router'
 export const COMMAND = 'router'
@@ -62,7 +63,13 @@ export async function modeIn($: EngineInterface): Promise<Mode> {
 export async function setMode($: EngineInterface, mode: Mode) {
   await $.store.set(MODE_KEY, mode)
   await update($, modeAtom, () => mode)
-  if (mode === 'off') $.ui.status(undefined)
+  await showMode($, mode)
+}
+
+// Off, the router says so on the status line, so routing is not taken to be on; on, the line is the
+// pick's again.
+export async function showMode($: EngineInterface, mode: Mode) {
+  $.ui.status(mode === 'off' ? (await wordsIn($)).offStatus : undefined)
 }
 
 export async function ownSetup($: EngineInterface): Promise<Setup> {
@@ -137,7 +144,7 @@ export async function setFormHint($: EngineInterface, text: string) {
 
 // Everything the pane draws, read at once; drawing only reads.
 export async function paneState($: EngineInterface) {
-  const [tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats] = await Promise.all([
+  const [tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats, saidTone] = await Promise.all([
     read($, tabAtom),
     read($, modeAtom),
     read($, flashAtom),
@@ -151,13 +158,15 @@ export async function paneState($: EngineInterface) {
     read($, formWordsAtom),
     read($, formHintAtom),
     read($, statsAtom),
+    read($, flashToneAtom),
   ])
 
-  return { tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats: statsOf(stats, decisions) }
+  return { tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats: statsOf(stats, decisions), saidTone: saidTone ?? 'success' }
 }
 
-export async function flash($: EngineInterface, text: string | null) {
+export async function flash($: EngineInterface, text: string | null, tone: 'success' | 'warning' = 'success') {
   await update($, flashAtom, () => text)
+  await update($, flashToneAtom, () => tone)
 }
 
 // The person's setup changed from the pane: saved, and the line under the pane says what was done.

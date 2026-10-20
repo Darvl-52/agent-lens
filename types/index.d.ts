@@ -117,7 +117,8 @@ export type SpecIssue = { level: 'ERROR' | 'WARNING' | 'INFO'; path: string; mes
 
 // What `openspec validate` said of a change at a fingerprint; `issues` null where the CLI could not
 // be run.
-export type SpecChecked = { change: string; fingerprint: string; issues: SpecIssue[] | null }
+// `issues` null where the CLI did not run; `isTimedOut` where it ran too long and was stopped.
+export type SpecChecked = { change: string; fingerprint: string; issues: SpecIssue[] | null; isTimedOut?: true }
 
 // What one file of a change gained and lost since it was last read.
 export type SpecDelta = { file: string; added: number; removed: number }
@@ -305,6 +306,8 @@ declare module 'claude-code' {
       'router.formWords': string
       'router.formHint': string
       'router.flash': string | null
+      // Whether the line under the router's pane says a thing done, or one refused.
+      'router.flashTone': 'success' | 'warning'
     }
   }
 }

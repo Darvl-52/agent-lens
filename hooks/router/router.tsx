@@ -20,6 +20,7 @@ import {
   registerCommand,
   saveSetup,
   setMode,
+  showMode,
   setTab,
   wordsIn,
 } from './state'
@@ -72,6 +73,7 @@ export function configureRouter(options: PluginOptions) {
 
 export async function startRouter($: EngineInterface) {
   await refreshHeld($)
+  if ((await modeIn($)) === 'off') await showMode($, 'off')
   await registerCommand($)
   void lookAround($).catch(() => undefined)
 }

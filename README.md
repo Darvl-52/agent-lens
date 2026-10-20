@@ -61,7 +61,8 @@ Once a turn has edited a file:
   code. A finding stays until it is sent to Claude or put aside, its file is back as it was
   before the session, or a later review of its file does not find it again. A rule put aside and
   broken again shows again.
-- `not reviewed: small change`, dim: the turn touched a line or two, so it was not reviewed by
+- `reviewing…`, in yellow, while the review runs.
+- `not reviewed: small change`, as plain text: the turn touched a line or two, so it was not reviewed by
   itself; `r` on Findings reviews it.
 - `review failed`, in red: the model gave no review (the API failed, or its reply could not be
   read); `not reviewed`, in yellow: the review stopped before it finished, as a reload of the mod
@@ -90,7 +91,9 @@ looked at stays so in the other modes, where the turns are cut into pieces other
    session's or the uncommitted one). What earlier reviews found and nobody has answered yet stands
    below, under its own heading: a later turn does not drop it. Under **Caught while Claude
    edited**, the rules each edit broke: still in the code, a finding like any other; else `not told
-   Claude yet` or `told Claude` in yellow while the turn runs, `fixed` in green once it is gone.
+   Claude yet`, `told Claude` or `edit refused` in yellow while the turn runs, `fixed` in green once
+   it is gone. A finding sent to Claude shows `→ sent to Claude` in yellow, one put aside `✓ put
+   aside` in green.
 3. **Walkthrough.** The change in reading order: in short, where to start, how the pieces fit,
    what it leaves out. `g` makes it again.
 4. **Ask.** A question about the diff, or about one piece after `ask` on it.
@@ -170,14 +173,14 @@ picked, else the latest edited): first what wants a look, red before yellow, the
   cases` where the file marks none of them. A case is any heading that starts with its id:
   `## TC-01: Title`, `### TC-02. Title`.
 - `TC-07 unmarked`, in red, a case that says neither, where the file marks the others.
-- `2 cases without a test`, in yellow, cases marked `Automated:` none of whose files holds a test
+- `2 cases with no test`, in yellow, cases marked `Automated:` none of whose files holds a test
   with their id.
 - `2 to decide`, in yellow, what the brief found left for a person to decide; `what to decide
   unknown`, in yellow, where the brief came without that list (`g` on Decide makes it again).
-- `1 not in the spec`, in yellow, a decision you made in the pane and have not sent to Claude yet.
+- `1 decided, not sent`, in yellow, a decision you made in the pane and have not sent to Claude yet.
 - `1 spec error`, in red, `2 warnings`, in yellow: what `openspec validate --strict` found, run
   on the change each time its text changes (where the `openspec` CLI is installed).
-- `3 scenarios untested`, in yellow, scenarios of the change's specs that no test case names on
+- `3 scenarios with no case`, in yellow, scenarios of the change's specs that no test case names on
   its `Covers:` line (`Covers: Requirement: X / Scenario: A; Scenario: B`; a requirement named
   alone counts whole). Where no case has such a line, nothing is counted.
 - `1 not matching the main spec`, in yellow, a requirement the change adds that the main spec
@@ -330,7 +333,7 @@ To write a new skill, ask Claude to use `skill-creator`; the router picks it up 
 - `suggest`: Claude is told the skill may fit and decides.
 - `off`: nothing is routed.
 
-Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in the pane. The status line shows the skill picked for the last prompt.
+Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in the pane. The status line shows the skill picked for the last prompt, `skill: model failed` where the model gave no pick, and `skill router: off` while the router is off.
 
 ## Commands
 
