@@ -106,7 +106,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     endRouterTurn(e.agentId, e.answer)
-    if (e.agentId === undefined) endSpecTurn($)
+    if (e.agentId === undefined) endSpecTurn($, e.reason)
     else endSpecAgent($, e.agentId, e.answer)
     const result = await next(e)
     await endReviewTurn($, e.agentId, e.reason).catch(() => {})

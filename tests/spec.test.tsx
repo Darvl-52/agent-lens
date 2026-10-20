@@ -1115,6 +1115,28 @@ test('openspec validate that runs past its time is said so, not taken for a CLI 
   await pane.unmount()
 })
 
+test('a turn the person stops sends no holes and starts no critic: they wait for a turn that ends with an answer', async ($, on) => {
+  const { spec, settle, submitted, turn, spawned, agentDone, startTurn } = await project($, on, { door: DOOR })
+  await spec('critic auto')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(1)
+  await startTurn()
+  await agentDone('critic-1', 'Read it all.\n```json\n[{"hole": "No task revokes access", "where": "tasks.md", "fix": "Add a revoke task"}]\n```')
+  await settle()
+  for (const reason of ['aborted', 'error'] as const) {
+    await $.turn.complete({ answer: '', durationMs: 1, isAborted: reason === 'aborted', turnId: 't', reason, usage: { ...USAGE, model: 'test' } })
+    await settle()
+  }
+  expect(submitted).toHaveLength(0)
+  expect(spawned).toHaveLength(1)
+  expect(await bandText($)).toMatch(/· 1 hole/)
+  await turn()
+  await settle()
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]!.text).toMatch(/1\. No task revokes access/)
+})
+
 test('the critic in auto mode: what it finds goes to Claude to close, three rounds in a row at most', async ($, on) => {
   const { spec, settle, submitted, toasts, put, turn, spawned, agentDone, startTurn, store } = await project($, on, { door: DOOR })
   expect((await spec('critic')).text).toMatch(/^The critic is off\./)

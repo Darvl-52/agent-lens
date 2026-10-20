@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-code'
+import type { EngineInterface, Hook, MatchedHook, PluginOptions, TurnCompleteReason } from 'claude-code'
 
 import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
@@ -884,13 +884,17 @@ async function closeHoles($: EngineInterface, change: string) {
 
 // After a turn the row follows what agents ticked and rewrote; a spec that moved on from the
 // decisions sent gets its brief made again, so the Decide tab shows what is left. One still where
-// it was says so, and the decisions can be sent again or changed.
-async function afterTurn($: EngineInterface) {
+// it was says so, and the decisions can be sent again or changed. Only a turn the model answered
+// sends the holes waiting or starts a critic: one the person stopped, or an error ended, leaves the
+// holes waiting for the next.
+async function afterTurn($: EngineInterface, isAnswered: boolean) {
   await scan($)
-  const waiting = holesWaiting
-  holesWaiting = undefined
-  if (waiting !== undefined) await closeHoles($, waiting)
-  else await critique($, false)
+  if (isAnswered) {
+    const waiting = holesWaiting
+    holesWaiting = undefined
+    if (waiting !== undefined) await closeHoles($, waiting)
+    else await critique($, false)
+  }
   const lens = await read($, lensAtom)
   const refreshing = await read($, refreshingAtom)
   if (!lens || !refreshing || refreshing.change !== lens.current) return
@@ -1041,9 +1045,9 @@ export function startSpecTurn() {
   isMainTurn = true
 }
 
-export function endSpecTurn($: EngineInterface) {
+export function endSpecTurn($: EngineInterface, reason: TurnCompleteReason) {
   isMainTurn = false
-  void afterTurn($).catch(() => {})
+  void afterTurn($, reason === 'answer').catch(() => {})
 }
 
 // What a critic hands back to the main conversation as its run ends: the Decide tab holds it, and
