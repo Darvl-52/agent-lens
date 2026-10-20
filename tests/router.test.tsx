@@ -28,7 +28,7 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const entered: { text: string; context: readonly string[] }[] = []
   const status: (string | undefined)[] = []
   const opened: string[] = []
-  mock.clock(on, { now: 1_000 })
+  const clock = mock.clock(on, { now: 1_000 })
   // The store, kept here so a test can change it as another session would.
   const store = new Map<string, unknown>(Object.entries(setup.stored ?? {}))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
@@ -96,7 +96,7 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const run = (args: string) =>
     $.command.run({ command: 'router', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
 
-  return { asked, entered, status, opened, store, reads, send, run, install: (c: CommandInfo) => (commands = [...commands, c]) }
+  return { asked, entered, status, opened, store, reads, send, run, clock, install: (c: CommandInfo) => (commands = [...commands, c]) }
 }
 
 test('with no rule, the model picks and Claude is told to load the skill', async ($, on) => {
@@ -196,6 +196,22 @@ test('a model that fails lets the prompt through as typed', async ($, on) => {
   expect(r.entered[0]).toEqual({ text: 'Почини выгрузку отчёта в Excel', context: [] })
   // Said where the pick would be, so no pick is not read as nothing fitting.
   expect(r.status.at(-1)).toBe('skill: model failed')
+})
+
+test('a model that failed is left to rest five minutes, each prompt kept waiting no longer than a short call', async ($, on) => {
+  const r = await router($, on, { reply: null })
+  await r.send('Почини выгрузку отчёта в Excel')
+  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(3_000)
+  // Offline or overloaded, the next prompts go in at once, and the status line still says why no
+  // skill is picked.
+  await r.send('Почему падает сборка на CI')
+  await r.send('Добавь кнопку экспорта в отчёт')
+  expect(r.asked).toHaveLength(1)
+  expect(r.entered.map(x => x.context)).toEqual([[], [], []])
+  expect(r.status.at(-1)).toBe('skill: model failed')
+  await r.clock.advance(5 * 60_000)
+  await r.send('Сделай регистрацию через телефон')
+  expect(r.asked).toHaveLength(2)
 })
 
 test('suggest leaves the call to Claude; off routes nothing', async ($, on) => {

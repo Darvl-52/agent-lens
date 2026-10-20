@@ -26,17 +26,23 @@ import {
 } from './state'
 import { WORDS } from './words'
 
-const MODEL_TIMEOUT_MS = 8_000
+// The prompt waits on the model, so the model gets a short while: a pick that comes later is worth
+// less than the wait. One that failed (offline, rate-limited, overloaded) is left to rest, so the
+// prompts after it are not kept waiting on it too.
+const MODEL_TIMEOUT_MS = 2_500
+const MODEL_REST_MS = 5 * 60_000
 
 // What the router reads besides the prompt: the person's previous prompt and the end of Claude's last
 // answer, so a "now the tests" is read as part of the work under way.
 let previous = ''
 let answer = ''
+// Until when the model is not asked, after it failed.
+let restUntil = 0
 
 // What the router picks for a prompt: the person's rules first, and a rule that fires settles it,
 // its skill loaded already or not; where none fires, the model, unless the prompt says too little to
 // go on or the person named a skill themselves.
-async function routeOf($: EngineInterface, text: string, useModel: boolean, model: string) {
+async function routeOf($: EngineInterface, text: string, useModel: boolean, model: string, signal: AbortSignal) {
   const { skills, setup } = await lookAround($)
   if (skills.length === 0) return { picks: [] as Pick[], note: 'no skills' }
   if (namesSkill(text, skills)) return { picks: [] as Pick[], note: 'named' }
@@ -45,6 +51,7 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
   const hits = ruleHits(text, setup.rules, skills)
   if (hits.length > 0) return fresh(hits).length > 0 ? { picks: fresh(hits) } : { picks: [] as Pick[], note: 'loaded' }
   if (!useModel || isTerse(text)) return { picks: [] as Pick[] }
+  if ((await $.clock.now()) < restUntil) return { picks: [] as Pick[], note: 'failed' }
 
   const changes = await changesIn($).catch(() => null)
   const prompt = promptOf(text, { skills, hints: setup.hints, loaded, changes, previous, answer })
@@ -56,7 +63,12 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
     effort: 'low',
     timeoutMs: MODEL_TIMEOUT_MS,
   })
-  if (!reply.isAnswered) return { picks: [] as Pick[], note: 'failed' }
+  if (!reply.isAnswered) {
+    // Cut by the person (escape on the prompt) the model did not fail; by its time, it did.
+    if (!signal.aborted) restUntil = (await $.clock.now()) + MODEL_REST_MS
+    return { picks: [] as Pick[], note: 'failed' }
+  }
+  restUntil = 0
   const picks = parseReply(reply.text, skills)
 
   return picks === undefined ? { picks: [] as Pick[], note: 'failed' } : { picks: fresh(picks) }
@@ -87,7 +99,7 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
   if (mode === 'off') return next(e)
 
   const startedAt = await $.clock.now()
-  const routed = await routeOf($, e.text, useModel, model).catch(() => ({ picks: [] as Pick[], note: 'failed' }))
+  const routed = await routeOf($, e.text, useModel, model, next.signal).catch(() => ({ picks: [] as Pick[], note: 'failed' }))
   previous = e.text.slice(0, 1500)
   const ms = (await $.clock.now()) - startedAt
   const decision: Decision = {
