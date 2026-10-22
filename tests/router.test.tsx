@@ -20,7 +20,10 @@ const PANE = {
 // compares them with '/' for separators and without what leads up to a drive letter.
 const key = (path: string) => path.replace(/\\/g, '/').replace(/^.*[A-Za-z]:(?=\/)/, '')
 
-type Setup = { files?: Record<string, string>; reply?: string | null; stored?: Record<string, unknown> }
+// `listed`: the skills the Skill tool lists for the model, where the engine says (`session.usage`),
+// `ofProject` the ones among them from the project's `.claude`; `fail`: how each model call fails, a
+// time-out or an HTTP status.
+type Setup = { files?: Record<string, string>; reply?: string | null; stored?: Record<string, unknown>; listed?: string[]; ofProject?: string[]; fail?: 'timeout' | 429 }
 
 async function router($: Engine, on: On, setup: Setup = {}) {
   const files = new Map(Object.entries(setup.files ?? {}).map(([p, text]) => [key(p), text]))
@@ -61,9 +64,15 @@ async function router($: Engine, on: On, setup: Setup = {}) {
     if (names.size === 0) return { deny: `ENOENT: ${e.path}` }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
   })
+  on('session.usage', () => {
+    const skills = setup.listed && { totalSkills: setup.listed.length, includedSkills: setup.listed.length, tokens: 1, skillFrontmatter: setup.listed.map(name => ({ name, source: setup.ofProject?.includes(name) ? 'projectSettings' : 'plugin', tokens: 1 })) }
+    return { value: { startedAt: 0, rateLimits: [], context: { breakdown: skills ? { skills } : undefined } } as any }
+  })
   on('model.complete', ($, e) => {
     asked.push(e)
     const reply = setup.reply === undefined ? '{"picks":[]}' : setup.reply
+    if (setup.fail === 'timeout') return { value: { isAnswered: false as const, reason: 'aborted' as const, usage: USAGE } }
+    if (setup.fail === 429) return { value: { isAnswered: false as const, reason: 'api-error' as const, status: 429, error: 'rate_limit' as const, usage: USAGE } }
     return reply === null
       ? { value: { isAnswered: false as const, reason: 'api-error' as const, status: 529, error: 'overloaded' as const, usage: USAGE } }
       : { value: { isAnswered: true as const, text: reply, usage: USAGE } }
@@ -194,27 +203,77 @@ test('a model that fails lets the prompt through as typed', async ($, on) => {
   const r = await router($, on, { reply: null })
   await r.send('Почини выгрузку отчёта в Excel')
   expect(r.entered[0]).toEqual({ text: 'Почини выгрузку отчёта в Excel', context: [] })
-  // Said where the pick would be, so no pick is not read as nothing fitting.
-  expect(r.status.at(-1)).toBe('skill: model failed')
+  // Said where the pick would be, with why, so no pick is not read as nothing fitting.
+  expect(r.status.at(-1)).toBe('skill: model failed: overloaded (529)')
 })
 
-test('a model that failed is left to rest five minutes, each prompt kept waiting no longer than a short call', async ($, on) => {
+test('a model that failed twice in a row is left to rest five minutes, each prompt kept waiting no longer than a short call', async ($, on) => {
   const r = await router($, on, { reply: null })
   await r.send('Почини выгрузку отчёта в Excel')
-  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(3_000)
+  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(4_000)
+  // One failure is a blip: the next prompt asks again.
+  await r.send('Почему падает сборка на CI')
+  expect(r.asked).toHaveLength(2)
   // Offline or overloaded, the next prompts go in at once, and the status line still says why no
   // skill is picked.
-  expect(r.status.at(-1)).toBe('skill: model failed')
-  await r.send('Почему падает сборка на CI')
-  await r.clock.advance(60_000)
   await r.send('Добавь кнопку экспорта в отчёт')
-  expect(r.asked).toHaveLength(1)
-  expect(r.entered.map(x => x.context)).toEqual([[], [], []])
-  // Not asked, and said so: when it is asked again.
-  expect(r.status.slice(-2)).toEqual(['skill: model failed, asked again in 5 min', 'skill: model failed, asked again in 4 min'])
+  await r.clock.advance(60_000)
+  await r.send('Добавь кнопку импорта в отчёт')
+  expect(r.asked).toHaveLength(2)
+  expect(r.entered.map(x => x.context)).toEqual([[], [], [], []])
+  // Not asked, and said so: why, and when it is asked again.
+  expect(r.status.slice(-2)).toEqual(['skill: model failed (overloaded (529)), asked again in 5 min', 'skill: model failed (overloaded (529)), asked again in 4 min'])
   await r.clock.advance(5 * 60_000)
   await r.send('Сделай регистрацию через телефон')
-  expect(r.asked).toHaveLength(2)
+  expect(r.asked).toHaveLength(3)
+})
+
+test('a model out of time says so on the status line', async ($, on) => {
+  const slow = await router($, on, { fail: 'timeout' })
+  await slow.send('Почини выгрузку отчёта в Excel')
+  expect(slow.status.at(-1)).toBe('skill: model failed: no answer in 4 s')
+  expect(slow.asked[0]!.timeoutMs).toBe(4_000)
+})
+
+test('a rate limit and an unreadable answer are told apart', async ($, on) => {
+  const limited = await router($, on, { fail: 429 })
+  await limited.send('Почини выгрузку отчёта в Excel')
+  expect(limited.status.at(-1)).toBe('skill: model failed: rate-limited (429)')
+})
+
+test('an answer that is not the JSON asked for says so', { options: { language: 'ru' } }, async ($, on) => {
+  const r = await router($, on, { reply: 'I think tdd fits here.' })
+  await r.send('Почини выгрузку отчёта в Excel')
+  expect(r.status.at(-1)).toBe('скилл: ошибка модели: ответ не разобран')
+})
+
+test("the project's own skills open the list the model reads, marked, and it is told to prefer them", async ($, on) => {
+  const r = await router($, on, { listed: ['mattpocock-skills:tdd', 'mattpocock-skills:diagnosing-bugs', 'opsx:apply'], ofProject: ['opsx:apply'] })
+  await r.send('Давай напишем спеку, которая закроет баги корзины')
+  const prompt = r.asked[0]!.prompt
+  expect(prompt).toContain('- opsx:apply [project]: Implement the tasks of an OpenSpec change.')
+  expect(prompt).toContain('- mattpocock-skills:tdd: Test-driven development.')
+  expect(prompt.indexOf('opsx:apply')).toBeLessThan(prompt.indexOf('mattpocock-skills:tdd'))
+  expect(r.asked[0]!.system).toContain('marked [project]')
+})
+
+test('a skill Claude may not load itself (disable-model-invocation) is not routed: not by the model, not by a rule', async ($, on) => {
+  // The engine lists for the model the skills the Skill tool runs; /mr and to-spec are the person's to type.
+  const r = await router($, on, {
+    reply: '{"picks":[{"skill":"to-spec","why":"a spec of the bugs"}]}',
+    listed: ['mattpocock-skills:tdd', 'mattpocock-skills:diagnosing-bugs', 'opsx:apply'],
+  })
+  r.install({ name: 'mattpocock-skills:to-spec', description: 'Turn the talk into a spec.', source: 'plugin', plugin: 'mattpocock-skills' })
+  r.install({ name: 'mr', description: 'Open a merge request.', source: 'user' })
+  await r.send('Давай напишем спеку, которая закроет эти баги')
+  expect(r.asked[0]!.prompt).toContain('- mattpocock-skills:tdd:')
+  expect(r.asked[0]!.prompt).not.toContain('to-spec')
+  expect(r.asked[0]!.prompt).not.toContain('- mr:')
+  expect(r.entered[0]!.context).toEqual([])
+  expect((await r.run('add mr запушь')).text).toBe('Claude cannot load mr itself (its skill says disable-model-invocation): type /mr.')
+  const list = (await r.run('list')).text
+  expect(list).toContain('· mattpocock-skills:tdd')
+  expect(list).toContain('− mr — Open a merge request. (only you run it: /mr)')
 })
 
 test('suggest leaves the call to Claude; off routes nothing', async ($, on) => {

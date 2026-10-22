@@ -212,7 +212,7 @@ function overviewTab(els: Els, d: Data) {
             </Box>
           ))
         ) : (
-          <Text {...(last.note === 'failed' ? { color: 'error' as const } : last.note === 'resting' ? { color: 'warning' as const } : {})}>→ {words.noteText(last.note)}</Text>
+          <Text {...(last.note === 'failed' || last.note === 'error' ? { color: 'error' as const } : last.note === 'resting' ? { color: 'warning' as const } : {})}>→ {words.noteText(last.note, last.why)}</Text>
         )}
       </Box>
       <Text wrap="truncate-end">
@@ -362,7 +362,7 @@ function historyTab($: EngineInterface, els: Els, d: Data) {
             <Text dimColor>{timeOf(x.at)}</Text> «{oneLine(x.prompt, d.columns - 10)}»
           </Text>
           {x.picks.length === 0 ? (
-            <Text {...(x.note === 'failed' ? { color: 'error' as const } : x.note === 'resting' ? { color: 'warning' as const } : {})}>{'  '}→ {words.noteText(x.note)}</Text>
+            <Text {...(x.note === 'failed' || x.note === 'error' ? { color: 'error' as const } : x.note === 'resting' ? { color: 'warning' as const } : {})}>{'  '}→ {words.noteText(x.note, x.why)}</Text>
           ) : (
             x.picks.map(p => (
               <Box key={`p-${x.at}-${p.skill}`} flexDirection="row" columnGap={1}>

@@ -1,4 +1,5 @@
 import type { Lang, Mode, Tab } from '../../types/router'
+import type { Failure } from './route'
 
 export type Words = {
   title: string
@@ -27,8 +28,12 @@ export type Words = {
   removed: (n: number) => string
   noSuchRule: (n: string) => string
   list: (lines: string[]) => string
-  failed: string
-  resting: (minutes: number) => string
+  failed: (why: string) => string
+  resting: (why: string, minutes: number) => string
+  failure: (f: Failure) => string
+  broken: string
+  notLoadable: (skill: string) => string
+  yoursToRun: (skill: string) => string
   opened: string
   langSet: string
   langUsage: string
@@ -38,7 +43,7 @@ export type Words = {
   keysHelp: string
   lastPrompt: string
   emptyOverview: string
-  noteText: (note: string | undefined) => string
+  noteText: (note: string | undefined, why?: string) => string
   sessionStats: (n: number, withSkill: number, byRule: number, byModel: number) => string
   top: string
   loadedNow: string
@@ -101,8 +106,25 @@ export const WORDS: Record<Lang, Words> = {
     removed: n => `Rule ${n} removed.`,
     noSuchRule: n => `No rule ${n}.`,
     list: lines => (lines.length > 0 ? lines.join('\n') : 'No skills found.'),
-    failed: 'model failed',
-    resting: minutes => `model failed, asked again in ${minutes} min`,
+    failed: why => `model failed: ${why}`,
+    resting: (why, minutes) => `model failed (${why}), asked again in ${minutes} min`,
+    failure: f =>
+      f.kind === 'timeout'
+        ? `no answer in ${f.seconds} s`
+        : f.kind === 'unread'
+          ? 'answer not read'
+          : f.status === null
+            ? 'no connection'
+            : f.status === 429 || f.error === 'rate_limit'
+              ? `rate-limited (${f.status})`
+              : f.status === 529 || f.error === 'overloaded'
+                ? `overloaded (${f.status})`
+                : f.error === 'authentication_failed'
+                  ? `not signed in (${f.status}): /login`
+                  : `API error ${f.status}`,
+    broken: 'router failed, prompt sent as is',
+    notLoadable: skill => `Claude cannot load ${skill} itself (its skill says disable-model-invocation): type /${skill}.`,
+    yoursToRun: skill => `only you run it: /${skill}`,
     leftOutByProject: 'left out by the project',
     fromSpec: 'sent from /spec',
     ignoredByProject: skill => `${skill} is left out by the project's .claude/skill-router.json: change it there.`,
@@ -115,13 +137,15 @@ export const WORDS: Record<Lang, Words> = {
     keysHelp: 'Tab: move · Enter: press · 1-4: tabs · a/s/o: mode · Esc: close',
     lastPrompt: 'Last prompt',
     emptyOverview: 'Nothing routed yet. Write a prompt: what was picked and why shows here.',
-    noteText: note =>
+    noteText: (note, why) =>
       note === 'named'
         ? 'the prompt names a skill'
         : note === 'failed'
-          ? 'the model failed'
+          ? `the model failed: ${why ?? ''}`
           : note === 'resting'
-            ? 'the model failed a while ago: it rests five minutes, not asked'
+            ? `the model failed twice in a row (${why ?? ''}): it rests five minutes, not asked`
+          : note === 'error'
+            ? 'the router failed: the prompt went as typed'
           : note === 'no skills'
             ? 'no skills installed'
             : note === 'loaded'
@@ -185,8 +209,25 @@ export const WORDS: Record<Lang, Words> = {
     removed: n => `Правило ${n} удалено.`,
     noSuchRule: n => `Правила ${n} нет.`,
     list: lines => (lines.length > 0 ? lines.join('\n') : 'Скиллов не найдено.'),
-    failed: 'ошибка модели',
-    resting: minutes => `ошибка модели, снова спросим через ${minutes} мин`,
+    failed: why => `ошибка модели: ${why}`,
+    resting: (why, minutes) => `ошибка модели (${why}), снова спросим через ${minutes} мин`,
+    failure: f =>
+      f.kind === 'timeout'
+        ? `нет ответа за ${f.seconds} с`
+        : f.kind === 'unread'
+          ? 'ответ не разобран'
+          : f.status === null
+            ? 'нет связи'
+            : f.status === 429 || f.error === 'rate_limit'
+              ? `лимит запросов (${f.status})`
+              : f.status === 529 || f.error === 'overloaded'
+                ? `перегружена (${f.status})`
+                : f.error === 'authentication_failed'
+                  ? `нет входа (${f.status}): /login`
+                  : `ошибка API ${f.status}`,
+    broken: 'сбой роутера, промпт ушёл как есть',
+    notLoadable: skill => `Claude не может сам загрузить ${skill} (в скилле disable-model-invocation): набери /${skill}.`,
+    yoursToRun: skill => `запускаешь только ты: /${skill}`,
     leftOutByProject: 'исключён проектом',
     fromSpec: 'отправлено из /spec',
     ignoredByProject: skill => `${skill} исключён проектом в .claude/skill-router.json: это меняется там.`,
@@ -199,13 +240,15 @@ export const WORDS: Record<Lang, Words> = {
     keysHelp: 'Tab — по кнопкам · Enter — нажать · 1–4 — вкладки · a/s/o — режим · Esc — закрыть',
     lastPrompt: 'Последний промпт',
     emptyOverview: 'Пока ничего. Напиши промпт — здесь появится, какой скилл выбран и почему.',
-    noteText: note =>
+    noteText: (note, why) =>
       note === 'named'
         ? 'скилл назван в промпте'
         : note === 'failed'
-          ? 'ошибка модели'
+          ? `ошибка модели: ${why ?? ''}`
           : note === 'resting'
-            ? 'модель недавно упала: пять минут её не спрашивают'
+            ? `модель упала дважды подряд (${why ?? ''}): пять минут её не спрашивают`
+          : note === 'error'
+            ? 'сбой роутера: промпт ушёл как есть'
           : note === 'no skills'
             ? 'скиллов нет'
             : note === 'loaded'

@@ -4,19 +4,39 @@ import type { Change, Mode, Pick, Rule, Setup, Skill } from '../../types/router'
 
 export const NO_SETUP: Setup = { rules: [], hints: {}, ignored: [] }
 
+// How a model call failed, for the status line: the person reads why no skill was picked.
+export type Failure = { kind: 'timeout'; seconds: number } | { kind: 'api'; status: number | null; error: string } | { kind: 'unread' }
+
 // At most this many skills for one prompt: two that both fit happen (a spec and a test-first build),
 // more is a guess.
 export const MAX_PICKS = 2
 
 // The skills the Skill tool can run: the person's and the project's own (`user`), and a plugin's, named
 // `<plugin>:<skill>`. A command a mod registers (`$.command.register`) is a plugin's too but carries no
-// plugin prefix, and the model cannot run it; built-ins and MCP prompts are not skills.
-export function catalogOf(commands: readonly CommandInfo[], ignored: readonly string[]): Skill[] {
-  return commands
-    .filter(c => c.source === 'user' || (c.source === 'plugin' && c.name.includes(':')))
+// plugin prefix, and the model cannot run it; built-ins and MCP prompts are not skills. Where the
+// engine says which skills it lists for the model (`listed`), the rest are left out: a skill marked
+// `disable-model-invocation` is the person's to type, and the Skill tool refuses it. The project's own
+// skills come first, marked: a team's skill for a kind of work is the one it means.
+export function catalogOf(commands: readonly CommandInfo[], ignored: readonly string[], listed: readonly Listed[] | null = null): Skill[] {
+  const isProject = (name: string) => listed?.some(l => l.name === name && l.isProject) ?? false
+  const skills = skillsOf(commands)
+    .filter(c => listed === null || listed.some(l => l.name === c.name))
     .filter(c => !ignored.includes(c.name))
-    .map(c => ({ name: c.name, description: c.description }))
+    .map(c => ({ name: c.name, description: c.description, ...(isProject(c.name) ? { isProject: true } : {}) }))
+
+  return [...skills.filter(s => s.isProject), ...skills.filter(s => !s.isProject)]
 }
+
+// A skill the engine lists for the model, and whether it is the project's own.
+export type Listed = { name: string; isProject: boolean }
+
+// The skills the Skill tool would not run, which the person types themselves; none where the engine
+// does not say.
+export function manualOf(commands: readonly CommandInfo[], listed: readonly Listed[] | null): Skill[] {
+  return listed === null ? [] : skillsOf(commands).filter(c => !listed.some(l => l.name === c.name)).map(c => ({ name: c.name, description: c.description }))
+}
+
+const skillsOf = (commands: readonly CommandInfo[]) => commands.filter(c => c.source === 'user' || (c.source === 'plugin' && c.name.includes(':')))
 
 // The skill a name the person typed means: the name itself, else the one skill whose name ends in
 // `:<name>` (`tdd` for `mattpocock-skills:tdd`); undefined where none or several do.
@@ -126,7 +146,7 @@ export function resolveSetup(setup: Setup, skills: readonly Skill[]): Setup {
 // What the model is told it does: one stable block, so its cache holds across prompts.
 export const SYSTEM = `You route a developer's request in Claude Code to the skills that fit it. A skill is a set of instructions Claude loads before doing a kind of work.
 
-Pick a skill only when it clearly fits the main thing the request asks for. Pick none for small talk, a question answered in a few lines, a yes or no, or a follow-up to the work already under way, unless the request starts a different kind of work. Never pick a skill listed as already loaded. Pick at most ${MAX_PICKS}.
+Pick a skill only when it clearly fits the main thing the request asks for. Skills marked [project] are the project's own: where one fits, pick it over a general skill for the same kind of work (its spec skill over a general spec skill); where none fits, the general skills are there as before. Pick none for small talk, a question answered in a few lines, a yes or no, or a follow-up to the work already under way, unless the request starts a different kind of work. Never pick a skill listed as already loaded. Pick at most ${MAX_PICKS}.
 
 Where the project uses OpenSpec and the request is about one of its changes, name the change in "args" for a skill that works on a change.
 
@@ -150,7 +170,7 @@ export type Context = {
 export function promptOf(text: string, c: Context): { skills: string; rest: string } {
   const cut = (s: string, room: number) => (s.length > room ? `${s.slice(0, room - 1)}…` : s)
   const skills = c.skills
-    .map(s => `- ${s.name}: ${cut(s.description, PROMPT_LIMITS.description)}${c.hints[s.name] ? ` [The developer says: use it ${cut(c.hints[s.name]!, PROMPT_LIMITS.description)}]` : ''}`)
+    .map(s => `- ${s.name}${s.isProject ? ' [project]' : ''}: ${cut(s.description, PROMPT_LIMITS.description)}${c.hints[s.name] ? ` [The developer says: use it ${cut(c.hints[s.name]!, PROMPT_LIMITS.description)}]` : ''}`)
     .join('\n')
     .slice(0, PROMPT_LIMITS.skills)
   const changes =

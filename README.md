@@ -318,12 +318,13 @@ and the list of skills, and picks the one that fits, or none. Claude is then tol
 
 ### How it works
 
-- Every skill the Skill tool can run is a candidate: plugin skills (`mattpocock-skills:tdd`), your `~/.claude/skills` and `~/.claude/commands`, the project's `.claude/skills` and `.claude/commands` (OpenSpec puts its own there). Install or write a skill and it is routed from the next prompt on.
+- Every skill the Skill tool can run is a candidate: plugin skills (`mattpocock-skills:tdd`), your `~/.claude/skills` and `~/.claude/commands`, the project's `.claude/skills` and `.claude/commands` (OpenSpec puts its own there). Install or write a skill and it is routed from the next prompt on. A skill marked `disable-model-invocation` is yours to type (`/mr`), as the Skill tool refuses it: it is never routed, `/router list` marks it `−`, and `/router add` says so.
+- The project's own skills (its `.claude/skills` and `.claude/commands`) come first in what the model reads, marked `[project]`, and it picks one of them over a general skill for the same kind of work: in a project with OpenSpec's skills, "write a spec for these bugs" gets `openspec-propose`, not a general spec skill. Where none of them fits, the general skills are routed as before, in the same one call.
 - Your rules are checked first; a word matches at the start of a word in any case, so `test` finds `tests` but not `latest`, and `тест` finds `тесты`. A rule that fires skips the model, its skill loaded already or not.
 - Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change. It reads at most the first 4,000 characters of a prompt and 400 of each skill's description.
 - A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, takes the last pick off the status line, and reads its mode and your rules again (off says so there).
 - A prompt that names a skill (`/tdd`, `mattpocock-skills:tdd`), a slash command, and prompts from other plugins or scheduled runs are left alone.
-- If the model fails or is slow (2.5 seconds), the prompt goes through as typed, and the status line says `skill: model failed`. The model is then not asked for five minutes, so the prompts after it are not kept waiting too; the status line says when it is asked again (`skill: model failed, asked again in 4 min`).
+- If the model fails or is slow (4 seconds; it answers in one or two), the prompt goes through as typed, and the status line says how: `skill: model failed: no answer in 4 s`, `overloaded (529)`, `rate-limited (429)`, `no connection`, `answer not read`. Once is a blip, and the next prompt asks again; after two failures in a row the model is not asked for five minutes, so the prompts after it are not kept waiting too, and the status line says when it is asked again (`skill: model failed (overloaded (529)), asked again in 4 min`). A prompt stopped with Esc is no failure.
 
 ### Add your own
 
@@ -368,7 +369,7 @@ To write a new skill, ask Claude to use `skill-creator`; the router picks it up 
 - `suggest`: Claude is told the skill may fit and decides.
 - `off`: nothing is routed.
 
-Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in the pane. The status line shows the skill picked for the last prompt, `skill: model failed` where the model gave no pick, and `skill router: off` while the router is off.
+Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in the pane. The status line shows the skill picked for the last prompt, `skill: model failed: …` where the model gave no pick, and why, and `skill router: off` while the router is off.
 
 ## Commands
 

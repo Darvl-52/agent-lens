@@ -1,7 +1,8 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { Change, Pick, Setup, Skill } from '../../types/router'
-import { catalogOf, join, merge, NO_SETUP, progressOf, resolve, resolveSetup, setupOf, shortOf } from './route'
+import { catalogOf, join, manualOf, merge, NO_SETUP, progressOf, resolve, resolveSetup, setupOf, shortOf } from './route'
+import type { Listed } from './route'
 import { addDecision, holdCatalog, loadedIn, modeIn, ownSetup, wordsIn } from './state'
 
 export const KEPT_DECISIONS = 30
@@ -9,11 +10,33 @@ export const KEPT_DECISIONS = 30
 // The skills as last listed, for the typeahead after `/router add `: listing them on each key is
 // wasted work.
 let catalog: Skill[] = []
+// The skills the person alone runs, as last listed, for `/router list` and `/router add`.
+let manual: Skill[] = []
 // What the pane was last handed, so a prompt that finds the same skills writes nothing.
 let held = ''
 
 export function catalogNow() {
   return catalog
+}
+
+export function manualNow() {
+  return manual
+}
+
+// The skills the engine lists for the model, the ones the Skill tool runs, as /context counts them,
+// each marked where it is the project's own (its `.claude/skills` or `.claude/commands`); null where
+// it does not say, or the listing is cut to its budget and leaves runnable ones out. Asked
+// again only when the commands change, as counting the context is not free.
+let listedFor = ''
+let listed: Listed[] | null = null
+async function listedSkills($: EngineInterface, commands: string, isForced: boolean) {
+  if (!isForced && commands === listedFor) return listed
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
+  const skills = usage?.context.breakdown?.skills
+  listed = skills && skills.includedSkills >= skills.totalSkills ? skills.skillFrontmatter.map(s => ({ name: s.name, isProject: s.source === 'projectSettings' })) : null
+  listedFor = commands
+
+  return listed
 }
 
 // The project's `.claude/skill-router.json`, where a team keeps the rules everyone routes by; none,
@@ -52,14 +75,17 @@ export async function changesIn($: EngineInterface): Promise<Change[] | null> {
 export async function lookAround($: EngineInterface, isForced = false) {
   const root = await $.session.root()
   const [commands, own, project] = await Promise.all([$.command.list(), ownSetup($), projectSetup($, root)])
-  const all = catalogOf(commands, [])
+  const listed = await listedSkills($, JSON.stringify(commands), isForced)
+  const all = catalogOf(commands, [], listed)
+  manual = manualOf(commands, listed)
   const setup = resolveSetup(merge(own, project), all)
   const projects = resolveSetup(project, all)
   catalog = all
   const now = JSON.stringify([all, projects])
   if (isForced || now !== held) {
     held = now
-    await holdCatalog($, all, projects)
+    // The pane's copy: a write refused mid-render leaves it as it was, and routing goes on.
+    await holdCatalog($, all, projects).catch(() => {})
   }
 
   return { skills: all.filter(s => !setup.ignored.includes(s.name)), setup, project: projects }

@@ -2,9 +2,10 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-c
 
 import type { Change, Decision, Pick, Setup, Skill } from '../../types/router'
 import type { PaneHook } from '../core/hooks'
-import { catalogNow, changesIn, isLoaded, KEPT_DECISIONS, lookAround, oneLine } from './catalog'
+import { catalogNow, changesIn, isLoaded, KEPT_DECISIONS, lookAround, manualNow, oneLine } from './catalog'
 import { drawPane } from './pane'
 import { SYSTEM, directiveOf, isTerse, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf } from './route'
+import type { Failure } from './route'
 import {
   COMMAND,
   PANE,
@@ -27,17 +28,30 @@ import {
 import { WORDS } from './words'
 
 // The prompt waits on the model, so the model gets a short while: a pick that comes later is worth
-// less than the wait. One that failed (offline, rate-limited, overloaded) is left to rest, so the
-// prompts after it are not kept waiting on it too.
-const MODEL_TIMEOUT_MS = 2_500
+// less than the wait. It answers in one to two seconds, the cache cold or warm, so four leave room
+// for a slow one. One that failed twice in a row (offline, rate-limited, overloaded) is left to
+// rest, so the prompts after it are not kept waiting on it too; once is a blip.
+const MODEL_TIMEOUT_MS = 4_000
 const MODEL_REST_MS = 5 * 60_000
+const FAILS_TO_REST = 2
 
 // What the router reads besides the prompt: the person's previous prompt and the end of Claude's last
 // answer, so a "now the tests" is read as part of the work under way.
 let previous = ''
 let answer = ''
-// Until when the model is not asked, after it failed.
+// Until when the model is not asked, after it failed; how many calls in a row failed, and how the
+// last one did.
 let restUntil = 0
+let failsInRow = 0
+let lastFailure: Failure = { kind: 'unread' }
+
+async function failed($: EngineInterface, failure: Failure, canRest: boolean) {
+  lastFailure = failure
+  failsInRow += 1
+  if (canRest && failsInRow >= FAILS_TO_REST) restUntil = (await $.clock.now()) + MODEL_REST_MS
+
+  return { picks: [] as Pick[], note: 'failed', failure }
+}
 
 // What the router picks for a prompt: the person's rules first, and a rule that fires settles it,
 // its skill loaded already or not; where none fires, the model, unless the prompt says too little to
@@ -55,23 +69,31 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
 
   const changes = await changesIn($).catch(() => null)
   const prompt = promptOf(text, { skills, hints: setup.hints, loaded, changes, previous, answer })
-  const reply = await $.model.complete({
-    model,
-    system: SYSTEM,
-    prompt: [{ text: prompt.skills, cache: true }, { text: prompt.rest }],
-    maxTokens: 300,
-    effort: 'low',
-    timeoutMs: MODEL_TIMEOUT_MS,
-  })
+  const reply = await $.model.complete(
+    {
+      model,
+      system: SYSTEM,
+      prompt: [{ text: prompt.skills, cache: true }, { text: prompt.rest }],
+      maxTokens: 300,
+      effort: 'low',
+      timeoutMs: MODEL_TIMEOUT_MS,
+    },
+    { signal },
+  )
   if (!reply.isAnswered) {
     // Cut by the person (escape on the prompt) the model did not fail; by its time, it did.
-    if (!signal.aborted) restUntil = (await $.clock.now()) + MODEL_REST_MS
-    return { picks: [] as Pick[], note: 'failed' }
+    if (signal.aborted) return { picks: [] as Pick[] }
+    if (reply.reason === 'aborted') return failed($, { kind: 'timeout', seconds: MODEL_TIMEOUT_MS / 1000 }, true)
+    if (reply.reason === 'api-error') return failed($, { kind: 'api', status: reply.status, error: reply.error }, true)
+    return failed($, { kind: 'unread' }, true)
   }
   restUntil = 0
   const picks = parseReply(reply.text, skills)
+  // An answer not read is the model's slip, not an outage: it is asked again on the next prompt.
+  if (picks === undefined) return failed($, { kind: 'unread' }, false)
+  failsInRow = 0
 
-  return picks === undefined ? { picks: [] as Pick[], note: 'failed' } : { picks: fresh(picks) }
+  return { picks: fresh(picks) }
 }
 
 // Whether a model picks where no rule does, and which.
@@ -99,7 +121,11 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
   if (mode === 'off') return next(e)
 
   const startedAt = await $.clock.now()
-  const routed = await routeOf($, e.text, useModel, model, next.signal).catch(() => ({ picks: [] as Pick[], note: 'failed' }))
+  // The router's own slip (the commands not listed, the store not read) is not the model's.
+  const routed: { picks: Pick[]; note?: string; failure?: Failure } = await routeOf($, e.text, useModel, model, next.signal).catch(() => ({
+    picks: [] as Pick[],
+    note: 'error',
+  }))
   previous = e.text.slice(0, 1500)
   const ms = (await $.clock.now()) - startedAt
   const decision: Decision = {
@@ -107,21 +133,26 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
     prompt: oneLine(e.text, 200),
     picks: routed.picks,
     ms,
-    ...('note' in routed && routed.note ? { note: routed.note } : {}),
+    ...(routed.note ? { note: routed.note } : {}),
   }
-  await addDecision($, decision, KEPT_DECISIONS)
   const words = await wordsIn($)
-  // A model that failed says so where the pick would be, so no pick is not read as nothing fitting;
-  // one left to rest, when it is asked again.
-  const note = 'note' in routed ? routed.note : undefined
+  if (routed.failure) decision.why = words.failure(routed.failure)
+  if (routed.note === 'resting') decision.why = words.failure(lastFailure)
+  // Kept for the pane; a write refused mid-render costs the history a line, not the prompt its skill.
+  await addDecision($, decision, KEPT_DECISIONS).catch(() => {})
+  // A model that failed says so where the pick would be, and why, so no pick is not read as nothing
+  // fitting; one left to rest, when it is asked again.
+  const note = routed.note
   $.ui.status(
     routed.picks.length > 0
       ? words.status(routed.picks.map(p => shortOf(p.skill)).join(', '))
       : note === 'failed'
-        ? words.status(words.failed)
+        ? words.status(words.failed(decision.why ?? ''))
         : note === 'resting'
-          ? words.status(words.resting(Math.ceil((restUntil - ms - startedAt) / 60_000)))
-          : undefined,
+          ? words.status(words.resting(decision.why ?? '', Math.ceil((restUntil - ms - startedAt) / 60_000)))
+          : note === 'error'
+            ? words.status(words.broken)
+            : undefined,
   )
   if (routed.picks.length === 0) return next(e)
 
@@ -199,8 +230,9 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
 
       return `${isOut ? '✗' : '·'} ${s.name} — ${oneLine(s.description, 80)}${byProject.includes(s.name) ? ` (${words.leftOutByProject})` : ''}`
     })
+    const yours = manualNow().map(s => `− ${s.name} — ${oneLine(s.description, 80)} (${words.yoursToRun(s.name)})`)
 
-    return { text: words.list(lines) }
+    return { text: words.list([...lines, ...yours]) }
   }
 
   const own = await ownSetup($)
@@ -216,6 +248,8 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
   if (verb === 'add' || verb === 'when' || verb === 'ignore' || verb === 'unignore') {
     const [name = '', ...tail] = rest
     const skill = resolve(name, catalogNow())
+    const yours = skill === undefined ? resolve(name, manualNow()) : undefined
+    if (yours !== undefined) return { text: words.notLoadable(yours) }
     if (skill === undefined) return { text: words.unknownSkill(name) }
     const said = tail.join(' ').trim()
     if (verb === 'add') {

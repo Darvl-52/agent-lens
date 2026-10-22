@@ -215,7 +215,8 @@ export type RouterLang = 'en' | 'ru'
 export type RouterTab = 'overview' | 'rules' | 'skills' | 'history'
 
 // A skill the router may pick: the name the Skill tool runs it by, and the line that says what it is for.
-export type RouterSkill = { name: string; description: string }
+// `isProject`: the project's own, from its `.claude` folder, which wins where a general one fits too.
+export type RouterSkill = { name: string; description: string; isProject?: boolean }
 
 // A rule the person set: the skill runs whenever a prompt says one of `when` (a word or phrase matched
 // at the start of a word, or `/a regex/`), with `args` where the skill takes them.
@@ -229,8 +230,8 @@ export type RouterSetup = { rules: RouterRule[]; hints: Record<string, string>; 
 export type RouterPick = { skill: string; why: string; args?: string; by: 'rule' | 'model' }
 
 // What the router made of one prompt: its start, what it picked, how long it took, and a note where it
-// picked nothing for a reason worth showing (no skills, the model failed).
-export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; ms: number; note?: string }
+// picked nothing for a reason worth showing (no skills, the model failed), and how it failed.
+export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; ms: number; note?: string; why?: string }
 
 // The session's prompts routed, counted whole: the decisions keep only the last few.
 export type RouterStats = { prompts: number; withSkill: number; byRule: number; byModel: number; bySkill: Record<string, number> }
