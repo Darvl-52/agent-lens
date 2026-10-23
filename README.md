@@ -55,18 +55,22 @@ Claude one at a time, each once the turn before has ended, in a pane that shows 
 
 1. Matt's `setup-matt-pocock-skills`, run as if you typed it: the tracker, the labels, the domain layout.
 2. `openspec init --tools claude`, run by the mod, where the project has no `openspec/`.
-3. The map from the code: `GLOSSARY.md` in the form of Matt's `domain-modeling`, `ARCHITECTURE.md`,
-   an ADR in `docs/adr/` for each decision that qualifies.
-4. The coding standards, read from the code and each put to you before it is written: a mechanical
+3. What is already written, where the project has docs of its own (a `CLAUDE.md` it wrote,
+   `AGENTS.md`, a glossary by its old name `CONTEXT.md`, another agent's rules): each piece is put
+   to you with the file it belongs in, and what you pick moves there word for word, leaving its old
+   place; `CONTEXT.md` becomes `GLOSSARY.md` by `git mv`. Without such docs the step is done already.
+4. The map from the code: `GLOSSARY.md` in the form of Matt's `domain-modeling`, `ARCHITECTURE.md`,
+   an ADR in `docs/adr/` for each decision that qualifies, numbered on from those there.
+5. The coding standards, read from the code and each put to you before it is written: a mechanical
    rule (a banned API, an import's shape, where a file lives) goes to the project's linter, as a
    tool checks it better than prose; a judgement goes to `CODING_STANDARDS.md`. Each says what, why
    (the mistake it prevents), where it shows, and what checks it (`eslint: <rule>` or `review`).
-5. `docs/agents/workflow.md`: how work goes (OpenSpec for the changes, Matt's skills at each step),
+6. `docs/agents/workflow.md`: how work goes (OpenSpec for the changes, Matt's skills at each step),
    when a task is done here, and how the work is shared between the main agent and its subagents.
    And `CLAUDE.md`: the language you are spoken to in first, pointers to the files (`GLOSSARY.md`
    imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in
    two tiers (what the change touches while working, everything before a commit or push).
-6. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them.
+7. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them.
 
 A step is done once its files are there and pass the check; where they fail, what failed goes back
 to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). Run
@@ -75,7 +79,7 @@ again, it adds to what is there.
 From then on the files are checked at each session's start, on each edit and at the end of each
 turn (an edit made through the shell included), as `openspec validate
 --strict` checks a change: a file past its size (`CLAUDE.md` with what it imports), a path it names that is not there, a glossary entry
-out of its form or naming code, an ADR misnamed or misnumbered, a line kept in two files. Beside
+out of its form or naming code, a glossary by the old name Matt's skills no longer read, an ADR misnamed or misnumbered, a line kept in two files. Beside
 the session's start it also looks, with git, for what may have gone stale: a part of the map with
 15 commits or more since the map was edited, a glossary term found nowhere else in its repository.
 

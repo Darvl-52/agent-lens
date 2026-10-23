@@ -11,9 +11,12 @@ export const LIMITS: Record<string, number> = {
   'docs/agents/workflow.md': 120,
 }
 
+// The glossary's old names, which Matt's skills no longer read, and the names they read now.
+export const OLD_GLOSSARIES: Record<string, string> = { 'CONTEXT.md': 'GLOSSARY.md', 'CONTEXT-MAP.md': 'GLOSSARY-MAP.md' }
+
 // The files read, by their path from the project's root. The glossaries are the root's, and those
-// GLOSSARY-MAP.md names; the ADRs are those of docs/adr/.
-export const DOC_FILES = ['CLAUDE.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md', 'docs/agents/workflow.md']
+// GLOSSARY-MAP.md names; the ADRs are those of docs/adr/. AGENTS.md counts where CLAUDE.md imports it.
+export const DOC_FILES = ['CLAUDE.md', 'AGENTS.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md', 'docs/agents/workflow.md', ...Object.keys(OLD_GLOSSARIES)]
 export const ADR_DIR = 'docs/adr'
 
 const isGlossary = (file: string) => /(^|\/)GLOSSARY\.md$/.test(file)
@@ -139,6 +142,11 @@ export const importsOf = (text: string) => [...text.matchAll(/^@(\S+)\s*$/gm)].m
 export function checkDocs(files: Record<string, string>, missing: ReadonlySet<string>): DocIssue[] {
   const issues: DocIssue[] = []
   for (const [file, text] of Object.entries(files)) {
+    const renamed = OLD_GLOSSARIES[file]
+    if (renamed) {
+      issues.push({ file, kind: 'glossary-name', detail: renamed })
+      continue
+    }
     const limit = LIMITS[file]
     // What CLAUDE.md imports with `@path` is read into every turn with it, and counts against its size.
     const imported = file === 'CLAUDE.md' ? importsOf(text).filter(f => files[f] !== undefined) : []

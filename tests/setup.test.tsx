@@ -31,6 +31,13 @@ test('the files are held to their size, the paths they name, and the forms of th
   // A fact kept in two files.
   const fact = 'Every API error goes out through AppError, with its code and a message for people.'
   expect(issuesOf({ 'CLAUDE.md': `- ${fact}\n`, 'CODING_STANDARDS.md': `${fact}\n` })).toEqual([['CODING_STANDARDS.md', 'duplicate', 'CLAUDE.md']])
+  // AGENTS.md that CLAUDE.md imports is read into every turn with it: it counts.
+  expect(issuesOf({ 'CLAUDE.md': '@AGENTS.md\n', 'AGENTS.md': 'line\n'.repeat(130) })).toEqual([['CLAUDE.md', 'size', '131/120 with @AGENTS.md']])
+  // The glossary by its old name, which Matt's skills no longer read.
+  expect(issuesOf({ 'CONTEXT.md': GLOSSARY, 'CONTEXT-MAP.md': '[a](a/CONTEXT.md)\n' })).toEqual([
+    ['CONTEXT.md', 'glossary-name', 'GLOSSARY.md'],
+    ['CONTEXT-MAP.md', 'glossary-name', 'GLOSSARY-MAP.md'],
+  ])
 })
 
 // A project on a disk of `files`, with Matt's skills listed unless `noMatt`, and the OpenSpec CLI
@@ -137,8 +144,9 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n' })
   await w.settle()
   expect(w.runs.find(r => r[1] === 'init')).toEqual(['openspec', 'init', '--tools', 'claude', '--no-animation'])
+  // A project with no docs of its own has nothing written to sort: the map comes next.
   expect(w.submitted).toHaveLength(1)
-  expect(w.submitted[0]).toMatch(/^Step 3 of \/setup-project[\s\S]*`GLOSSARY\.md` at the root/)
+  expect(w.submitted[0]).toMatch(/^Step 4 of \/setup-project[\s\S]*`GLOSSARY\.md` at the root/)
 
   // A glossary out of its form goes back once with what failed; failing again, it waits for the person.
   const bad = `${GLOSSARY}\nA loose note.\n`
@@ -150,7 +158,7 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   await w.settle()
   expect(w.submitted).toHaveLength(2)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
-  expect(await pane.find({ type: 'Text', text: /^3\. The map: glossary, architecture, ADRs$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^4\. The map: glossary, architecture, ADRs$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^· check failed$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^• GLOSSARY\.md:14: not a term entry/ })).toBeDefined()
   // Fixed by hand: the next turn's end finds it passing, and the standards go.
@@ -158,14 +166,53 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   await pane.press({ key: 'setup-again' })
   await w.settle()
   expect(w.submitted).toHaveLength(3)
-  expect(w.submitted[2]).toMatch(/^Step 3 of/)
+  expect(w.submitted[2]).toMatch(/^Step 4 of/)
   await w.turn()
   await w.settle()
-  expect(w.submitted[3]).toMatch(/^Step 4 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
+  expect(w.submitted[3]).toMatch(/^Step 5 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
   // Skipped, the next goes.
   await pane.press({ key: 'setup-skip' })
   await w.settle()
-  expect(w.submitted[4]).toMatch(/^Step 5 of \/setup-project[\s\S]*docs\/agents\/workflow\.md/)
+  expect(w.submitted[4]).toMatch(/^Step 6 of \/setup-project[\s\S]*docs\/agents\/workflow\.md/)
+  await pane.unmount()
+})
+
+test('a project with docs of its own has them sorted first: each piece to its file, the glossary off its old name', async ($, on) => {
+  const w = await world($, on, {
+    files: {
+      'CLAUDE.md': '# Rules\n\nUse BEM.\n',
+      'CONTEXT.md': GLOSSARY,
+      'docs/agents/issue-tracker.md': 'GitLab.\n',
+      'docs/agents/domain.md': 'Read `CONTEXT.md`.\n',
+      'openspec/config.yaml': 'schema: spec-driven\n',
+    },
+  })
+  await w.setup()
+  await w.settle()
+  // Matt's setup and OpenSpec are there already: what is written goes first.
+  expect(w.commands).toEqual([])
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/^Step 3 of \/setup-project[\s\S]*CONTEXT\.md[\s\S]*AskUserQuestion/)
+  // It writes no file of its own: the glossary left by its old name goes back once.
+  await w.turn()
+  await w.settle()
+  expect(w.submitted[1]).toMatch(/^The check of the files of \/setup-project's step "What is already written" found these\.[\s\S]*CONTEXT\.md: the glossary by its old name/)
+  // Renamed, the step is done and the map goes, adding to what is there.
+  w.disk.delete('/proj/CONTEXT.md')
+  await w.turn({ 'GLOSSARY.md': GLOSSARY, 'docs/agents/domain.md': 'Read `GLOSSARY.md`.\n' })
+  await w.settle()
+  expect(w.submitted[2]).toMatch(/^Step 4 of \/setup-project[\s\S]*the last number in docs\/adr\//)
+})
+
+test('a run kept from before the step of what is written goes on, that step taken as skipped', async ($, on) => {
+  const kept = { root: '/proj', current: 'map', steps: { matt: { status: 'done' }, openspec: { status: 'done' }, map: { status: 'sent' }, standards: { status: 'waiting' }, workflow: { status: 'waiting' }, config: { status: 'waiting' } } }
+  const w = await world($, on)
+  w.store.set('setup:/proj', kept)
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: /^3\. What is already written$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^4\. The map: glossary, architecture, ADRs$/ })).toBeDefined()
   await pane.unmount()
 })
 
@@ -287,13 +334,13 @@ test('while /setup-project’s steps go, the docs agent waits: it reads what the
   await w.settle()
   await w.turn({ 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': '# Map\n' })
   await w.settle()
-  expect(w.submitted.at(-1)).toMatch(/^Step 4 of/)
+  expect(w.submitted.at(-1)).toMatch(/^Step 5 of/)
   expect(w.spawned).toHaveLength(0)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
-  for (const step of [4, 5, 6]) {
+  for (const step of [5, 6, 7]) {
     await pane.press({ key: 'setup-skip' })
     await w.settle()
-    if (step < 6) expect(w.spawned).toHaveLength(0)
+    if (step < 7) expect(w.spawned).toHaveLength(0)
   }
   await pane.unmount()
   // The last step skipped ends the run: the next turn's end reads all it wrote, the map and the glossary among them.

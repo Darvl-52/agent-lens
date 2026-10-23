@@ -261,6 +261,7 @@ export type SetupDocIssueKind =
   | 'size'
   | 'path'
   | 'glossary-shape'
+  | 'glossary-name'
   | 'glossary-long'
   | 'glossary-path'
   | 'glossary-code'
@@ -284,7 +285,7 @@ export type SetupFinding = { file: string; text: string; fix: string; isMinor?: 
 export type SetupJudge = { status: 'running' | 'done' | 'failed'; at: number; agentId?: string; findings: SetupFinding[]; isSent?: true }
 
 // The steps of /setup-project, in order.
-export type SetupStepId = 'matt' | 'openspec' | 'map' | 'standards' | 'workflow' | 'config'
+export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards' | 'workflow' | 'config'
 
 // Where a step stands: not reached, sent to Claude (or run), done, skipped by the person, or done
 // with its files failing the check, `isFixSent` once what failed went back to Claude.

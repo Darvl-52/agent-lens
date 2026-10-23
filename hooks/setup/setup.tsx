@@ -6,7 +6,7 @@ import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { joinPath, parentOf } from '../review/diff'
 import { diffLines } from '../spec/spec'
-import { ADR_DIR, checkDocs, DOC_FILES, firstOf, LIMITS, mappedGlossaries, parseFindings, pathsIn, pathsNamed, termsOf } from './docs'
+import { ADR_DIR, checkDocs, DOC_FILES, firstOf, LIMITS, mappedGlossaries, OLD_GLOSSARIES, parseFindings, pathsIn, pathsNamed, termsOf } from './docs'
 import { WORDS } from './words'
 
 // /setup-project: prepares a project for work with the agent, one step at a time, each sent to the
@@ -20,18 +20,23 @@ const retroAtom = atom({ plugin: 'agent-lens', key: 'setup.retro' } as const, nu
 export const PANE = 'agent-lens-setup'
 const runKey = (root: string) => `setup:${root}`
 
-const STEPS: StepId[] = ['matt', 'openspec', 'map', 'standards', 'workflow', 'config']
+const STEPS: StepId[] = ['matt', 'openspec', 'existing', 'map', 'standards', 'workflow', 'config']
 // The skills of Matt's the way of working stands on; the first sets the project up for the rest.
 const MATT = 'mattpocock-skills'
 const MATT_SKILLS = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro']
 // A project is set up once this file is there: from then on its files are checked.
 const MARK = 'docs/agents/workflow.md'
+// Docs a project wrote for its agents before /setup-project, beside a CLAUDE.md of its own: where
+// one is there, what is written is sorted before the steps write more.
+const OWN_DOCS = ['AGENTS.md', ...Object.keys(OLD_GLOSSARIES), '.cursorrules', '.cursor/rules', '.github/copilot-instructions.md']
 
 // The files each step writes: the step is done once they are there and pass the check. Matt's
-// skill writes its own and keeps them to its own form.
+// skill writes its own and keeps them to its own form. Sorting what is written writes none of its
+// own: it is done with the turn that answers it.
 const WRITES: Record<StepId, string[]> = {
   matt: ['docs/agents/issue-tracker.md', 'docs/agents/domain.md'],
   openspec: ['openspec/config.yaml'],
+  existing: [],
   map: ['GLOSSARY.md', 'ARCHITECTURE.md'],
   standards: ['CODING_STANDARDS.md'],
   workflow: ['docs/agents/workflow.md', 'CLAUDE.md'],
@@ -40,6 +45,7 @@ const WRITES: Record<StepId, string[]> = {
 const CHECKED: Record<StepId, (file: string) => boolean> = {
   matt: () => false,
   openspec: () => false,
+  existing: f => f in OLD_GLOSSARIES,
   map: f => /(^|\/)GLOSSARY(-MAP)?\.md$/.test(f) || f === 'ARCHITECTURE.md' || f.startsWith(`${ADR_DIR}/`),
   standards: f => f === 'CODING_STANDARDS.md',
   workflow: f => f === 'docs/agents/workflow.md' || f === 'CLAUDE.md',
@@ -68,7 +74,7 @@ const STALE_COMMITS = 15
 // How many of the map's paths and the glossary's terms are looked up, at most.
 const DRIFT_PATHS = 40
 const DRIFT_TERMS = 80
-const DOC_PATH = /(?:^|[\\/])(?:CLAUDE|GLOSSARY|GLOSSARY-MAP|ARCHITECTURE|CODING_STANDARDS|workflow)\.md$|[\\/]docs[\\/]adr[\\/][^\\/]+\.md$/
+const DOC_PATH = /(?:^|[\\/])(?:CLAUDE|AGENTS|GLOSSARY|GLOSSARY-MAP|CONTEXT|CONTEXT-MAP|ARCHITECTURE|CODING_STANDARDS|workflow)\.md$|[\\/]docs[\\/]adr[\\/][^\\/]+\.md$/
 
 async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]
@@ -175,7 +181,15 @@ async function keepRun($: EngineInterface, run: Run) {
 
 const setStep = (run: Run, step: StepId, state: StepState): Run => ({ ...run, steps: { ...run.steps, [step]: state } })
 
+// Whether the project has docs of its own to sort: one of another tool's, or a CLAUDE.md the steps
+// did not write.
+async function hasOwnDocs($: EngineInterface, root: string) {
+  const there = await Promise.all(OWN_DOCS.map(f => exists($, root, f)))
+  return there.some(Boolean) || ((await exists($, root, 'CLAUDE.md')) && !(await exists($, root, MARK)))
+}
+
 async function isWritten($: EngineInterface, root: string, step: StepId) {
+  if (step === 'existing') return !(await hasOwnDocs($, root))
   if (step === 'config') return (await $.fs.read(joinPath(root, 'openspec/config.yaml')).catch(() => '')).includes('GLOSSARY.md')
   const there = await Promise.all(WRITES[step].map(f => exists($, root, f)))
   return there.every(Boolean)
@@ -231,7 +245,7 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
   const run = await read($, runAtom)
   const step = run?.current
   if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
-  if (!(await isWritten($, run.root, step))) return
+  if (step !== 'existing' && !(await isWritten($, run.root, step))) return
   const failing = (issues ?? []).filter(i => CHECKED[step](i.file))
   if (failing.length === 0) {
     await keepRun($, setStep(run, step, { status: 'done' }))
@@ -363,7 +377,9 @@ export async function startSetup($: EngineInterface) {
   await registerSetup($)
   const root = await $.session.root()
   const kept = (await $.store.get(runKey(root)).catch(() => undefined)) as Run | undefined
-  await update($, runAtom, () => kept ?? null)
+  // A run kept by a version with fewer steps: the steps it has not, skipped.
+  const steps = kept && (Object.fromEntries(STEPS.map(s => [s, kept.steps[s] ?? { status: 'skipped' }])) as Run['steps'])
+  await update($, runAtom, () => (kept && steps ? { ...kept, steps } : null))
   await checkProject($).catch(() => {})
   void lookForDrift($).catch(() => {})
 }

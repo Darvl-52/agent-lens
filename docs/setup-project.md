@@ -50,7 +50,8 @@ is flagged to go.
 Like `openspec validate --strict`: a file that fails is an error, not a suggestion.
 
 - **Without a model**, fast, at each session's start and after each edit to the files:
-  - a file past its size;
+  - a file past its size (`CLAUDE.md` with what it imports, `AGENTS.md` among them);
+  - a glossary by its old name, `CONTEXT.md` or `CONTEXT-MAP.md`, which Matt's skills no longer read;
   - a path a file names (in backticks) that does not exist;
   - a `GLOSSARY.md` entry not in the format (`**Term**:` with a definition of one or two sentences,
     `_Avoid_:` optional), or one that names a path or code;
@@ -91,12 +92,23 @@ shows what failed and sends it back to Claude.
 1. `/mattpocock-skills:setup-matt-pocock-skills`: the tracker, the labels, the domain layout. Done
    already where `docs/agents/` holds its files.
 2. `openspec init --tools claude`, run by the mod itself. Done already where `openspec/` is there.
-3. The map: `GLOSSARY.md`, `ARCHITECTURE.md`, ADRs for the decisions the code shows, from the code.
-4. `CODING_STANDARDS.md`: read from the code, each rule put to the person before it is written.
-5. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run, check, commit.
-6. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts.
+3. What is already written: the project's own docs cut into pieces, each put to the person with its
+   home among the files above, moved word for word on a yes. Done already where the project has none:
+   no `AGENTS.md`, no `CONTEXT.md`, no other agent's rules, and no `CLAUDE.md` but one the steps wrote.
+4. The map: `GLOSSARY.md`, `ARCHITECTURE.md`, ADRs for the decisions the code shows, from the code.
+5. `CODING_STANDARDS.md`: read from the code, each rule put to the person before it is written.
+6. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run, check, commit.
+7. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts.
 
 Run again, it adds to what is there, never writes over it.
+
+## A project with docs of its own
+
+Most projects come with a `CLAUDE.md` already, often long, holding rules, architecture and terms
+together. Step 3 sorts it before anything is added, so each fact ends in one file instead of two:
+a piece moves rather than being copied, and the steps after it write only what is still missing.
+Nothing moves without the person's yes. Matt's skills read the glossary as `GLOSSARY.md`; one kept
+under the name they used before, `CONTEXT.md`, is renamed, as the check flags it until it is.
 
 ## Stages
 

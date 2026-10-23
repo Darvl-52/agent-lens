@@ -33,7 +33,7 @@ const EN = {
   noOpenspec: 'The OpenSpec CLI is not installed, so /setup-project does not run. Install it with npm install -g @fission-ai/openspec, then run it again.',
   opened: 'Opened the setup: the steps go to Claude one at a time.',
   // The pane.
-  steps: { matt: 'Matt’s skills: the tracker, the labels, the domain layout', openspec: 'OpenSpec in the project', map: 'The map: glossary, architecture, ADRs', standards: 'The coding standards', workflow: 'How work goes, and CLAUDE.md', config: 'OpenSpec reads the files' } as Record<StepId, string>,
+  steps: { matt: 'Matt’s skills: the tracker, the labels, the domain layout', openspec: 'OpenSpec in the project', existing: 'What is already written', map: 'The map: glossary, architecture, ADRs', standards: 'The coding standards', workflow: 'How work goes, and CLAUDE.md', config: 'OpenSpec reads the files' } as Record<StepId, string>,
   status: { waiting: 'waiting', sent: 'with Claude', done: 'done', skipped: 'skipped', failed: 'check failed' },
   fixSent: 'what failed went back to Claude',
   next: 'send the next step',
@@ -58,6 +58,7 @@ const EN = {
       size: `past its size (${i.detail} lines): move what another file holds there`,
       path: `names \`${i.detail}\`, which is not there`,
       'glossary-shape': 'not a term entry: **Term**:, a definition, _Avoid_:',
+      'glossary-name': `the glossary by its old name, which Matt’s skills no longer read: git mv it to ${i.detail}, and name ${i.detail} in docs/agents/domain.md`,
       'glossary-long': 'a definition longer than two sentences',
       'glossary-path': 'a path in the glossary: it holds terms, not code',
       'glossary-code': 'code in the glossary',
@@ -97,18 +98,32 @@ End your answer with JSON alone: [{"file": "the file", "problem": "what is wrong
   speak: '',
   // What each step tells Claude.
   prompts: {
-    map: (): string =>
-      `${leadEn(3, 'the map')}
+    existing: (): string =>
+      `${leadEn(3, 'what is already written')}
 
-Read the code: its entry points, its modules and what each owns, its data, how they call each other. Then write:
+Find every document this project's agents and people work by: CLAUDE.md and the files it imports with \`@\`, AGENTS.md, a glossary by its old name (CONTEXT.md, CONTEXT-MAP.md), notes on the architecture and on decisions wherever they lie, the rules of other agents (.cursor/rules, .cursorrules, .github/copilot-instructions.md), the project's skills (.claude/skills, .agents/skills), and the parts of README.md written for those who change the code.
+
+Cut each into pieces (a section, a rule, a fact) and give each piece one home:
+${ROLES}
+- a rule a tool can check: the linter, at the step of the coding standards; until then it stays where it is.
+- where it is: a project skill, the README for people, Matt's docs/agents/.
+- out: untrue of the code now, a second copy, or what an agent does anyway.
+
+Put the plan to me with AskUserQuestion, file by file, a few pieces a question with multiSelect, each with its home, and move only what I pick. A piece moves word for word and leaves its old place, so each fact stays in one file. A glossary by its old name moves with \`git mv\` (CONTEXT.md to GLOSSARY.md, CONTEXT-MAP.md to GLOSSARY-MAP.md, with the glossaries it links), and docs/agents/domain.md then names the new name. ADRs kept elsewhere move to docs/adr/, numbered on in order. The steps after this one add what is still missing, so this one writes nothing new.
+
+Done when every piece of every file found has my answer. End with a table: the piece, where it was, where it went.`,
+    map: (): string =>
+      `${leadEn(4, 'the map')}
+
+Read the code: its entry points, its modules and what each owns, its data, how they call each other. Then write, adding to each file where it is there:
 - \`GLOSSARY.md\` at the root: the project's own domain terms and nothing else. The form: \`# {Context}\` and a sentence or two on what it is; \`## Language\`; for each term \`**Term**:\` on a line, a definition of one or two sentences on the next (what it is, not what it does), and \`_Avoid_: other words\` where the code or people use other words for it. No paths, no code, no decisions, no general programming terms.
 - \`ARCHITECTURE.md\` at the root, 150 lines at most: the modules and what each owns, their bounds, who calls whom, where the data lives, where to start reading. Name each module by its path in backticks. Leave out what the code says better.
-- \`docs/adr/0001-slug.md\` on, numbered in order: one for each decision the code shows that is hard to reverse, would surprise a reader, and came from a real trade-off. A \`# title\` and one to three sentences: the context, the decision, why. None where none qualifies.
+- \`docs/adr/NNNN-slug.md\`, numbered on from the last number in docs/adr/ (0001 where there is none): one for each decision the code shows that is hard to reverse, would surprise a reader, came from a real trade-off, and no ADR records yet. A \`# title\` and one to three sentences: the context, the decision, why. None where none qualifies.
 Where the project has parts with domains of their own (repositories or packages), write a GLOSSARY.md in each part's folder and a GLOSSARY-MAP.md at the root that links them. Where a term or a decision is not clear from the code, ask me instead of guessing. End with what you wrote, file by file.`,
     standards: (): string =>
-      `${leadEn(4, 'the coding standards')}
+      `${leadEn(5, 'the coding standards')}
 
-Read the code and find the rules it keeps: how errors are raised and returned, how files and modules are named and laid out, how the layers call each other, how input is validated, how tests are written and where they go. Take only rules a reviewer can check one edit against; leave out general advice.
+Read the code and find the rules it keeps: how errors are raised and returned, how files and modules are named and laid out, how the layers call each other, how input is validated, how tests are written and where they go. Take only rules a reviewer can check one edit against; leave out general advice. The rules CODING_STANDARDS.md and the linter's config already hold count as found: put to me only the rules they lack, and offer to move to the linter those in CODING_STANDARDS.md it could check.
 
 Sort each rule:
 - mechanical (a banned API or pattern, the shape of an import, where a file lives, a fixed syntactic form): a tool checks it, not prose. Where the project has a linter (eslint, stylelint, ruff, …), it goes to the linter's config as an existing rule, or a small custom one with a test of its own, and the lint script runs it. A rule the linter already enforces is left out.
@@ -117,9 +132,9 @@ Each rule in a line or two: what, why (the mistake it prevents, in a clause), wh
 
 Put the rules to me with AskUserQuestion, a few at a time with multiSelect, saying for each whether it goes to the linter or to the file, and write only those I pick: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. Then run the lint script and say what the new rules found.`,
     workflow: (): string =>
-      `${leadEn(5, 'how work goes, and CLAUDE.md')}
+      `${leadEn(6, 'how work goes, and CLAUDE.md')}
 
-Write \`docs/agents/workflow.md\`, 120 lines at most, the way work goes in this project, saying at each step where I decide:
+Write \`docs/agents/workflow.md\` (adding to it where it is there), 120 lines at most, the way work goes in this project, saying at each step where I decide:
 1. An idea is grilled with the \`grilling\` skill before it is proposed.
 2. \`openspec propose\` writes it as a change, in the glossary's terms; while designing, the \`domain-modeling\` skill: a new term to GLOSSARY.md as it settles, a decision that qualifies to docs/adr/.
 3. The tasks are done with the \`tdd\` skill at the seams the design names; a bug with \`diagnosing-bugs\`.
@@ -136,7 +151,7 @@ Then \`CLAUDE.md\` (create it where there is none), 120 lines at most:
 - how to commit.
 Anything else in it that one of those files holds moves there.`,
     config: (): string =>
-      `${leadEn(6, 'OpenSpec reads the files')}
+      `${leadEn(7, 'OpenSpec reads the files')}
 
 In \`openspec/config.yaml\`, add to \`context\`, keeping what is there, a pointer to each of GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on what it holds, never a copy of its text. Add to \`rules\`: the proposal and the specs use the glossary's terms and none of the words it lists under _Avoid_; the design names the ADRs it touches, and a new decision hard to reverse goes to docs/adr/; each task names the test seam it is built at. Then run \`openspec validate --all --strict\` and say what it found.`,
     fix: (step: string, issues: DocIssue[]): string =>
@@ -154,7 +169,7 @@ const RU: typeof EN = {
     `Скиллы Мэтта не установлены (нет: ${missing.join(', ')}), поэтому /setup-project не запускается. Поставь их через /plugin install mattpocock-skills и запусти снова.`,
   noOpenspec: 'OpenSpec CLI не установлен, поэтому /setup-project не запускается. Поставь его: npm install -g @fission-ai/openspec, и запусти снова.',
   opened: 'Открыл подготовку: шаги уходят Claude по одному.',
-  steps: { matt: 'Скиллы Мэтта: трекер, метки, раскладка домена', openspec: 'OpenSpec в проекте', map: 'Карта: глоссарий, архитектура, ADR', standards: 'Стандарты кода', workflow: 'Как идёт работа, и CLAUDE.md', config: 'OpenSpec читает эти файлы' },
+  steps: { matt: 'Скиллы Мэтта: трекер, метки, раскладка домена', openspec: 'OpenSpec в проекте', existing: 'Что уже написано', map: 'Карта: глоссарий, архитектура, ADR', standards: 'Стандарты кода', workflow: 'Как идёт работа, и CLAUDE.md', config: 'OpenSpec читает эти файлы' },
   status: { waiting: 'ждёт', sent: 'у Claude', done: 'готово', skipped: 'пропущен', failed: 'проверка не прошла' },
   fixSent: 'что не прошло, ушло Claude',
   next: 'отправить следующий шаг',
@@ -177,6 +192,7 @@ const RU: typeof EN = {
       size: `больше своего размера (${i.detail} строк): перенеси то, что место другому файлу`,
       path: `называет \`${i.detail}\`, которого нет`,
       'glossary-shape': 'не запись термина: **Термин**:, определение, _Avoid_:',
+      'glossary-name': `глоссарий под старым именем, которое скиллы Мэтта больше не читают: git mv в ${i.detail} и ${i.detail} в docs/agents/domain.md`,
       'glossary-long': 'определение длиннее двух предложений',
       'glossary-path': 'путь в глоссарии: в нём термины, а не код',
       'glossary-code': 'код в глоссарии',
@@ -212,18 +228,32 @@ ${edits}
   retroArgs: change => `работа в этой сессии над изменением OpenSpec «${change}», до его архива. Говори со мной по-русски: вопросы, варианты и итоги`,
   speak: 'Говори со мной по-русски: вопросы, варианты ответов, черновики на подтверждение и итоги.',
   prompts: {
-    map: () =>
-      `${leadRu(3, 'карта')}
+    existing: () =>
+      `${leadRu(3, 'что уже написано')}
 
-Прочитай код: точки входа, модули и чем владеет каждый, данные, кто кого вызывает. Потом напиши:
+Найди все документы, по которым работают агенты и люди этого проекта: CLAUDE.md и файлы, которые он подключает через \`@\`, AGENTS.md, глоссарий под старым именем (CONTEXT.md, CONTEXT-MAP.md), записи об архитектуре и о решениях, где бы они ни лежали, правила других агентов (.cursor/rules, .cursorrules, .github/copilot-instructions.md), скиллы проекта (.claude/skills, .agents/skills) и части README.md для тех, кто меняет код.
+
+Разрежь каждый на куски (раздел, правило, факт) и дай каждому куску один дом:
+${ROLES}
+- правило, которое может проверить инструмент: линтер, на шаге стандартов кода; до него остаётся, где есть.
+- где есть: скилл проекта, README для людей, docs/agents/ Мэтта.
+- вон: неверно для кода сейчас, вторая копия или то, что агент и так делает.
+
+Предложи план мне через AskUserQuestion, по файлу, по нескольку кусков в вопросе с multiSelect, у каждого — его дом, и переноси только выбранное. Кусок переезжает слово в слово и уходит со старого места, чтобы каждый факт жил в одном файле. Глоссарий под старым именем переезжает через \`git mv\` (CONTEXT.md в GLOSSARY.md, CONTEXT-MAP.md в GLOSSARY-MAP.md, вместе с глоссариями, на которые он ссылается), и docs/agents/domain.md потом называет новое имя. ADR, что лежат в другом месте, переезжают в docs/adr/ с номерами по порядку. Чего не хватает, допишут следующие шаги, поэтому этот нового не пишет.
+
+Готово, когда у каждого куска каждого найденного файла есть мой ответ. В конце — таблица: кусок, где был, куда ушёл.`,
+    map: () =>
+      `${leadRu(4, 'карта')}
+
+Прочитай код: точки входа, модули и чем владеет каждый, данные, кто кого вызывает. Потом напиши, дополняя файл, если он уже есть:
 - \`GLOSSARY.md\` в корне: только термины предметной области проекта. Вид: \`# {Контекст}\` и одно-два предложения, что это; \`## Language\`; для каждого термина \`**Термин**:\` на строке, определение в одно-два предложения на следующей (что это, а не что делает) и \`_Avoid_: другие слова\`, где код или люди называют это иначе. Без путей, кода, решений и общих понятий программирования.
 - \`ARCHITECTURE.md\` в корне, не больше 150 строк: модули и чем владеет каждый, их границы, кто кого вызывает, где живут данные, с чего начинать читать. Каждый модуль назови его путём в обратных кавычках. Не пиши то, что лучше скажет код.
-- \`docs/adr/0001-slug.md\` и дальше по порядку: по одному на каждое решение, которое видно в коде, трудно отменить, удивит читателя и принято из реального выбора. \`# заголовок\` и одно-три предложения: контекст, решение, почему. Ни одного, если таких нет.
+- \`docs/adr/NNNN-slug.md\` с номерами дальше последнего в docs/adr/ (0001, если там пусто): по одному на каждое решение, которое видно в коде, трудно отменить, удивит читателя, принято из реального выбора и ещё не записано ни в одном ADR. \`# заголовок\` и одно-три предложения: контекст, решение, почему. Ни одного, если таких нет.
 Если у проекта есть части со своим доменом (репозитории или пакеты), напиши GLOSSARY.md в папке каждой части и GLOSSARY-MAP.md в корне со ссылками на них. Где термин или решение по коду не ясны, спроси меня, а не угадывай. В конце скажи, что написал, по файлам.`,
     standards: () =>
-      `${leadRu(4, 'стандарты кода')}
+      `${leadRu(5, 'стандарты кода')}
 
-Прочитай код и найди правила, которые он соблюдает: как бросаются и возвращаются ошибки, как называются и раскладываются файлы и модули, как слои вызывают друг друга, как проверяется ввод, как пишутся тесты и где лежат. Бери только правила, по которым ревьюер может проверить одну правку; общие советы не бери.
+Прочитай код и найди правила, которые он соблюдает: как бросаются и возвращаются ошибки, как называются и раскладываются файлы и модули, как слои вызывают друг друга, как проверяется ввод, как пишутся тесты и где лежат. Бери только правила, по которым ревьюер может проверить одну правку; общие советы не бери. Правила, что уже есть в CODING_STANDARDS.md и в конфиге линтера, считаются найденными: предложи мне только те, которых там нет, и перенос в линтер тех правил из CODING_STANDARDS.md, которые он может проверить.
 
 Раздели правила:
 - механическое (запрещённый API или приём, форма импорта, где лежит файл, фиксированная синтаксическая форма): его проверяет инструмент, а не текст. Если в проекте есть линтер (eslint, stylelint, ruff, …), правило идёт в его конфиг — готовым правилом или небольшим своим, со своим тестом, — и его запускает скрипт линта. Правило, которое линтер уже проверяет, не бери.
@@ -232,9 +262,9 @@ ${edits}
 
 Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, у каждого скажи, идёт оно в линтер или в файл, и запиши только выбранные: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. Потом запусти скрипт линта и скажи, что нашли новые правила.`,
     workflow: () =>
-      `${leadRu(5, 'как идёт работа, и CLAUDE.md')}
+      `${leadRu(6, 'как идёт работа, и CLAUDE.md')}
 
-Напиши \`docs/agents/workflow.md\`, не больше 120 строк, как идёт работа в этом проекте, и на каждом шаге скажи, где решаю я:
+Напиши \`docs/agents/workflow.md\` (дополни, если он уже есть), не больше 120 строк, как идёт работа в этом проекте, и на каждом шаге скажи, где решаю я:
 1. Идею прожимают скиллом \`grilling\` до того, как её предложить.
 2. \`openspec propose\` пишет её как изменение, терминами глоссария; при проектировании — скилл \`domain-modeling\`: новый термин в GLOSSARY.md, как только он устоялся, подходящее решение в docs/adr/.
 3. Задачи делаются скиллом \`tdd\` на швах, которые называет design; баг — \`diagnosing-bugs\`.
@@ -251,7 +281,7 @@ ${edits}
 - как коммитить.
 Всё остальное в нём, чему место в одном из этих файлов, переезжает туда.`,
     config: () =>
-      `${leadRu(6, 'OpenSpec читает эти файлы')}
+      `${leadRu(7, 'OpenSpec читает эти файлы')}
 
 В \`openspec/config.yaml\` добавь в \`context\`, сохранив, что там есть, указатель на каждый из GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, что в нём, без копии его текста. Добавь в \`rules\`: proposal и спеки пишутся терминами глоссария, без слов из его _Avoid_; design называет ADR, которые задевает, а новое трудно отменимое решение идёт в docs/adr/; каждая задача называет тестовый шов, на котором её строят. Потом запусти \`openspec validate --all --strict\` и скажи, что он нашёл.`,
     fix: (step, issues) =>
