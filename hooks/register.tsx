@@ -36,7 +36,7 @@ import {
   startRouter,
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
-import { afterSetupEdit, endSetupTurn, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { afterSetupEdit, beforeSetupEdit, endSetupAgent, endSetupTurn, judgeReport, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -57,6 +57,12 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
   await restoreRouter($).catch(() => {})
   await restoreGuard($).catch(() => {})
   await startSetup($).catch(() => {})
+}
+
+// What the person is told such a report went to, or undefined for any other text.
+async function agentReport($: Parameters<Hook<'prompt.submit'>>[0], text: string) {
+  // The docs agent first: the critic's check knows every agent this mod started.
+  return (await judgeReport($, text).catch(() => undefined)) ?? (await criticReport($, text).catch(() => undefined))
 }
 
 export const register: Register = (on, options) => {
@@ -99,11 +105,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.compact', ($, e, next) => sessionCompact($, e, next))
-  // The spec critic's report is the Decide tab's, not a message for Claude: the engine queues a
-  // subagent's hand-back to the main conversation as a peer's prompt, and a delivery from outside
-  // the session reaches session.receive.
+  // The report of an agent this mod started (the spec critic, the docs agent) is its pane's, not a
+  // message for Claude: the engine queues a subagent's hand-back to the main conversation as a
+  // peer's prompt, and a delivery from outside the session reaches session.receive.
   on('prompt.submit', async ($, e, next) => {
-    const kept = e.origin.kind === 'peer' ? await criticReport($, e.text).catch(() => undefined) : undefined
+    const kept = e.origin.kind === 'peer' ? await agentReport($, e.text) : undefined
     return kept ? { drop: kept } : promptSubmit($, e, next)
   })
   on('prompt.autocomplete', ($, e, next) => promptAutocomplete($, e, next))
@@ -118,7 +124,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.receive', async ($, e, next) => {
-    const kept = e.agentId === undefined && e.origin.kind === 'peer' ? await criticReport($, e.text).catch(() => undefined) : undefined
+    const kept = e.agentId === undefined && e.origin.kind === 'peer' ? await agentReport($, e.text) : undefined
     return kept ? { consumed: kept } : next(e)
   })
 
@@ -127,7 +133,10 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) {
       endSpecTurn($, e.reason)
       endSetupTurn($, e.reason)
-    } else endSpecAgent($, e.agentId, e.answer)
+    } else {
+      endSpecAgent($, e.agentId, e.answer)
+      void endSetupAgent($, e.agentId, e.answer).catch(() => {})
+    }
     await endGuardTurn($, e.agentId).catch(() => {})
     const result = await next(e)
     await endReviewTurn($, e.agentId, e.reason).catch(() => {})
@@ -155,6 +164,7 @@ export const register: Register = (on, options) => {
     if (held?.deny !== undefined) return { deny: held.deny }
     const refusal = await checkBefore($, e).catch(() => undefined)
     if (refusal !== undefined) return { deny: refusal }
+    if (e.tool === 'Write' || e.tool === 'Edit') await beforeSetupEdit($, e.file_path).catch(() => {})
     const ran = await next(e)
     if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) {
       afterSpecEdit($, e.file_path)

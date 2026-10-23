@@ -1,4 +1,4 @@
-import type { DocIssue } from '../../types/setup'
+import type { DocIssue, Finding } from '../../types/setup'
 
 // The files the agent and the person both work by, each with one job and a size it may not pass:
 // the check of them, as `openspec validate --strict` checks a change. No model is asked.
@@ -148,4 +148,31 @@ export function checkDocs(files: Record<string, string>, missing: ReadonlySet<st
   issues.push(...adrIssues(Object.fromEntries(Object.entries(files).filter(([f]) => isAdr(f)))))
   issues.push(...duplicateIssues(files))
   return issues
+}
+
+// The terms a glossary defines, by their name before any note in brackets.
+export const termsOf = (glossary: string) =>
+  [...glossary.matchAll(/^\*\*(.+?)\*\*:/gm)].map(m => m[1]!.replace(/\s*[([].*$/, '').trim()).filter(t => t.length >= 3)
+
+// What the docs agent found in an edit to the files, from the JSON array its answer ends with: what
+// is wrong, where, how to fix it, and whether it blocks; undefined where it holds no such array.
+export const parseFindings = (answer: string): Finding[] | undefined => {
+  const end = answer.lastIndexOf(']')
+  for (let at = answer.indexOf('['); at >= 0 && at < end; at = answer.indexOf('[', at + 1)) {
+    let list: unknown
+    try {
+      list = JSON.parse(answer.slice(at, end + 1))
+    } catch {
+      continue
+    }
+    if (!Array.isArray(list)) continue
+    const said = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+    return list
+      .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
+      .map(f => ({ file: said(f.file), text: said(f.problem), fix: said(f.fix), ...(said(f.severity).toLowerCase() === 'minor' ? { isMinor: true as const } : {}) }))
+      .filter(f => f.text !== '')
+      .sort((a, b) => Number(a.isMinor ?? false) - Number(b.isMinor ?? false))
+      .slice(0, 8)
+  }
+  return undefined
 }

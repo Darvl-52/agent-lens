@@ -74,7 +74,7 @@ const EN = {
   sentToClaude: 'sent to Claude',
   severity: { bug: 'likely bug', rule: 'rule', note: 'note' },
   ruleFrom: (rule: string) => `rule: ${rule}`,
-  findingsNote: 'Checked against what you asked for and the CLAUDE.md and AGENTS.md of each folder touched.',
+  findingsNote: 'Checked against what you asked for and the CLAUDE.md, AGENTS.md and CODING_STANDARDS.md of each folder touched.',
   walking: 'Reading the change through…',
   answering: 'Looking for the answer in the change…',
   remake: 'again',
@@ -96,7 +96,7 @@ const EN = {
       ? 'Rules while Claude edits: off, the review after the turn alone.'
       : `Rules while Claude edits: ${live === 'block' ? 'an edit that breaks one is refused' : 'Claude is told what an edit breaks'}, checked by ${model}${running > 0 ? `, ${running} ${running === 1 ? 'check' : 'checks'} running` : ''}.`,
   rulesHere: 'The rules here come from:',
-  noRulesHere: 'No CLAUDE.md or AGENTS.md here or in a folder above.',
+  noRulesHere: 'No CLAUDE.md, AGENTS.md or CODING_STANDARDS.md here or in a folder above.',
   // What the model is asked.
   system:
     "You review a coding agent's changes for a developer. Answer in English, briefly and plainly, from what is given alone (the requests, the diff, the files, the file lists, the commands run); never make anything up. The diff is not all the agent did: a request earlier in the session can ask for a change, and a shell command can push, install or change a file outside the diff.",
@@ -193,7 +193,7 @@ const RU: typeof EN = {
   sentToClaude: 'отправлено Claude',
   severity: { bug: 'вероятная ошибка', rule: 'правило', note: 'заметка' },
   ruleFrom: rule => `правило: ${rule}`,
-  findingsNote: 'Сверено с твоей просьбой и с CLAUDE.md и AGENTS.md каждой затронутой папки.',
+  findingsNote: 'Сверено с твоей просьбой и с CLAUDE.md, AGENTS.md и CODING_STANDARDS.md каждой затронутой папки.',
   walking: 'Читаю изменение целиком…',
   answering: 'Ищу ответ в изменении…',
   remake: 'заново',
@@ -215,7 +215,7 @@ const RU: typeof EN = {
       ? 'Правила во время правок: выключено, только ревью после хода.'
       : `Правила во время правок: ${live === 'block' ? 'правка, нарушающая правило, отклоняется' : 'Claude сразу узнаёт, что нарушила правка'}, проверяет ${model}${running > 0 ? `, проверок в работе: ${running}` : ''}.`,
   rulesHere: 'Правила здесь берутся из:',
-  noRulesHere: 'Ни здесь, ни выше нет CLAUDE.md или AGENTS.md.',
+  noRulesHere: 'Ни здесь, ни выше нет CLAUDE.md, AGENTS.md или CODING_STANDARDS.md.',
   system:
     'Ты проверяешь правки агента для разработчика. Отвечай по-русски, кратко и просто, только по тому, что дано (просьбы, дифф, файлы, списки файлов, запущенные команды), ничего не выдумывай. Дифф — не всё, что сделал агент: о правке могли попросить раньше в этой сессии, а shell-команда могла запушить, установить или поменять файл вне диффа.',
   rulesHeading: 'Правила проекта, действующие для этих файлов:',

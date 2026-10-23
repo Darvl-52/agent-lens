@@ -56,10 +56,11 @@ Like `openspec validate --strict`: a file that fails is an error, not a suggesti
     `_Avoid_:` optional), or one that names a path or code;
   - an ADR whose name is not `NNNN-slug.md`, numbers that skip or repeat, one with no title;
   - the same line (of some length) in two files.
-- **By an agent**, on an edit to the files (stage 2): is it true of the code, is it in its file, does
-  it change what an agent does, does it repeat what is written. Blocker or minor, as the spec critic.
-- **Drift** (stage 2): a module the map names that git shows changed much since the map was last
-  edited; a term found nowhere in the code and specs.
+- **By an agent**, at the end of a turn that edited the files: is it true of the code, is it in its
+  file, does it change what an agent does, does it repeat what is written. Blocker or minor, as the
+  spec critic; shown, and sent to Claude on the person's word.
+- **Drift**, beside each session's start: a part of the map with 15 commits or more since the map
+  was last edited; a glossary term `git grep` finds nowhere else in its repository.
 
 The row above the prompt says `docs: N` while a check fails; pressed, it opens what failed.
 
@@ -96,6 +97,6 @@ Run again, it adds to what is there, never writes over it.
 
 ## Stages
 
-1. `/setup-project`: the check of what is installed, the steps in a pane, the checks without a model.
-2. The docs agent on edits; `CODING_STANDARDS.md` among the review's rules; drift.
+1. Done: `/setup-project`, the check of what is installed, the steps in a pane, the checks without a model.
+2. Done: the docs agent on edits; `CODING_STANDARDS.md` among the review's rules; drift.
 3. With `/spec`: `tdd` named in the tasks it sends, the archive's move of terms and decisions, `retro`.

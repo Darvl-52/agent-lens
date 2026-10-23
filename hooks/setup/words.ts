@@ -1,5 +1,13 @@
 import type { Lang } from '../../types'
-import type { DocIssue, StepId } from '../../types/setup'
+import type { DocIssue, Finding, StepId } from '../../types/setup'
+
+// The files and what each holds, as the docs agent is told them.
+const ROLES = `- CLAUDE.md: pointers to the files below, and the few rules every turn needs. 120 lines at most.
+- GLOSSARY.md: the project's own domain terms, a definition of a sentence or two each and the words to avoid. No paths, code or decisions.
+- ARCHITECTURE.md: the map: modules, their bounds, who calls whom, where the data lives. 150 lines at most.
+- docs/adr/NNNN-slug.md: one decision each that is hard to reverse, surprising, and the result of a trade-off, and why.
+- CODING_STANDARDS.md: rules for code a reviewer can check an edit against. 300 lines at most.
+- docs/agents/workflow.md: how work goes, step by step, and where the person decides.`
 
 // Russian plural: 1 проблема, 2 проблемы, 5 проблем.
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -53,9 +61,31 @@ const EN = {
       'adr-numbers': `the ADR numbers skip or repeat (at ${i.detail})`,
       'adr-title': 'an ADR with no # title',
       duplicate: `the same line as in ${i.detail}: keep it in one file`,
+      'stale-map': `may be stale: ${i.detail} commits to it since the map was last edited`,
+      'stale-term': `the term "${i.detail}" is found nowhere outside the glossaries: still in use?`,
     }
     return `${at}: ${what[i.kind]}`
   },
+  // The docs agent.
+  judgeTask: 'The docs in this turn',
+  judgePrompt: (root: string, edits: string): string =>
+    `Read what this turn changed in the files the agent and the person of the project at ${root} work by, and report what should not be there. The files and what each holds:
+${ROLES}
+
+For each change, check it against the code (read it): is it true of the code now; is it in the file it belongs in; does it change what an agent does or would it change nothing (a no-op, a wish, a truism); does it repeat what another of the files already says; does it pass what its file may hold. A blocker: untrue, in the wrong file, or repeated. A minor one: a no-op, or wordier than it needs. Report only what the change added or altered, not what was there before; none is a good answer. Do not change any file.
+
+${edits}
+
+End your answer with JSON alone: [{"file": "the file", "problem": "what is wrong, one sentence", "fix": "what to do, one sentence", "severity": "blocker" or "minor"}], or [] when there is nothing.`,
+  judgeTitle: 'What the docs agent found in the last edits',
+  judgeRunning: 'The docs agent is reading the last edits against the code…',
+  judgeFailed: 'The docs agent gave no list.',
+  judgeNone: 'The docs agent found nothing to take out.',
+  judgeSend: (n: number) => `send to Claude (${n})`,
+  judgeSent: 'sent to Claude',
+  judgeFix: (findings: Finding[]): string =>
+    `The docs agent found these in what was just written to the project's docs. Fix each in its file, or say why it stands; change nothing else:\n${findings.map(f => `- ${f.file}: ${f.text}${f.fix ? ` Fix: ${f.fix}` : ''}`).join('\n')}`,
+  minor: 'minor',
   // What each step tells Claude.
   prompts: {
     map: (): string =>
@@ -131,9 +161,30 @@ const RU: typeof EN = {
       'adr-numbers': `номера ADR пропущены или повторяются (на ${i.detail})`,
       'adr-title': 'ADR без заголовка #',
       duplicate: `та же строка, что в ${i.detail}: держи её в одном файле`,
+      'stale-map': `возможно, устарело: ${i.detail} коммитов в это место с последней правки карты`,
+      'stale-term': `термин «${i.detail}» не встречается нигде, кроме глоссариев: он ещё в ходу?`,
     }
     return `${at}: ${what[i.kind]}`
   },
+  judgeTask: 'Документы в этом ходе',
+  judgePrompt: (root, edits) =>
+    `Прочитай, что этот ход поменял в файлах, по которым работают агент и человек в проекте ${root}, и сообщи, чему там не место. Файлы и что в каждом:
+${ROLES}
+
+Каждое изменение сверь с кодом (прочитай его): верно ли оно для кода сейчас; в том ли файле, где ему место; меняет ли оно то, что делает агент, или ничего не меняет (пустая фраза, пожелание, очевидность); не повторяет ли то, что уже сказано в другом из этих файлов; не выходит ли за то, что может держать его файл. Блокер: неверно, не в том файле или повтор. Мелочь: пустая фраза или многословнее, чем нужно. Сообщай только о том, что изменение добавило или поменяло, а не о том, что было раньше; если ничего нет, так и ответь. Файлы не меняй. Пиши по-русски.
+
+${edits}
+
+Закончи ответ только JSON: [{"file": "файл", "problem": "что не так, одним предложением", "fix": "что сделать, одним предложением", "severity": "blocker" или "minor"}], или [], если ничего нет.`,
+  judgeTitle: 'Что агент нашёл в последних правках документов',
+  judgeRunning: 'Агент сверяет последние правки документов с кодом…',
+  judgeFailed: 'Агент не вернул список.',
+  judgeNone: 'Агент не нашёл, что убрать.',
+  judgeSend: n => `отправить Claude (${n})`,
+  judgeSent: 'ушло Claude',
+  judgeFix: findings =>
+    `Агент нашёл это в том, что только что записано в документы проекта. Исправь каждое в его файле или скажи, почему оно остаётся; больше ничего не меняй:\n${findings.map(f => `- ${f.file}: ${f.text}${f.fix ? ` Как: ${f.fix}` : ''}`).join('\n')}`,
+  minor: 'мелочь',
   prompts: {
     map: () =>
       `${leadRu(3, 'карта')}

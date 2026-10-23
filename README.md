@@ -68,9 +68,19 @@ again, it adds to what is there.
 
 From then on the files are checked at each session's start and on each edit, as `openspec validate
 --strict` checks a change: a file past its size, a path it names that is not there, a glossary entry
-out of its form or naming code, an ADR misnamed or misnumbered, a line kept in two files. While one
-fails the row above the prompt says `docs: 2 issues`; `/setup-project check` lists them. Why each
-file holds what it holds, and what comes next, is in [docs/setup-project.md](docs/setup-project.md).
+out of its form or naming code, an ADR misnamed or misnumbered, a line kept in two files. Beside
+the session's start it also looks, with git, for what may have gone stale: a part of the map with
+15 commits or more since the map was edited, a glossary term found nowhere else in its repository.
+
+A turn that edits these files has an agent (Explore, on `sonnet`) read the edits against the code:
+is it true of the code, in the file it belongs in, does it change what an agent does, does it repeat
+another file. What it finds, blockers and minor ones, is on the pane; `j` sends it to Claude to fix.
+Its report is kept from Claude as the spec critic's is. A look costs about what a spec critic's
+does, less for a small edit, and runs only on a turn that edits these files.
+
+While a check fails, or the agent's blockers wait, the row above the prompt says `docs: 2 issues`;
+`/setup-project check` lists them. Why each file holds what it holds, and what comes next, is in
+[docs/setup-project.md](docs/setup-project.md).
 
 ## The guard
 
@@ -162,7 +172,7 @@ the turn, so the edit is not slowed down. Where it breaks one, a toast says so a
 note with the next tool result:
 
 ```
-agent-lens: your edit to src/button.ts breaks the project's CLAUDE.md rules.
+agent-lens: your edit to src/button.ts breaks the project's rules (CLAUDE.md, CODING_STANDARDS.md).
 - Never write comments in code.
   found: // primary button styles
   fix: Remove the comment line above the buttonStyle export.
@@ -178,8 +188,9 @@ the turn ends, what was caught is looked for again: still in the code, it joins 
 the review after the turn is told not to report it a second time.
 
 Only rules about what files contain are judged (style, naming, comments, structure, forbidden
-patterns, hardcoded values); rules about git, workflow or how to talk are not. Edits to `CLAUDE.md`
-and `AGENTS.md` themselves are not checked, nor the Markdown of an OpenSpec change, which `/spec`
+patterns, hardcoded values); rules about git, workflow or how to talk are not. Edits to `CLAUDE.md`,
+`AGENTS.md` and `CODING_STANDARDS.md` themselves are not checked here (the docs agent of
+`/setup-project` reads them), nor the Markdown of an OpenSpec change, which `/spec`
 reads. A check that fails or answers something unreadable lets
 the edit be.
 
@@ -187,7 +198,8 @@ the edit be.
 
 ### The rules it checks against
 
-For each file changed, the `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and `AGENTS.md` of
+For each file changed, the `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` and
+`CODING_STANDARDS.md` (the standards `/setup-project` writes, read here rather than on every turn) of
 its folder and of every folder above it, up to the project folder (for `__front/src/app.ts`:
 `__front/src/`, `__front/` and the project's own), then those Claude Code read at the start from
 the folders above the project, each with its `@` imports. Your own `~/.claude/CLAUDE.md` only where

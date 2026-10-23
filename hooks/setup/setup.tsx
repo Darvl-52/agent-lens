@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, TurnCompleteReason } from 'claude-code'
 
-import type { DocIssue, Run, StepId, StepState } from '../../types/setup'
+import type { DocIssue, Finding, Judge, Run, StepId, StepState } from '../../types/setup'
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
-import { joinPath } from '../review/diff'
-import { ADR_DIR, checkDocs, DOC_FILES, firstOf, mappedGlossaries, pathsNamed } from './docs'
+import { below, joinPath, parentOf } from '../review/diff'
+import { ADR_DIR, checkDocs, DOC_FILES, firstOf, mappedGlossaries, parseFindings, pathsIn, pathsNamed, termsOf } from './docs'
 import { WORDS } from './words'
 
 // /setup-project: prepares a project for work with the agent, one step at a time, each sent to the
@@ -14,6 +14,7 @@ import { WORDS } from './words'
 
 const runAtom = atom({ plugin: 'agent-lens', key: 'setup.run' } as const, null)
 const issuesAtom = atom({ plugin: 'agent-lens', key: 'setup.issues' } as const, null)
+const judgeAtom = atom({ plugin: 'agent-lens', key: 'setup.judge' } as const, null)
 export const PANE = 'agent-lens-setup'
 const runKey = (root: string) => `setup:${root}`
 
@@ -45,6 +46,23 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
 
 // Whether the main loop is in a turn: a step waits for its end.
 let isMainTurn = false
+// What each of the files was before the turn's first edit to it, by its path from the root (null
+// for one it wrote anew): what the docs agent is shown the turn changed.
+const turnBefore = new Map<string, string | null>()
+// What may have gone stale, as last looked for: at the session's start and on /setup-project check.
+let drift: DocIssue[] = []
+// The docs agents this module started, by id, as long as it runs.
+const judges = new Set<string>()
+const JUDGE_MODEL = 'sonnet'
+const JUDGE_STALE_MS = 20 * 60_000
+// What each file the agent is shown keeps of each side of an edit.
+const EDIT_LIMIT = 12_000
+// A part of the map with this many commits since the map was edited may have moved on from it.
+const STALE_COMMITS = 15
+// How many of the map's paths and the glossary's terms are looked up, at most.
+const DRIFT_PATHS = 40
+const DRIFT_TERMS = 80
+const DOC_PATH = /(?:^|[\\/])(?:CLAUDE|GLOSSARY|GLOSSARY-MAP|ARCHITECTURE|CODING_STANDARDS|workflow)\.md$|[\\/]docs[\\/]adr[\\/][^\\/]+\.md$/
 
 async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]
@@ -102,9 +120,46 @@ export async function checkProject($: EngineInterface) {
     await update($, issuesAtom, () => null)
     return null
   }
-  const issues = await issuesIn($, root)
+  const issues = [...(await issuesIn($, root)), ...drift]
   await update($, issuesAtom, () => issues)
   return issues
+}
+
+// What may have gone stale: each part of the map git shows much changed since the map was last
+// edited, and each glossary term found nowhere else in its repository. Looked for beside the
+// session's start, as it runs git once per path and term.
+async function driftIn($: EngineInterface, root: string) {
+  const files = await readDocs($, root)
+  const git = (cwd: string, args: string[]) => $.process.run(['git', '-C', cwd, ...args], { cwd, timeoutMs: 15_000 }).catch(() => null)
+  const found: DocIssue[] = []
+  if (files['ARCHITECTURE.md']) {
+    const since = (await git(root, ['log', '-1', '--format=%H', '--', 'ARCHITECTURE.md']))?.stdout.trim()
+    if (since) {
+      const paths = pathsIn(files['ARCHITECTURE.md'])
+        .map(p => p.replace(/^\.\//, '').replace(/\/$/, ''))
+        .filter(p => p.includes('/') || !p.includes('.'))
+        .slice(0, DRIFT_PATHS)
+      for (const path of paths) {
+        const n = Number((await git(root, ['rev-list', '--count', `${since}..HEAD`, '--', path]))?.stdout.trim())
+        if (n >= STALE_COMMITS) found.push({ file: 'ARCHITECTURE.md', kind: 'stale-map', detail: `${path} (${n})` })
+      }
+    }
+  }
+  for (const [file, text] of Object.entries(files).filter(([f]) => /(^|\/)GLOSSARY\.md$/.test(f)))
+    for (const term of termsOf(text).slice(0, DRIFT_TERMS)) {
+      const at = parentOf(joinPath(root, file))
+      const r = await git(at, ['grep', '-I', '-q', '-i', '-F', '-e', term, '--', '.', ':(exclude,glob)**/GLOSSARY*.md'])
+      // 1: none found; anything else (no repository, an error) says nothing.
+      if (r?.exitCode === 1) found.push({ file, kind: 'stale-term', detail: term })
+    }
+  return found
+}
+
+async function lookForDrift($: EngineInterface) {
+  const root = await $.session.root()
+  if (!(await read($, runAtom)) && !(await exists($, root, MARK))) return
+  drift = await driftIn($, root)
+  await checkProject($)
 }
 
 async function keepRun($: EngineInterface, run: Run) {
@@ -161,6 +216,7 @@ async function advance($: EngineInterface) {
 // the check; where they fail, what failed goes back once, then it waits for the person.
 async function afterTurn($: EngineInterface) {
   const issues = await checkProject($)
+  await startJudge($).catch(() => {})
   const run = await read($, runAtom)
   const step = run?.current
   if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
@@ -186,16 +242,79 @@ async function sendFix($: EngineInterface, run: Run, step: StepId, failing: DocI
 
 export function startSetupTurn() {
   isMainTurn = true
+  turnBefore.clear()
 }
 
 export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason) {
   isMainTurn = false
   if (reason === 'answer') void afterTurn($).catch(() => {})
+  else turnBefore.clear()
+}
+
+// Before an edit to one of the files, what it was: the first edit of the turn keeps it.
+export async function beforeSetupEdit($: EngineInterface, path: string) {
+  if (!DOC_PATH.test(path)) return
+  const rel = below(path, await $.session.root())
+  if (rel === undefined || turnBefore.has(rel)) return
+  turnBefore.set(rel, await $.fs.read(path).catch(() => null))
 }
 
 // An edit to one of the files is checked beside the turn.
 export function afterSetupEdit($: EngineInterface, path: string) {
-  if (/(?:^|[\\/])(?:CLAUDE|GLOSSARY|GLOSSARY-MAP|ARCHITECTURE|CODING_STANDARDS|workflow)\.md$|[\\/]docs[\\/]adr[\\/]/.test(path)) void checkProject($).catch(() => {})
+  if (DOC_PATH.test(path)) void checkProject($).catch(() => {})
+}
+
+const clipped = (text: string) => (text.length > EDIT_LIMIT ? `${text.slice(0, EDIT_LIMIT)}\n[... ${text.length - EDIT_LIMIT} more characters]` : text)
+
+// Once a turn edited the files of a project set up, an agent reads the edits against the code:
+// one at a time, a run past its time taken as gone.
+async function startJudge($: EngineInterface) {
+  const root = await $.session.root()
+  const edited = [...turnBefore]
+  turnBefore.clear()
+  if (edited.length === 0 || (!(await read($, runAtom)) && !(await exists($, root, MARK)))) return
+  const at = await $.clock.now()
+  const was = await read($, judgeAtom)
+  if (was?.status === 'running' && at - was.at < JUDGE_STALE_MS) return
+  const w = await wordsIn($)
+  const sides = await Promise.all(
+    edited.map(async ([rel, before]) => {
+      const after = await $.fs.read(joinPath(root, rel)).catch(() => null)
+      if (after === before) return ''
+      return `=== ${rel} ===\n${before === null ? 'Written anew:' : `Before:\n<<<\n${clipped(before)}\n>>>\nAfter:`}\n<<<\n${clipped(after ?? '(deleted)')}\n>>>`
+    }),
+  )
+  const edits = sides.filter(Boolean).join('\n\n')
+  if (edits === '') return
+  const task = w.judgeTask
+  const spawned = await $.agent.spawn({ prompt: w.judgePrompt(root, edits), description: task, subagentType: 'Explore', model: JUDGE_MODEL }).catch(() => undefined)
+  const agentId =
+    spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
+  if (agentId) judges.add(agentId)
+  await update($, judgeAtom, (): Judge => ({ status: agentId ? 'running' : 'failed', at, findings: [], ...(agentId ? { agentId } : {}) }))
+}
+
+// A subagent's run ended: the docs agent's, its findings are read.
+export async function endSetupAgent($: EngineInterface, agentId: string, answer: string) {
+  const judge = await read($, judgeAtom)
+  if (judge?.status !== 'running' || judge.agentId !== agentId) return
+  const findings = parseFindings(answer)
+  await update($, judgeAtom, (): Judge => ({ ...judge, status: findings ? 'done' : 'failed', findings: findings ?? [] }))
+  if (findings && findings.some(f => !f.isMinor)) await $.ui.toast((await wordsIn($)).band(findings.filter(f => !f.isMinor).length))
+}
+
+// The docs agent's report the engine hands back as it ends is the pane's, not Claude's to read.
+export async function judgeReport($: EngineInterface, text: string) {
+  const kept = (await read($, judgeAtom))?.agentId
+  return [...judges, ...(kept ? [kept] : [])].some(id => text.includes(id)) ? (await wordsIn($)).judgeTitle : undefined
+}
+
+async function sendFindings($: EngineInterface) {
+  const judge = await read($, judgeAtom)
+  if (!judge || judge.status !== 'done' || judge.isSent || judge.findings.length === 0) return
+  await update($, judgeAtom, () => ({ ...judge, isSent: true as const }))
+  const r = await $.prompt.submit({ text: (await wordsIn($)).judgeFix(judge.findings), asUser: true })
+  if (r.drop !== undefined) await update($, judgeAtom, () => judge)
 }
 
 export async function registerSetup($: EngineInterface) {
@@ -209,6 +328,7 @@ export async function startSetup($: EngineInterface) {
   const kept = (await $.store.get(runKey(root)).catch(() => undefined)) as Run | undefined
   await update($, runAtom, () => kept ?? null)
   await checkProject($).catch(() => {})
+  void lookForDrift($).catch(() => {})
 }
 
 async function openPane($: EngineInterface) {
@@ -226,7 +346,8 @@ export async function setupCommand($: EngineInterface, args: string) {
   const w = await wordsIn($)
   const root = await $.session.root()
   if (args.trim().toLowerCase() === 'check') {
-    const issues = (await checkProject($)) ?? (await issuesIn($, root))
+    drift = await driftIn($, root).catch(() => [])
+    const issues = (await checkProject($)) ?? [...(await issuesIn($, root)), ...drift]
     return { text: w.checked(issues) }
   }
   const found = await preflight($, root)
@@ -244,11 +365,13 @@ export async function setupCommand($: EngineInterface, args: string) {
   return { text: `${w.ready(found.openspec, found.isInitialised)}\n${w.opened}` }
 }
 
-// The row above the prompt: the files' issues, while there are some.
+// The row above the prompt: the files' issues and the docs agent's blockers not sent, while there are some.
 export async function setupLine($: EngineInterface) {
-  const issues = await read($, issuesAtom)
-  if (!issues || issues.length === 0) return null
-  return (await wordsIn($)).band(issues.length)
+  const issues = (await read($, issuesAtom)) ?? []
+  const judge = await read($, judgeAtom)
+  const blockers = judge?.status === 'done' && !judge.isSent ? judge.findings.filter(f => !f.isMinor).length : 0
+  const n = issues.length + blockers
+  return n > 0 ? (await wordsIn($)).band(n) : null
 }
 
 export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1]) {
@@ -256,6 +379,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const w = await wordsIn($)
   const run = await read($, runAtom)
   const issues = (await read($, issuesAtom)) ?? []
+  const judge = await read($, judgeAtom)
   const act = (fn: () => Promise<unknown>) => () => void fn().catch(() => {})
   const keyed = (key: string, text: string, hotkey: string, onPress: () => void, isPrimary = false) => (
     <Button key={key} label={text} hotkey={hotkey} {...(isPrimary ? { variant: 'primary' as const } : { dimColor: true as const })} onPress={onPress}>
@@ -326,6 +450,29 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         </Box>
       ) : null}
       {run && STEPS.every(s => ['done', 'skipped'].includes(run.steps[s].status)) ? <Text color="success">{`✓ ${w.allDone}`}</Text> : null}
+      {judge ? (
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={1}>
+            <Text bold>{w.judgeTitle}</Text>
+            {judge.status === 'done' && judge.findings.length > 0 && !judge.isSent ? keyed('setup-judge-send', w.judgeSend(judge.findings.length), 'j', act(() => sendFindings($)), true) : null}
+            {judge.isSent ? <Text dimColor>{`→ ${w.judgeSent}`}</Text> : null}
+          </Box>
+          {judge.status === 'running' ? (
+            <Text color="warning">{`◌ ${w.judgeRunning}`}</Text>
+          ) : judge.status === 'failed' ? (
+            <Text color="error">{`✗ ${w.judgeFailed}`}</Text>
+          ) : judge.findings.length === 0 ? (
+            <Text color="success">{`✓ ${w.judgeNone}`}</Text>
+          ) : (
+            judge.findings.map((f: Finding, i) => (
+              <Box key={`finding-${i}`} flexDirection="column" paddingLeft={2}>
+                <Text color={f.isMinor ? undefined : 'warning'} wrap="wrap">{`• ${f.file}: ${f.text}${f.isMinor ? ` (${w.minor})` : ''}`}</Text>
+                {f.fix ? <Text dimColor wrap="wrap">{`  → ${f.fix}`}</Text> : null}
+              </Box>
+            ))
+          )}
+        </Box>
+      ) : null}
       <Box flexDirection="column">
         <Text bold>{w.checkTitle}</Text>
         {issues.length === 0 ? (

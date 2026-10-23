@@ -255,7 +255,8 @@ export type GuardSetting = { isOn: boolean; minutes: number; steps: number }
 
 // What a check of those files found: a file past its size, a path it names that is not there, a
 // glossary entry out of its form or naming code, an ADR misnamed, misnumbered or with no title,
-// a line kept in two files.
+// a line kept in two files; and what may have gone stale: a part of the map git shows much changed
+// since the map was, a glossary term found nowhere else.
 export type SetupDocIssueKind =
   | 'size'
   | 'path'
@@ -267,10 +268,20 @@ export type SetupDocIssueKind =
   | 'adr-numbers'
   | 'adr-title'
   | 'duplicate'
+  | 'stale-map'
+  | 'stale-term'
 
 // One issue, in the file at its path from the root and the line where there is one; `detail` what
 // the kind wants named (the path, the size, the other file).
 export type SetupDocIssue = { file: string; line?: number; kind: SetupDocIssueKind; detail?: string }
+
+// What the docs agent found in a turn's edits to the files: what is wrong, where, how to fix it,
+// whether it blocks.
+export type SetupFinding = { file: string; text: string; fix: string; isMinor?: true }
+
+// The docs agent's last look: running (its id), done with its findings, or failed; `isSent` once
+// they went to Claude.
+export type SetupJudge = { status: 'running' | 'done' | 'failed'; at: number; agentId?: string; findings: SetupFinding[]; isSent?: true }
 
 // The steps of /setup-project, in order.
 export type SetupStepId = 'matt' | 'openspec' | 'map' | 'standards' | 'workflow' | 'config'
@@ -381,6 +392,7 @@ declare module 'claude-code' {
       // in a project not set up, where nothing is checked).
       'setup.run': SetupRun | null
       'setup.issues': SetupDocIssue[] | null
+      'setup.judge': SetupJudge | null
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]

@@ -6,14 +6,15 @@ export type Change = { file: string; text: string; added: string }
 
 export type Violation = { rule: string; evidence: string; fix: string }
 
-// The rule files Claude Code reads, and AGENTS.md beside them.
-export const RULE_NAMES = ['CLAUDE.md', 'CLAUDE.local.md', '.claude/CLAUDE.md', 'AGENTS.md']
+// The rule files Claude Code reads, AGENTS.md beside them, and CODING_STANDARDS.md: the standards
+// /setup-project writes, which are read at review rather than on every turn.
+export const RULE_NAMES = ['CLAUDE.md', 'CLAUDE.local.md', '.claude/CLAUDE.md', 'AGENTS.md', 'CODING_STANDARDS.md']
 
 // An edit is sent to the check up to this, on each side of it.
 const CHANGE_LIMIT = 20_000
 
 // Asked in English whatever the language in force: what it answers goes to Claude, not to the person.
-export const LIVE_SYSTEM = `You review one change an AI coding agent just made to a file, against the project's rules from its CLAUDE.md and AGENTS.md files.
+export const LIVE_SYSTEM = `You review one change an AI coding agent just made to a file, against the project's rules from its CLAUDE.md, AGENTS.md and CODING_STANDARDS.md files.
 Judge only rules about what files contain: code style, naming, comments, structure, forbidden APIs or patterns, hardcoded values, where code belongs. Ignore rules about workflow, git, communication, tools, testing process or how the agent should behave.
 Report a violation only when the NEW text clearly breaks a rule. Text the change removed or kept as it was is not a violation. When unsure, report nothing.
 Answer with JSON only: {"violations":[{"rule":"the rule, quoted briefly","evidence":"the offending new text, short, copied exactly","fix":"what to change, one sentence"}]}. No violations: {"violations":[]}.`
@@ -59,10 +60,10 @@ const listed = (violations: readonly Violation[]) =>
 
 // What Claude is told, with the next tool result or once its turn ends.
 export const noteFor = (file: string, violations: readonly Violation[]) =>
-  `agent-lens: your edit to ${file} breaks the project's CLAUDE.md rules.\n${listed(violations)}\nFix this before moving on.`
+  `agent-lens: your edit to ${file} breaks the project's rules (CLAUDE.md, CODING_STANDARDS.md).\n${listed(violations)}\nFix this before moving on.`
 
 export const refusalFor = (file: string, violations: readonly Violation[]) =>
-  `agent-lens refused this edit to ${file}: it breaks the project's CLAUDE.md rules.\n${listed(violations)}\nRedo the edit following these rules.`
+  `agent-lens refused this edit to ${file}: it breaks the project's rules (CLAUDE.md, CODING_STANDARDS.md).\n${listed(violations)}\nRedo the edit following these rules.`
 
 // The line of `text` the evidence starts on, counted from 1.
 export const lineOf = (text: string, evidence: string) => {

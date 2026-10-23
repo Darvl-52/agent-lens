@@ -943,7 +943,7 @@ test('each edit is checked against the rules beside the turn, and Claude told wh
   expect(toasts).toEqual(['CLAUDE.md: 1 rule broken in app.ts'])
   const next = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(next.context?.join('\n')).toMatch(
-    /^agent-lens: your edit to .*app\.ts breaks the project's CLAUDE\.md rules\.\n- No comments in code\n {2}found: \/\/ dark by default\n {2}fix: Remove the comment above the theme\.\nFix this before moving on\.$/,
+    /^agent-lens: your edit to .*app\.ts breaks the project's rules \(CLAUDE\.md, CODING_STANDARDS\.md\)\.\n- No comments in code\n {2}found: \/\/ dark by default\n {2}fix: Remove the comment above the theme\.\nFix this before moving on\.$/,
   )
   expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context ?? []).toEqual([])
 })
@@ -1069,6 +1069,15 @@ test('an edit where no rule applies, or to a rule file, is not checked; an AGENT
   await turn('say why', { 'src/app.ts': COMMENTED })
   expect(checked).toHaveLength(1)
   expect(checked[0]!.promptBlocks?.[0]?.text).toMatch(/^=== AGENTS\.md ===\nNo comments in code\./)
+})
+
+test('CODING_STANDARDS.md is a rule file: the standards /setup-project writes are checked on each edit', async ($, on) => {
+  const { checked, turn } = await project($, on, { 'src/app.ts': APP })
+  await turn('the standards', { 'CODING_STANDARDS.md': 'No comments in code.\n' })
+  expect(checked).toHaveLength(0)
+  await turn('say why', { 'src/app.ts': COMMENTED })
+  expect(checked).toHaveLength(1)
+  expect(checked[0]!.promptBlocks?.[0]?.text).toMatch(/^=== CODING_STANDARDS\.md ===\nNo comments in code\./)
 })
 
 test('an edit to the OpenSpec change is not checked against the rules: /spec reads it', async ($, on) => {

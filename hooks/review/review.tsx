@@ -279,7 +279,7 @@ async function userRulesPath($: EngineInterface) {
 }
 
 // The rules in force for `paths`, nearest first, each once, as the engine reads them, its
-// `@include`s after each: the CLAUDE.md and AGENTS.md of every folder from each file up to the
+// `@include`s after each: the CLAUDE.md, AGENTS.md and CODING_STANDARDS.md of every folder from each file up to the
 // project folder (a file outside it up to its own repository's root, outside any its own folder
 // alone), then those the engine read at the start, from the project folder up. The personal
 // CLAUDE.md only where the settings ask for it.

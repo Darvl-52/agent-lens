@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { checkDocs, pathsIn, pathsNamed } from '../hooks/setup/docs'
+import { checkDocs, parseFindings, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const MATT = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro']
@@ -33,7 +33,8 @@ test('the files are held to their size, the paths they name, and the forms of th
 
 // A project on a disk of `files`, with Matt's skills listed unless `noMatt`, and the OpenSpec CLI
 // unless `noOpenspec`; `openspec init` writes its folder.
-const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; noMatt?: boolean; noOpenspec?: boolean } = {}) => {
+type Git = (args: string[]) => { exitCode: number; stdout: string } | undefined
+const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; noMatt?: boolean; noOpenspec?: boolean; git?: Git } = {}) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const disk = new Map(Object.entries(opts.files ?? {}).map(([f, t]) => [`/proj/${f}`, t]))
   const isDir = (p: string) => [...disk.keys()].some(k => k.startsWith(`${p.replace(/\/$/, '')}/`))
@@ -64,12 +65,21 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('command.run', ($, e) => (commands.push(e.command), {}))
   on('process.run', ($, e) => {
     runs.push([...e.argv])
+    if (e.argv[0] === 'git') {
+      const r = opts.git?.(e.argv.slice(3)) ?? { exitCode: 128, stdout: '' }
+      return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     if (opts.noOpenspec && e.argv[0]!.startsWith('openspec')) return { deny: 'spawn openspec ENOENT' }
     if (e.argv[1] === '--version') return { value: { exitCode: 0, stdout: '1.14.1\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (e.argv[1] === 'init') disk.set('/proj/openspec/config.yaml', 'schema: spec-driven\n')
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text }))
+  // The review of a turn's diff asks a model: it finds nothing here.
+  on('model.complete', () => ({ value: { isAnswered: true as const, text: '{"findings":[]}', usage: USAGE } }))
+  const spawned: string[] = []
+  on('agent.spawn', ($, e) => (spawned.push(e.prompt), { model: 'sonnet' }))
+  on('agent.list', () => ({ value: spawned.map((_, i) => ({ id: `judge-${i + 1}`, description: 'The docs in this turn', type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })) }))
   on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
@@ -94,7 +104,9 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   }
   // Lets what a turn's end started beside it finish.
   const settle = () => clock.advance(10)
-  return { disk, store, submitted, commands, runs, opened, setup, turn, settle }
+  const agentDone = (agentId: string, answer: string) =>
+    $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  return { disk, store, submitted, commands, runs, opened, spawned, setup, turn, settle, agentDone }
 }
 
 test('missing Matt’s skills or the OpenSpec CLI, /setup-project says so and does not run', async ($, on) => {
@@ -169,4 +181,67 @@ test('a project set up has its files checked at the start and on each edit, the 
   await $.tool.call({ tool: 'Write', file_path: '/proj/ARCHITECTURE.md', content: '# Map\n' })
   await w.settle()
   expect((await w.setup('check')).text).toBe('The files pass the check.')
+})
+
+test('the terms of a glossary and the docs agent’s findings are read, the blockers first', () => {
+  expect(termsOf(GLOSSARY)).toEqual(['Order', 'Invoice'])
+  expect(termsOf('**No-show (неявка)**:\nA shift missed.\n')).toEqual(['No-show'])
+  const said = 'Read it.\n```json\n[{"file": "CLAUDE.md", "problem": "A wish", "fix": "Drop it", "severity": "minor"}, {"file": "GLOSSARY.md", "problem": "Untrue", "fix": "Say X"}]\n```'
+  expect(parseFindings(said)).toEqual([
+    { file: 'GLOSSARY.md', text: 'Untrue', fix: 'Say X' },
+    { file: 'CLAUDE.md', text: 'A wish', fix: 'Drop it', isMinor: true },
+  ])
+  expect(parseFindings('No list.')).toBeUndefined()
+})
+
+test('what may have gone stale: a part of the map much changed since the map, a term found nowhere else', async ($, on) => {
+  const git: Git = args => {
+    if (args[0] === 'log') return { exitCode: 0, stdout: 'abc123\n' }
+    if (args[0] === 'rev-list') return { exitCode: 0, stdout: args.at(-1) === 'src/orders' ? '20\n' : '2\n' }
+    if (args[0] === 'grep') return { exitCode: args.includes('Invoice') ? 1 : 0, stdout: '' }
+    return undefined
+  }
+  const w = await world($, on, {
+    git,
+    files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': 'Orders: `src/orders/`. Billing: `src/billing/`.\n', 'src/orders/a.ts': '', 'src/billing/b.ts': '' },
+  })
+  expect((await w.setup('check')).text).toBe(
+    'The check found 2:\n  ARCHITECTURE.md: may be stale: src/orders (20) commits to it since the map was last edited\n  GLOSSARY.md: the term "Invoice" is found nowhere outside the glossaries: still in use?',
+  )
+})
+
+test('a turn that edits the docs has an agent read the edits against the code; its blockers show, go on j, and its report stays off Claude', async ($, on) => {
+  const w = await world($, on, { files: { 'docs/agents/workflow.md': '# How work goes\n', 'CLAUDE.md': '# Rules\n' } })
+  await $.turn.start({ text: 'go', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/CLAUDE.md', content: '# Rules\n\nWrite clean code.\n' })
+  // The checks of the turn's edits run beside it, and its end waits for them.
+  await w.settle()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md ===\nBefore:\n<<<\n# Rules\n\n>>>\nAfter:\n<<<\n# Rules\n\nWrite clean code\.\n\n>>>/)
+  await w.agentDone('judge-1', '[{"file": "CLAUDE.md", "problem": "A wish that changes nothing", "fix": "Take it out", "severity": "blocker"}]')
+  await w.settle()
+  // A turn that edits none of them starts none.
+  await w.turn()
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: '• CLAUDE.md: A wish that changes nothing' })).toBeDefined()
+  const band = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 140, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await band.find({ type: 'Text', text: 'docs: 1 issue' })).toBeDefined()
+  await band.unmount()
+  // Its hand-back, queued as a peer's prompt, does not reach Claude.
+  expect(await $.prompt.submit({ text: 'Another Claude session sent a message:\n<agent-message from="judge-1">\n[Subagent hand-back] ...\n</agent-message>', origin: { kind: 'peer' }, isMeta: true, wait: false } as never)).toMatchObject({ drop: 'What the docs agent found in the last edits' })
+  const before = w.submitted.length
+  await pane.press({ key: 'setup-judge-send' })
+  expect(w.submitted).toHaveLength(before + 1)
+  expect(w.submitted.at(-1)).toMatch(/^The docs agent found these[\s\S]*- CLAUDE\.md: A wish that changes nothing Fix: Take it out/)
+  expect(await pane.find({ type: 'Text', text: '→ sent to Claude' })).toBeDefined()
+  await pane.unmount()
 })
