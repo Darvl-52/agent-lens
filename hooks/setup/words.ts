@@ -76,7 +76,7 @@ const EN = {
     `Read what this turn changed in the files the agent and the person of the project at ${root} work by, and report what should not be there. The files and what each holds:
 ${ROLES}
 
-For each change, check it against the code (read it): is it true of the code now; is it in the file it belongs in; does it change what an agent does or would it change nothing (a no-op, a wish, a truism); does it repeat what another of the files already says; does it pass what its file may hold. A blocker: untrue, in the wrong file, or repeated. A minor one: a no-op, or wordier than it needs. Report only what the change added or altered, not what was there before; none is a good answer. Do not change any file.
+For each change, check it against the code (read it): is it true of the code now; is it in the file it belongs in; does it change what an agent does or would it change nothing (a no-op, a wish, a truism); does it repeat what another of the files already says; does it pass what its file may hold. A blocker: untrue, in the wrong file, or repeated. A minor one: a no-op, or wordier than it needs. CLAUDE.md is read into every turn of every agent, so it must not grow: each line added to it is a pointer, or a rule every turn needs; anything else is a blocker, and its fix names the file it belongs in (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, an ADR, a skill of the project). Report only what the change added or altered, not what was there before; none is a good answer. Do not change any file.
 
 ${edits}
 
@@ -108,9 +108,14 @@ Where the project has parts with domains of their own (repositories or packages)
     standards: (): string =>
       `${leadEn(4, 'the coding standards')}
 
-Read the code and find the rules it keeps: how errors are raised and returned, how files and modules are named and laid out, how the layers call each other, how input is validated, how tests are written and where they go. Take only rules a reviewer can check one edit against, each with a path where it shows. Leave out what the project's linter, formatter or type checker already enforces, and general advice.
+Read the code and find the rules it keeps: how errors are raised and returned, how files and modules are named and laid out, how the layers call each other, how input is validated, how tests are written and where they go. Take only rules a reviewer can check one edit against; leave out general advice.
 
-Put the rules to me with AskUserQuestion, a few at a time with multiSelect, and write only those I pick to \`CODING_STANDARDS.md\` at the root: 300 lines at most, grouped by area, a rule in a line or two. The review reads this file, not every turn, so it can say more than CLAUDE.md.`,
+Sort each rule:
+- mechanical (a banned API or pattern, the shape of an import, where a file lives, a fixed syntactic form): a tool checks it, not prose. Where the project has a linter (eslint, stylelint, ruff, …), it goes to the linter's config as an existing rule, or a small custom one with a test of its own, and the lint script runs it. A rule the linter already enforces is left out.
+- a judgement (consistency across files, the right layer, a name that says what it is): it goes to \`CODING_STANDARDS.md\`.
+Each rule in a line or two: what, why (the mistake it prevents, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\`, \`stylelint: <rule>\`, or \`review\`).
+
+Put the rules to me with AskUserQuestion, a few at a time with multiSelect, saying for each whether it goes to the linter or to the file, and write only those I pick: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. Then run the lint script and say what the new rules found.`,
     workflow: (): string =>
       `${leadEn(5, 'how work goes, and CLAUDE.md')}
 
@@ -120,10 +125,15 @@ Write \`docs/agents/workflow.md\`, 120 lines at most, the way work goes in this 
 3. The tasks are done with the \`tdd\` skill at the seams the design names; a bug with \`diagnosing-bugs\`.
 4. agent-lens checks each edit against CLAUDE.md and CODING_STANDARDS.md and reviews each turn's diff; the whole change with \`code-review\`.
 5. On archive, the change's terms go to GLOSSARY.md and its decisions to docs/adr/; then \`/mattpocock-skills:retro\`.
+Then, in the same file:
+- When a task is done here: read from what the project has (tests, type check, lint, stories, e2e, accessibility checks), a line each.
+- How the work is shared: the main agent orchestrates (takes the task apart, plans, hands the parts to subagents, keeps their order, decides the architecture, puts the results together and answers me) and does by hand only what is cheaper than explaining it; reading code, implementing, running checks, the browser and reviews go to subagents, started in parallel in one message where the parts are independent, each with its own files (a shared contract first where they depend on each other; \`isolation: "worktree"\` where their files may meet), each prompt self-contained (the goal, the files and what not to touch, these rules, when it is done, what to answer), the answers short; what they report is checked (tests, lint, build) before it is told to me.
 
 Then \`CLAUDE.md\` (create it where there is none), 120 lines at most:
-- a short section of pointers to GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on when to read it;
-- the rules every turn needs, read from the project's scripts and config: how to install, run, check (types, lint, tests) and commit.
+- the language I am spoken to in, as its first rule, where it is not English;
+- a short section of pointers to ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on when to read it; GLOSSARY.md imported with a line \`@GLOSSARY.md\` where it is under 80 lines, so its terms hold on every turn, else pointed to;
+- the rules every turn needs, read from the project's scripts and config: how to install and run; the checks in two tiers, while working only what the change touches (the tests related to the changed files, lint of those files, the type check), and before a commit, push or merge everything (lint, types, all tests, e2e, build), sending only on green;
+- how to commit.
 Anything else in it that one of those files holds moves there.`,
     config: (): string =>
       `${leadEn(6, 'OpenSpec reads the files')}
@@ -184,7 +194,7 @@ const RU: typeof EN = {
     `Прочитай, что этот ход поменял в файлах, по которым работают агент и человек в проекте ${root}, и сообщи, чему там не место. Файлы и что в каждом:
 ${ROLES}
 
-Каждое изменение сверь с кодом (прочитай его): верно ли оно для кода сейчас; в том ли файле, где ему место; меняет ли оно то, что делает агент, или ничего не меняет (пустая фраза, пожелание, очевидность); не повторяет ли то, что уже сказано в другом из этих файлов; не выходит ли за то, что может держать его файл. Блокер: неверно, не в том файле или повтор. Мелочь: пустая фраза или многословнее, чем нужно. Сообщай только о том, что изменение добавило или поменяло, а не о том, что было раньше; если ничего нет, так и ответь. Файлы не меняй. Пиши по-русски.
+Каждое изменение сверь с кодом (прочитай его): верно ли оно для кода сейчас; в том ли файле, где ему место; меняет ли оно то, что делает агент, или ничего не меняет (пустая фраза, пожелание, очевидность); не повторяет ли то, что уже сказано в другом из этих файлов; не выходит ли за то, что может держать его файл. Блокер: неверно, не в том файле или повтор. Мелочь: пустая фраза или многословнее, чем нужно. CLAUDE.md читается в каждый ход каждого агента, поэтому ему нельзя разрастаться: каждая добавленная в него строка — указатель или правило, нужное каждому ходу; всё остальное — блокер, и его fix называет файл, где ему место (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, ADR, скилл проекта). Сообщай только о том, что изменение добавило или поменяло, а не о том, что было раньше; если ничего нет, так и ответь. Файлы не меняй. Пиши по-русски.
 
 ${edits}
 
@@ -213,9 +223,14 @@ ${edits}
     standards: () =>
       `${leadRu(4, 'стандарты кода')}
 
-Прочитай код и найди правила, которые он соблюдает: как бросаются и возвращаются ошибки, как называются и раскладываются файлы и модули, как слои вызывают друг друга, как проверяется ввод, как пишутся тесты и где лежат. Бери только правила, по которым ревьюер может проверить одну правку, каждое с путём, где это видно. Не бери то, что уже проверяют линтер, форматтер или типы проекта, и общие советы.
+Прочитай код и найди правила, которые он соблюдает: как бросаются и возвращаются ошибки, как называются и раскладываются файлы и модули, как слои вызывают друг друга, как проверяется ввод, как пишутся тесты и где лежат. Бери только правила, по которым ревьюер может проверить одну правку; общие советы не бери.
 
-Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, и запиши только выбранные в \`CODING_STANDARDS.md\` в корне: не больше 300 строк, по разделам, правило в одну-две строки. Этот файл читается на ревью, а не на каждом ходе, поэтому в нём можно сказать больше, чем в CLAUDE.md.`,
+Раздели правила:
+- механическое (запрещённый API или приём, форма импорта, где лежит файл, фиксированная синтаксическая форма): его проверяет инструмент, а не текст. Если в проекте есть линтер (eslint, stylelint, ruff, …), правило идёт в его конфиг — готовым правилом или небольшим своим, со своим тестом, — и его запускает скрипт линта. Правило, которое линтер уже проверяет, не бери.
+- на суждение (согласованность между файлами, верный слой, имя, которое говорит, что это): идёт в \`CODING_STANDARDS.md\`.
+Каждое правило в одну-две строки: что, почему (какую ошибку предотвращает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\`, \`stylelint: <правило>\` или \`ревью\`).
+
+Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, у каждого скажи, идёт оно в линтер или в файл, и запиши только выбранные: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. Потом запусти скрипт линта и скажи, что нашли новые правила.`,
     workflow: () =>
       `${leadRu(5, 'как идёт работа, и CLAUDE.md')}
 
@@ -225,10 +240,15 @@ ${edits}
 3. Задачи делаются скиллом \`tdd\` на швах, которые называет design; баг — \`diagnosing-bugs\`.
 4. agent-lens проверяет каждую правку по CLAUDE.md и CODING_STANDARDS.md и diff каждого хода; всё изменение — \`code-review\`.
 5. При архиве термины изменения уходят в GLOSSARY.md, решения в docs/adr/; потом \`/mattpocock-skills:retro\`.
+Потом в том же файле:
+- Когда задача здесь готова: из того, что в проекте есть (тесты, типы, линт, сторис, e2e, проверки доступности), по строке.
+- Как делится работа: основной агент — оркестратор (разбирает задачу, планирует, отдаёт части саб-агентам, следит за их порядком, решает архитектуру, сводит результаты и отвечает мне) и руками делает только то, что дешевле, чем объяснить; чтение кода, реализация, прогон проверок, браузер и ревью уходят саб-агентам, независимые части — параллельно одним сообщением, у каждого свои файлы (где части зависят друг от друга — сначала общий контракт; \`isolation: "worktree"\`, если их файлы могут пересечься), промпт самодостаточный (цель, файлы и чего не трогать, эти правила, когда готово, что ответить), ответы короткие; что они доложили, проверяется (тесты, линт, сборка), прежде чем сказать мне.
 
 Потом \`CLAUDE.md\` (создай, если нет), не больше 120 строк:
-- короткий раздел указателей на GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке на каждый, когда его читать;
-- правила, нужные каждому ходу, из скриптов и конфигов проекта: как поставить, запустить, проверить (типы, линт, тесты) и закоммитить.
+- первым правилом — язык, на котором со мной говорят: «Отвечай и задавай вопросы по-русски»;
+- короткий раздел указателей на ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, когда его читать; GLOSSARY.md подключи строкой \`@GLOSSARY.md\`, если в нём меньше 80 строк, чтобы термины действовали в каждом ходе, иначе дай указатель;
+- правила, нужные каждому ходу, из скриптов и конфигов проекта: как поставить и запустить; проверки в две ступени — во время работы только то, что задевает правка (тесты, связанные с изменёнными файлами, линт этих файлов, типы), а перед коммитом, пушем или мержем всё (линт, типы, все тесты, e2e, сборка), и заливать только при зелёном;
+- как коммитить.
 Всё остальное в нём, чему место в одном из этих файлов, переезжает туда.`,
     config: () =>
       `${leadRu(6, 'OpenSpec читает эти файлы')}

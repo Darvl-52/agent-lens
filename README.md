@@ -57,9 +57,15 @@ Claude one at a time, each once the turn before has ended, in a pane that shows 
 2. `openspec init --tools claude`, run by the mod, where the project has no `openspec/`.
 3. The map from the code: `GLOSSARY.md` in the form of Matt's `domain-modeling`, `ARCHITECTURE.md`,
    an ADR in `docs/adr/` for each decision that qualifies.
-4. `CODING_STANDARDS.md`: rules read from the code, each put to you before it is written.
-5. `docs/agents/workflow.md`, how work goes (OpenSpec for the changes, Matt's skills at each step),
-   and `CLAUDE.md`: pointers to the files and the rules every turn needs.
+4. The coding standards, read from the code and each put to you before it is written: a mechanical
+   rule (a banned API, an import's shape, where a file lives) goes to the project's linter, as a
+   tool checks it better than prose; a judgement goes to `CODING_STANDARDS.md`. Each says what, why
+   (the mistake it prevents), where it shows, and what checks it (`eslint: <rule>` or `review`).
+5. `docs/agents/workflow.md`: how work goes (OpenSpec for the changes, Matt's skills at each step),
+   when a task is done here, and how the work is shared between the main agent and its subagents.
+   And `CLAUDE.md`: the language you are spoken to in first, pointers to the files (`GLOSSARY.md`
+   imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in
+   two tiers (what the change touches while working, everything before a commit or push).
 6. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them.
 
 A step is done once its files are there and pass the check; where they fail, what failed goes back
@@ -68,16 +74,21 @@ again, it adds to what is there.
 
 From then on the files are checked at each session's start, on each edit and at the end of each
 turn (an edit made through the shell included), as `openspec validate
---strict` checks a change: a file past its size, a path it names that is not there, a glossary entry
+--strict` checks a change: a file past its size (`CLAUDE.md` with what it imports), a path it names that is not there, a glossary entry
 out of its form or naming code, an ADR misnamed or misnumbered, a line kept in two files. Beside
 the session's start it also looks, with git, for what may have gone stale: a part of the map with
 15 commits or more since the map was edited, a glossary term found nowhere else in its repository.
 
-A turn that edits these files, by any tool, the shell too, has an agent (Explore, on `sonnet`) read the edits against the code:
-is it true of the code, in the file it belongs in, does it change what an agent does, does it repeat
-another file. What it finds, blockers and minor ones, is on the pane; `j` sends it to Claude to fix.
-Its report is kept from Claude as the spec critic's is. A look costs about what a spec critic's
-does, less for a small edit, and runs only on a turn that edits these files.
+A turn that edits these files, by any tool, the shell too, has an agent (Explore, on `sonnet`) read
+the edits against the code: is it true of the code, in the file it belongs in, does it change what
+an agent does, does it repeat another file. A line added to `CLAUDE.md` that is neither a pointer
+nor a rule every turn needs is a blocker, and its fix names the file it belongs in. This one runs in
+any project: a turn that grows its `CLAUDE.md` has it read so. What the agent finds, blockers and
+minor ones, is on the pane; `j` sends it to Claude to fix. Its report is kept from Claude as the
+spec critic's is.
+
+It is told the lines each file gained and lost, not both sides whole, and reads the rest itself; while
+`/setup-project`'s steps go it waits, and reads what they all wrote once, at the run's end.
 
 While a check fails, or the agent's blockers wait, the row above the prompt says `docs: 2 issues`;
 `/setup-project check` lists them. Why each file holds what it holds, and what comes next, is in

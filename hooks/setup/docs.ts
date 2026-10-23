@@ -131,14 +131,19 @@ function duplicateIssues(files: Record<string, string>): DocIssue[] {
   return issues
 }
 
+// The files a CLAUDE.md imports, a line `@path` each, by their path from the root.
+export const importsOf = (text: string) => [...text.matchAll(/^@(\S+)\s*$/gm)].map(m => m[1]!.replace(/^\.\//, ''))
+
 // Every issue of the files there are, given the paths they name that are not there. A file that
 // is not there is none: each is written once it has something to hold.
 export function checkDocs(files: Record<string, string>, missing: ReadonlySet<string>): DocIssue[] {
   const issues: DocIssue[] = []
   for (const [file, text] of Object.entries(files)) {
     const limit = LIMITS[file]
-    const count = lines(text.trimEnd()).length
-    if (limit !== undefined && count > limit) issues.push({ file, kind: 'size', detail: `${count}/${limit}` })
+    // What CLAUDE.md imports with `@path` is read into every turn with it, and counts against its size.
+    const imported = file === 'CLAUDE.md' ? importsOf(text).filter(f => files[f] !== undefined) : []
+    const count = lines(text.trimEnd()).length + imported.reduce((n, f) => n + lines(files[f]!.trimEnd()).length, 0)
+    if (limit !== undefined && count > limit) issues.push({ file, kind: 'size', detail: `${count}/${limit}${imported.length > 0 ? ` with ${imported.map(f => `@${f}`).join(', ')}` : ''}` })
     if (isGlossary(file)) issues.push(...glossaryIssues(file, text))
     else
       lines(text).forEach((line, i) => {

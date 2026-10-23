@@ -12,6 +12,8 @@ const issuesOf = (files: Record<string, string>, missing: string[] = []) => chec
 test('the files are held to their size, the paths they name, and the forms of the glossary and the ADRs', () => {
   expect(issuesOf({ 'GLOSSARY.md': GLOSSARY, 'CLAUDE.md': 'Read `ARCHITECTURE.md` first.\n' })).toEqual([])
   expect(issuesOf({ 'CLAUDE.md': `${'line\n'.repeat(121)}` })).toEqual([['CLAUDE.md', 'size', '121/120']])
+  // A glossary CLAUDE.md imports is read into every turn with it: it counts.
+  expect(issuesOf({ 'CLAUDE.md': `${'line\n'.repeat(60)}@GLOSSARY.md\n`, 'GLOSSARY.md': `# Ordering\n\n${'x\n'.repeat(60)}` }).filter(i => i[1] === 'size')).toEqual([['CLAUDE.md', 'size', '123/120 with @GLOSSARY.md']])
   // A path a file names that is not there; a command, a glob or a placeholder is no path.
   expect(pathsIn('Run `npm test`, see `src/orders/`, `*.ts`, `src/<name>.ts` and `README.md`.')).toEqual(['src/orders/', 'README.md'])
   expect(pathsNamed({ 'ARCHITECTURE.md': '`src/orders/` holds them.', 'GLOSSARY.md': '`src/x.ts`' })).toEqual(['src/orders'])
@@ -219,7 +221,8 @@ test('a turn that edits the docs has an agent read the edits against the code; i
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
   await w.settle()
   expect(w.spawned).toHaveLength(1)
-  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md ===\nBefore:\n<<<\n# Rules\n\n>>>\nAfter:\n<<<\n# Rules\n\nWrite clean code\.\n\n>>>/)
+  // What changed, line by line, with the file's size against its own.
+  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md === \(3 lines of its 120\)\nAdded:\n\+ Write clean code\.\n\n/)
   await w.agentDone('judge-1', '[{"file": "CLAUDE.md", "problem": "A wish that changes nothing", "fix": "Take it out", "severity": "blocker"}]')
   await w.settle()
   // A turn that edits none of them starts none.
@@ -260,6 +263,42 @@ test('docs written through the shell, as Claude often writes them, have the docs
   await w.turn({ 'CLAUDE.md': '# Rules\n\nAlways be careful.\n', 'docs/adr/0001-static.md': '# Static\n\nNo build.\n' })
   await w.settle()
   expect(w.spawned).toHaveLength(1)
-  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md ===\nBefore:\n<<<\n# Rules\n\n>>>\nAfter:\n<<<\n# Rules\n\nAlways be careful\.\n\n>>>/)
+  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md === \(3 lines of its 120\)\nAdded:\n\+ Always be careful\.\n\n/)
   expect(w.spawned[0]).toMatch(/=== docs\/adr\/0001-static\.md ===\nWritten anew:\n<<<\n# Static/)
+})
+
+test('outside a project set up, a CLAUDE.md that grows is read by the docs agent; one edited in place is not', async ($, on) => {
+  const w = await world($, on, { files: { 'CLAUDE.md': '# Rules\n\nUse yarn.\n' } })
+  await w.turn({ 'CLAUDE.md': '# Rules\n\nUse pnpm.\n' })
+  await w.settle()
+  expect(w.spawned).toHaveLength(0)
+  await w.turn({ 'CLAUDE.md': '# Rules\n\nUse pnpm.\nThe API lives in src/api and returns AppError on failure.\n' })
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md === \(4 lines of its 120\)\nAdded:\n\+ The API lives in src\/api/)
+  expect(w.spawned[0]).toMatch(/its fix names the file it belongs in/)
+})
+
+test('while /setup-project’s steps go, the docs agent waits: it reads what they all wrote once, at the run’s end', async ($, on) => {
+  const w = await world($, on)
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'Local.\n', 'docs/agents/domain.md': 'Single.\n' })
+  await w.settle()
+  await w.turn({ 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': '# Map\n' })
+  await w.settle()
+  expect(w.submitted.at(-1)).toMatch(/^Step 4 of/)
+  expect(w.spawned).toHaveLength(0)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  for (const step of [4, 5, 6]) {
+    await pane.press({ key: 'setup-skip' })
+    await w.settle()
+    if (step < 6) expect(w.spawned).toHaveLength(0)
+  }
+  await pane.unmount()
+  // The last step skipped ends the run: the next turn's end reads all it wrote, the map and the glossary among them.
+  await w.turn({ 'CLAUDE.md': '# Rules\n\nSee `ARCHITECTURE.md`.\n' })
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+  expect(w.spawned[0]).toMatch(/=== ARCHITECTURE\.md ===[\s\S]*=== CLAUDE\.md ===[\s\S]*=== GLOSSARY\.md ===/)
 })

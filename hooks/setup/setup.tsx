@@ -5,7 +5,8 @@ import type { DocIssue, Finding, Judge, Run, StepId, StepState } from '../../typ
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { joinPath, parentOf } from '../review/diff'
-import { ADR_DIR, checkDocs, DOC_FILES, firstOf, mappedGlossaries, parseFindings, pathsIn, pathsNamed, termsOf } from './docs'
+import { diffLines } from '../spec/spec'
+import { ADR_DIR, checkDocs, DOC_FILES, firstOf, LIMITS, mappedGlossaries, parseFindings, pathsIn, pathsNamed, termsOf } from './docs'
 import { WORDS } from './words'
 
 // /setup-project: prepares a project for work with the agent, one step at a time, each sent to the
@@ -47,10 +48,13 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
 
 // Whether the main loop is in a turn: a step waits for its end.
 let isMainTurn = false
-// The files as the turn found them, by their path from the root, in a project set up: what the docs
-// agent is shown the turn changed, whatever wrote them (Write, Edit, or the shell, which no edit
-// hook sees).
+// The files as the turn found them, by their path from the root: all of them in a project set up,
+// CLAUDE.md alone elsewhere. What the docs agent is shown the turn changed, whatever wrote them
+// (Write, Edit, or the shell, which no edit hook sees).
 let turnBefore: Promise<Record<string, string>> | null = null
+// While /setup-project's steps go, the files as the run found them, each as it was before the first
+// turn that changed it (undefined: not there): the docs agent reads them once, at the run's end.
+const runBefore = new Map<string, string | undefined>()
 // What may have gone stale, as last looked for: at the session's start and on /setup-project check.
 let drift: DocIssue[] = []
 // The docs agents this module started, by id, as long as it runs.
@@ -219,7 +223,11 @@ async function advance($: EngineInterface) {
 // the check; where they fail, what failed goes back once, then it waits for the person.
 async function afterTurn($: EngineInterface) {
   const issues = await checkProject($)
+  await settleStep($, issues)
   await startJudge($).catch(() => {})
+}
+
+async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
   const run = await read($, runAtom)
   const step = run?.current
   if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
@@ -245,7 +253,7 @@ async function sendFix($: EngineInterface, run: Run, step: StepId, failing: DocI
 
 export function startSetupTurn($: EngineInterface) {
   isMainTurn = true
-  turnBefore = (async () => (await isSetUp($)) ? readDocs($, await $.session.root()) : {})().catch(() => ({}))
+  turnBefore = watched($).catch(() => ({}))
 }
 
 export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason) {
@@ -259,29 +267,62 @@ export function afterSetupEdit($: EngineInterface, path: string) {
   if (DOC_PATH.test(path)) void checkProject($).catch(() => {})
 }
 
+// The files the docs agent watches: all of them in a project set up; elsewhere CLAUDE.md, kept
+// from growing.
+async function watched($: EngineInterface): Promise<Record<string, string>> {
+  const root = await $.session.root()
+  if (await isSetUp($)) return readDocs($, root)
+  const claude = await $.fs.read(joinPath(root, 'CLAUDE.md')).catch(() => undefined)
+  return claude === undefined ? {} : { 'CLAUDE.md': claude }
+}
+
+const lineCount = (text: string) => text.trimEnd().split('\n').length
+
+// A step with Claude: the run goes on. One stopped on a failed check, waiting for the person, does not.
+const isRunning = (run: Run | null) => run !== null && STEPS.some(s => run.steps[s].status === 'sent')
+
 const clipped = (text: string) => (text.length > EDIT_LIMIT ? `${text.slice(0, EDIT_LIMIT)}\n[... ${text.length - EDIT_LIMIT} more characters]` : text)
 
 // Once a turn edited the files of a project set up, an agent reads the edits against the code:
 // one at a time, a run past its time taken as gone.
 async function startJudge($: EngineInterface) {
-  const before = (await turnBefore) ?? {}
+  // A turn whose start was not seen (a reload under it) has nothing to compare with.
+  const snapshot = turnBefore
   turnBefore = null
+  if (!snapshot) return
+  const turn = await snapshot
   const root = await $.session.root()
-  if (!(await isSetUp($))) return
-  const after = await readDocs($, root)
-  const edited = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(rel => before[rel] !== after[rel]).sort()
+  const isProject = await isSetUp($)
+  const after = await watched($)
+  const changed = [...new Set([...Object.keys(turn), ...Object.keys(after)])].filter(rel => turn[rel] !== after[rel])
+  for (const rel of changed) if (!runBefore.has(rel)) runBefore.set(rel, turn[rel])
+  // Steps still to go write more of the files: read once the run has ended, not after each.
+  if (isRunning(await read($, runAtom))) return
+  const before = new Map(runBefore)
+  runBefore.clear()
+  // Elsewhere, only a CLAUDE.md that grew.
+  const edited = [...before.keys()]
+    .filter(rel => before.get(rel) !== after[rel])
+    .filter(rel => isProject || (rel === 'CLAUDE.md' && lineCount(after[rel] ?? '') > lineCount(before.get(rel) ?? '')))
+    .sort()
   if (edited.length === 0) return
   const at = await $.clock.now()
   const was = await read($, judgeAtom)
   if (was?.status === 'running' && at - was.at < JUDGE_STALE_MS) return
   const w = await wordsIn($)
+  // What changed, line by line, rather than both sides whole: the agent reads the file for the rest.
   const edits = edited
     .map(rel => {
-      const [was, now] = [before[rel], after[rel]]
-      return `=== ${rel} ===\n${was === undefined ? 'Written anew:' : `Before:\n<<<\n${clipped(was)}\n>>>\nAfter:`}\n<<<\n${clipped(now ?? '(deleted)')}\n>>>`
+      const [then, now] = [before.get(rel), after[rel]]
+      const head = `=== ${rel} ===${LIMITS[rel] !== undefined && now !== undefined ? ` (${lineCount(now)} lines of its ${LIMITS[rel]})` : ''}`
+      if (then === undefined) return `${head}\nWritten anew:\n<<<\n${clipped(now ?? '')}\n>>>`
+      if (now === undefined) return `${head}\nDeleted.`
+      const { added, removed } = diffLines(then, now)
+      const said = (list: string[], mark: string) => list.filter(l => l.trim() !== '').map(l => `${mark} ${l}`)
+      const [plus, minus] = [said(added, '+'), said(removed, '-')]
+      return [head, ...(plus.length > 0 ? ['Added:', clipped(plus.join('\n'))] : []), ...(minus.length > 0 ? ['Removed:', clipped(minus.join('\n'))] : [])].join('\n')
     })
     .join('\n\n')
-  if (edits === '') return
   const task = w.judgeTask
   const spawned = await $.agent.spawn({ prompt: w.judgePrompt(root, edits), description: task, subagentType: 'Explore', model: JUDGE_MODEL }).catch(() => undefined)
   const agentId =

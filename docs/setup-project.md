@@ -57,8 +57,11 @@ Like `openspec validate --strict`: a file that fails is an error, not a suggesti
   - an ADR whose name is not `NNNN-slug.md`, numbers that skip or repeat, one with no title;
   - the same line (of some length) in two files.
 - **By an agent**, at the end of a turn that edited the files: is it true of the code, is it in its
-  file, does it change what an agent does, does it repeat what is written. Blocker or minor, as the
-  spec critic; shown, and sent to Claude on the person's word.
+  file, does it change what an agent does, does it repeat what is written; a line added to
+  `CLAUDE.md` that is neither a pointer nor a rule every turn needs blocks. Blocker or minor, as the
+  spec critic; shown, and sent to Claude on the person's word. In a project not set up it watches
+  `CLAUDE.md` alone, on a turn that grows it. It is given the lines changed, not the files whole,
+  and during `/setup-project` it reads once, at the run's end.
 - **Drift**, beside each session's start: a part of the map with 15 commits or more since the map
   was last edited; a glossary term `git grep` finds nowhere else in its repository.
 
