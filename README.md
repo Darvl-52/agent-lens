@@ -66,13 +66,14 @@ A step is done once its files are there and pass the check; where they fail, wha
 to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). Run
 again, it adds to what is there.
 
-From then on the files are checked at each session's start and on each edit, as `openspec validate
+From then on the files are checked at each session's start, on each edit and at the end of each
+turn (an edit made through the shell included), as `openspec validate
 --strict` checks a change: a file past its size, a path it names that is not there, a glossary entry
 out of its form or naming code, an ADR misnamed or misnumbered, a line kept in two files. Beside
 the session's start it also looks, with git, for what may have gone stale: a part of the map with
 15 commits or more since the map was edited, a glossary term found nowhere else in its repository.
 
-A turn that edits these files has an agent (Explore, on `sonnet`) read the edits against the code:
+A turn that edits these files, by any tool, the shell too, has an agent (Explore, on `sonnet`) read the edits against the code:
 is it true of the code, in the file it belongs in, does it change what an agent does, does it repeat
 another file. What it finds, blockers and minor ones, is on the pane; `j` sends it to Claude to fix.
 Its report is kept from Claude as the spec critic's is. A look costs about what a spec critic's

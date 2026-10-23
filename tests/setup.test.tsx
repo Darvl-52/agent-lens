@@ -62,7 +62,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('store.keys', () => ({ value: [...store.keys()] }))
   on('command.list', () => ({ value: opts.noMatt ? [] : MATT.map(s => ({ name: `mattpocock-skills:${s}`, description: s, source: 'plugin' as const, plugin: 'mattpocock-skills' })) }))
   on('command.register', () => ({ value: { command: 'x' } }))
-  on('command.run', ($, e) => (commands.push(e.command), {}))
+  on('command.run', ($, e) => (commands.push(e.args ? `${e.command} ${e.args}` : e.command), {}))
   on('process.run', ($, e) => {
     runs.push([...e.argv])
     if (e.argv[0] === 'git') {
@@ -244,4 +244,22 @@ test('a turn that edits the docs has an agent read the edits against the code; i
   expect(w.submitted.at(-1)).toMatch(/^The docs agent found these[\s\S]*- CLAUDE\.md: A wish that changes nothing Fix: Take it out/)
   expect(await pane.find({ type: 'Text', text: '→ sent to Claude' })).toBeDefined()
   await pane.unmount()
+})
+
+test('in Russian, Matt’s setup is told to speak Russian, which it does not know of', async ($, on) => {
+  const w = await world($, on)
+  await $.command.run({ command: 'changes', args: 'lang ru', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  expect((await w.setup()).text).toMatch(/^✓ Скиллы Мэтта установлены/)
+  await w.settle()
+  expect(w.commands.filter(c => c.startsWith('mattpocock'))).toEqual(['mattpocock-skills:setup-matt-pocock-skills Говори со мной по-русски: вопросы, варианты ответов, черновики на подтверждение и итоги.'])
+})
+
+test('docs written through the shell, as Claude often writes them, have the docs agent read them too', async ($, on) => {
+  const w = await world($, on, { files: { 'docs/agents/workflow.md': '# How work goes\n', 'CLAUDE.md': '# Rules\n' } })
+  // `cat > … <<EOF` in Bash: no Write or Edit for the edit hooks to see.
+  await w.turn({ 'CLAUDE.md': '# Rules\n\nAlways be careful.\n', 'docs/adr/0001-static.md': '# Static\n\nNo build.\n' })
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+  expect(w.spawned[0]).toMatch(/=== CLAUDE\.md ===\nBefore:\n<<<\n# Rules\n\n>>>\nAfter:\n<<<\n# Rules\n\nAlways be careful\.\n\n>>>/)
+  expect(w.spawned[0]).toMatch(/=== docs\/adr\/0001-static\.md ===\nWritten anew:\n<<<\n# Static/)
 })

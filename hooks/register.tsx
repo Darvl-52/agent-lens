@@ -36,7 +36,7 @@ import {
   startRouter,
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
-import { afterSetupEdit, beforeSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { afterSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -117,7 +117,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       startSpecTurn()
-      startSetupTurn()
+      startSetupTurn($)
     }
     await startGuardTurn($, e.agentId).catch(() => {})
     return turnStart($, e, next)
@@ -164,7 +164,6 @@ export const register: Register = (on, options) => {
     if (held?.deny !== undefined) return { deny: held.deny }
     const refusal = await checkBefore($, e).catch(() => undefined)
     if (refusal !== undefined) return { deny: refusal }
-    if (e.tool === 'Write' || e.tool === 'Edit') await beforeSetupEdit($, e.file_path).catch(() => {})
     const ran = await next(e)
     if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) {
       afterSpecEdit($, e.file_path)

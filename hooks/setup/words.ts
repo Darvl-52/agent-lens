@@ -20,7 +20,7 @@ const plural = (n: number, one: string, few: string, many: string) => {
 const leadEn = (n: number, what: string) =>
   `Step ${n} of /setup-project, which prepares this project for work with the agent: ${what}. Add to what is there; never write over it, and ask me before taking out anything I wrote.`
 const leadRu = (n: number, what: string) =>
-  `Шаг ${n} из /setup-project, который готовит проект к работе с агентом: ${what}. Дополняй то, что есть; ничего не перезаписывай и спроси меня, прежде чем убрать что-то, что написал я.`
+  `Шаг ${n} из /setup-project, который готовит проект к работе с агентом: ${what}. Дополняй то, что есть; ничего не перезаписывай и спроси меня, прежде чем убрать что-то, что написал я. Вопросы, варианты ответов и итоги — по-русски.`
 
 const EN = {
   description: 'Prepare the project for work with the agent: Matt’s skills, OpenSpec, the glossary and the map, the coding standards, how work goes; check: the check of those files',
@@ -40,7 +40,11 @@ const EN = {
   skip: 'skip',
   again: 'send again',
   fix: 'send what failed',
-  allDone: 'Every step is done. The files are checked at each session’s start and on each edit.',
+  allDone: 'Every step is done. The files are checked at each session’s start and at the end of each turn that edits them.',
+  commit: 'commit the setup',
+  commitHint: 'Commit what the steps wrote: the map is checked for staleness against its last commit.',
+  commitPrompt:
+    'Commit the files /setup-project wrote (CLAUDE.md, GLOSSARY.md, ARCHITECTURE.md, CODING_STANDARDS.md, docs/, openspec/, and what openspec init put in .claude/). First show me git status; commit only those, with a message in the style of the project’s commits.',
   checkTitle: 'The check of the files',
   checkClean: 'The files pass the check.',
   notSetUp: 'This project is not set up yet: /setup-project.',
@@ -89,6 +93,8 @@ End your answer with JSON alone: [{"file": "the file", "problem": "what is wrong
   // After an archive.
   retroOffer: (change: string): string => `"${change}" is archived: a retro of the work?`,
   retroArgs: (change: string): string => `the work in this session on the OpenSpec change "${change}", up to its archive`,
+  // What Matt's skills, written in English, are told beside their task: none where the mod speaks it.
+  speak: '',
   // What each step tells Claude.
   prompts: {
     map: (): string =>
@@ -112,7 +118,7 @@ Write \`docs/agents/workflow.md\`, 120 lines at most, the way work goes in this 
 1. An idea is grilled with the \`grilling\` skill before it is proposed.
 2. \`openspec propose\` writes it as a change, in the glossary's terms; while designing, the \`domain-modeling\` skill: a new term to GLOSSARY.md as it settles, a decision that qualifies to docs/adr/.
 3. The tasks are done with the \`tdd\` skill at the seams the design names; a bug with \`diagnosing-bugs\`.
-4. Each turn is reviewed by agent-lens; the whole change with \`code-review\`.
+4. agent-lens checks each edit against CLAUDE.md and CODING_STANDARDS.md and reviews each turn's diff; the whole change with \`code-review\`.
 5. On archive, the change's terms go to GLOSSARY.md and its decisions to docs/adr/; then \`/mattpocock-skills:retro\`.
 
 Then \`CLAUDE.md\` (create it where there is none), 120 lines at most:
@@ -145,7 +151,11 @@ const RU: typeof EN = {
   skip: 'пропустить',
   again: 'отправить снова',
   fix: 'отправить, что не прошло',
-  allDone: 'Все шаги готовы. Файлы проверяются при каждом запуске сессии и на каждой правке.',
+  allDone: 'Все шаги готовы. Файлы проверяются при каждом запуске сессии и в конце каждого хода, который их правит.',
+  commit: 'закоммитить подготовку',
+  commitHint: 'Закоммить то, что написали шаги: карта сверяется на устаревание с её последним коммитом.',
+  commitPrompt:
+    'Закоммить файлы, которые написал /setup-project (CLAUDE.md, GLOSSARY.md, ARCHITECTURE.md, CODING_STANDARDS.md, docs/, openspec/ и то, что openspec init положил в .claude/). Сначала покажи мне git status; закоммить только их, сообщением в стиле коммитов проекта.',
   checkTitle: 'Проверка файлов',
   checkClean: 'Файлы проходят проверку.',
   notSetUp: 'Проект ещё не подготовлен: /setup-project.',
@@ -189,7 +199,8 @@ ${edits}
     `Агент нашёл это в том, что только что записано в документы проекта. Исправь каждое в его файле или скажи, почему оно остаётся; больше ничего не меняй:\n${findings.map(f => `- ${f.file}: ${f.text}${f.fix ? ` Как: ${f.fix}` : ''}`).join('\n')}`,
   minor: 'мелочь',
   retroOffer: change => `«${change}» в архиве: ретро по работе?`,
-  retroArgs: change => `работа в этой сессии над изменением OpenSpec «${change}», до его архива`,
+  retroArgs: change => `работа в этой сессии над изменением OpenSpec «${change}», до его архива. Говори со мной по-русски: вопросы, варианты и итоги`,
+  speak: 'Говори со мной по-русски: вопросы, варианты ответов, черновики на подтверждение и итоги.',
   prompts: {
     map: () =>
       `${leadRu(3, 'карта')}
@@ -212,7 +223,7 @@ ${edits}
 1. Идею прожимают скиллом \`grilling\` до того, как её предложить.
 2. \`openspec propose\` пишет её как изменение, терминами глоссария; при проектировании — скилл \`domain-modeling\`: новый термин в GLOSSARY.md, как только он устоялся, подходящее решение в docs/adr/.
 3. Задачи делаются скиллом \`tdd\` на швах, которые называет design; баг — \`diagnosing-bugs\`.
-4. Каждый ход проверяет agent-lens; всё изменение — \`code-review\`.
+4. agent-lens проверяет каждую правку по CLAUDE.md и CODING_STANDARDS.md и diff каждого хода; всё изменение — \`code-review\`.
 5. При архиве термины изменения уходят в GLOSSARY.md, решения в docs/adr/; потом \`/mattpocock-skills:retro\`.
 
 Потом \`CLAUDE.md\` (создай, если нет), не больше 120 строк:

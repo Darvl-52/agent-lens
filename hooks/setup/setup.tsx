@@ -4,7 +4,7 @@ import type { EngineInterface, TurnCompleteReason } from 'claude-code'
 import type { DocIssue, Finding, Judge, Run, StepId, StepState } from '../../types/setup'
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
-import { below, joinPath, parentOf } from '../review/diff'
+import { joinPath, parentOf } from '../review/diff'
 import { ADR_DIR, checkDocs, DOC_FILES, firstOf, mappedGlossaries, parseFindings, pathsIn, pathsNamed, termsOf } from './docs'
 import { WORDS } from './words'
 
@@ -47,9 +47,10 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
 
 // Whether the main loop is in a turn: a step waits for its end.
 let isMainTurn = false
-// What each of the files was before the turn's first edit to it, by its path from the root (null
-// for one it wrote anew): what the docs agent is shown the turn changed.
-const turnBefore = new Map<string, string | null>()
+// The files as the turn found them, by their path from the root, in a project set up: what the docs
+// agent is shown the turn changed, whatever wrote them (Write, Edit, or the shell, which no edit
+// hook sees).
+let turnBefore: Promise<Record<string, string>> | null = null
 // What may have gone stale, as last looked for: at the session's start and on /setup-project check.
 let drift: DocIssue[] = []
 // The docs agents this module started, by id, as long as it runs.
@@ -202,7 +203,8 @@ async function advance($: EngineInterface) {
   }
   if (step === 'matt') {
     const command = (await preflight($, run.root)).setupCommand
-    const ran = await $.command.run({ command }).then(
+    // In the mod's language, which the skill does not know of.
+    const ran = await $.command.run({ command, ...(w.speak ? { args: w.speak } : {}) }).then(
       () => true,
       () => false,
     )
@@ -241,23 +243,15 @@ async function sendFix($: EngineInterface, run: Run, step: StepId, failing: DocI
   if (r.drop !== undefined) await keepRun($, setStep(run, step, { status: 'failed', error: r.drop }))
 }
 
-export function startSetupTurn() {
+export function startSetupTurn($: EngineInterface) {
   isMainTurn = true
-  turnBefore.clear()
+  turnBefore = (async () => (await isSetUp($)) ? readDocs($, await $.session.root()) : {})().catch(() => ({}))
 }
 
 export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason) {
   isMainTurn = false
   if (reason === 'answer') void afterTurn($).catch(() => {})
-  else turnBefore.clear()
-}
-
-// Before an edit to one of the files, what it was: the first edit of the turn keeps it.
-export async function beforeSetupEdit($: EngineInterface, path: string) {
-  if (!DOC_PATH.test(path)) return
-  const rel = below(path, await $.session.root())
-  if (rel === undefined || turnBefore.has(rel)) return
-  turnBefore.set(rel, await $.fs.read(path).catch(() => null))
+  else turnBefore = null
 }
 
 // An edit to one of the files is checked beside the turn.
@@ -270,22 +264,23 @@ const clipped = (text: string) => (text.length > EDIT_LIMIT ? `${text.slice(0, E
 // Once a turn edited the files of a project set up, an agent reads the edits against the code:
 // one at a time, a run past its time taken as gone.
 async function startJudge($: EngineInterface) {
+  const before = (await turnBefore) ?? {}
+  turnBefore = null
   const root = await $.session.root()
-  const edited = [...turnBefore]
-  turnBefore.clear()
-  if (edited.length === 0 || (!(await read($, runAtom)) && !(await exists($, root, MARK)))) return
+  if (!(await isSetUp($))) return
+  const after = await readDocs($, root)
+  const edited = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(rel => before[rel] !== after[rel]).sort()
+  if (edited.length === 0) return
   const at = await $.clock.now()
   const was = await read($, judgeAtom)
   if (was?.status === 'running' && at - was.at < JUDGE_STALE_MS) return
   const w = await wordsIn($)
-  const sides = await Promise.all(
-    edited.map(async ([rel, before]) => {
-      const after = await $.fs.read(joinPath(root, rel)).catch(() => null)
-      if (after === before) return ''
-      return `=== ${rel} ===\n${before === null ? 'Written anew:' : `Before:\n<<<\n${clipped(before)}\n>>>\nAfter:`}\n<<<\n${clipped(after ?? '(deleted)')}\n>>>`
-    }),
-  )
-  const edits = sides.filter(Boolean).join('\n\n')
+  const edits = edited
+    .map(rel => {
+      const [was, now] = [before[rel], after[rel]]
+      return `=== ${rel} ===\n${was === undefined ? 'Written anew:' : `Before:\n<<<\n${clipped(was)}\n>>>\nAfter:`}\n<<<\n${clipped(now ?? '(deleted)')}\n>>>`
+    })
+    .join('\n\n')
   if (edits === '') return
   const task = w.judgeTask
   const spawned = await $.agent.spawn({ prompt: w.judgePrompt(root, edits), description: task, subagentType: 'Explore', model: JUDGE_MODEL }).catch(() => undefined)
@@ -482,7 +477,15 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           {current && state && state.status !== 'done' && state.status !== 'skipped' ? keyed('setup-skip', w.skip, 's', skip(current)) : null}
         </Box>
       ) : null}
-      {run && STEPS.every(s => ['done', 'skipped'].includes(run.steps[s].status)) ? <Text color="success">{`✓ ${w.allDone}`}</Text> : null}
+      {run && STEPS.every(s => ['done', 'skipped'].includes(run.steps[s].status)) ? (
+        <Box flexDirection="column">
+          <Text color="success">{`✓ ${w.allDone}`}</Text>
+          <Box flexDirection="row" gap={1}>
+            {keyed('setup-commit', w.commit, 'c', act(async () => $.prompt.submit({ text: w.commitPrompt, asUser: true })))}
+            <Text dimColor>{w.commitHint}</Text>
+          </Box>
+        </Box>
+      ) : null}
       {judge ? (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={1}>
