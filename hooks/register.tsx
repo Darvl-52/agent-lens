@@ -36,6 +36,7 @@ import {
   startRouter,
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
+import { afterSetupEdit, endSetupTurn, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -55,6 +56,7 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
   await rescanSpec($).catch(() => {})
   await restoreRouter($).catch(() => {})
   await restoreGuard($).catch(() => {})
+  await startSetup($).catch(() => {})
 }
 
 export const register: Register = (on, options) => {
@@ -69,6 +71,7 @@ export const register: Register = (on, options) => {
     await restoreGuard($).catch(() => {})
     await startReview($).catch(() => {})
     await startSpec($, e.isInteractive).catch(() => {})
+    await startSetup($).catch(() => {})
     const started = await next(e)
     await startRouter($).catch(() => {})
     return started
@@ -106,7 +109,10 @@ export const register: Register = (on, options) => {
   on('prompt.autocomplete', ($, e, next) => promptAutocomplete($, e, next))
   on('skill.prompt', ($, e, next) => skillPrompt($, e, next))
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) startSpecTurn()
+    if (e.agentId === undefined) {
+      startSpecTurn()
+      startSetupTurn()
+    }
     await startGuardTurn($, e.agentId).catch(() => {})
     return turnStart($, e, next)
   })
@@ -118,8 +124,10 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     endRouterTurn(e.agentId, e.answer)
-    if (e.agentId === undefined) endSpecTurn($, e.reason)
-    else endSpecAgent($, e.agentId, e.answer)
+    if (e.agentId === undefined) {
+      endSpecTurn($, e.reason)
+      endSetupTurn($, e.reason)
+    } else endSpecAgent($, e.agentId, e.answer)
     await endGuardTurn($, e.agentId).catch(() => {})
     const result = await next(e)
     await endReviewTurn($, e.agentId, e.reason).catch(() => {})
@@ -148,7 +156,10 @@ export const register: Register = (on, options) => {
     const refusal = await checkBefore($, e).catch(() => undefined)
     if (refusal !== undefined) return { deny: refusal }
     const ran = await next(e)
-    if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) afterSpecEdit($, e.file_path)
+    if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) {
+      afterSpecEdit($, e.file_path)
+      afterSetupEdit($, e.file_path)
+    }
     const checked = checkAfter($, e, ran)
     return guardAfter($, e, held, checked).catch(() => checked)
   }).catch(($, e, next) => next(e))
@@ -159,6 +170,7 @@ export const register: Register = (on, options) => {
   // `lang` after any of them switches every part.
   on('command.run', { command: 'changes' }, async ($, e) => (await langCommand($, 'changes', e.args)) ?? (await guardCommand($, e.args)) ?? reviewCommand($, e))
   on('command.run', { command: 'spec' }, async ($, e) => (await langCommand($, 'spec', e.args)) ?? specCommand($, e))
+  on('command.run', { command: 'setup-project' }, ($, e) => setupCommand($, e.args))
   on('command.run', { command: 'router' }, async ($, e) => (await langCommand($, 'router', e.args)) ?? routerCommand($, e))
 
   // One row above the prompt: the OpenSpec change in view, then what the agent's last turn changed,
@@ -197,6 +209,8 @@ export const register: Register = (on, options) => {
         {g.text}
       </Text>
     ))
+    const docs = await setupLine($).catch(() => null)
+    if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(() => {})} />))
     rows.unshift(...guarded)
     if (rows.length === 0) return below
     return (
@@ -210,4 +224,5 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: REVIEW_PANE }, ($, e) => reviewPane($, e))
   on('ui.render', { component: 'Pane', requestId: SPEC_PANE }, ($, e) => specPane($, e))
   on('ui.render', { component: 'Pane', requestId: ROUTER_PANE }, ($, e) => routerPane($, e))
+  on('ui.render', { component: 'Pane', requestId: SETUP_PANE }, ($, e) => setupPane($, e))
 }

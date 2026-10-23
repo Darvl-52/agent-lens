@@ -16,6 +16,8 @@ A Claude Code mod for working with the agent, in three parts that know of each o
 - **The guard.** No agent works a turn on forever: a call repeated with nothing changing is
   refused, an agent long at it is told to wrap up, and past the limit it is stopped and reports
   what it did. `/changes guard` says the limits.
+- **Setting a project up.** `/setup-project` prepares any project for work with the agent, a step at
+  a time, and keeps the files it writes from rotting: each is checked like code.
 
 It was four mods: review-lens, rules-watchdog, openspec-lens and skill-router.
 
@@ -44,6 +46,31 @@ those of the mods loaded after agent-lens, so a short band keeps them in view.
 - **The rules are checked once.** What the check of each edit caught joins the findings while it
   is still in the code, and the review after the turn is told not to report it again.
 - **One language.** `lang ru` after any of the three commands switches all of them.
+
+## Setting a project up
+
+`/setup-project` needs Matt Pocock's skills (`mattpocock-skills`) and the OpenSpec CLI: missing,
+it says how to install them and does not run; found, it says so in a line. Then the steps go to
+Claude one at a time, each once the turn before has ended, in a pane that shows where each stands:
+
+1. Matt's `setup-matt-pocock-skills`, run as if you typed it: the tracker, the labels, the domain layout.
+2. `openspec init --tools claude`, run by the mod, where the project has no `openspec/`.
+3. The map from the code: `GLOSSARY.md` in the form of Matt's `domain-modeling`, `ARCHITECTURE.md`,
+   an ADR in `docs/adr/` for each decision that qualifies.
+4. `CODING_STANDARDS.md`: rules read from the code, each put to you before it is written.
+5. `docs/agents/workflow.md`, how work goes (OpenSpec for the changes, Matt's skills at each step),
+   and `CLAUDE.md`: pointers to the files and the rules every turn needs.
+6. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them.
+
+A step is done once its files are there and pass the check; where they fail, what failed goes back
+to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). Run
+again, it adds to what is there.
+
+From then on the files are checked at each session's start and on each edit, as `openspec validate
+--strict` checks a change: a file past its size, a path it names that is not there, a glossary entry
+out of its form or naming code, an ADR misnamed or misnumbered, a line kept in two files. While one
+fails the row above the prompt says `docs: 2 issues`; `/setup-project check` lists them. Why each
+file holds what it holds, and what comes next, is in [docs/setup-project.md](docs/setup-project.md).
 
 ## The guard
 
@@ -409,6 +436,8 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | `/changes`                 | Open the review of what the agent changed.                           |
 | `/changes rules`           | How edits are checked, and the rule files that apply.               |
 | `/changes guard [on\|off\|<minutes> <steps>]` | The limits on each agent's turn and what runs now; sets them, as under The guard. |
+| `/setup-project`           | Prepare the project for work with the agent, as under Setting a project up. |
+| `/setup-project check`     | The check of the files it writes.                                    |
 | `/spec`                    | Open the pane on the OpenSpec change in view.                        |
 | `/spec <change>`           | Pick another active change and open the pane on it.                  |
 | `/spec critic off\|button\|auto` | Whether an agent looks for holes in the change, as under Decide.  |

@@ -251,6 +251,37 @@ export type GuardAlert = { who: string; minutes: number; steps: number; isStoppe
 // What /changes guard set: on or off, and the hard limit; the soft one is half of it.
 export type GuardSetting = { isOn: boolean; minutes: number; steps: number }
 
+// /setup-project and the check of the files the agent and the person work by.
+
+// What a check of those files found: a file past its size, a path it names that is not there, a
+// glossary entry out of its form or naming code, an ADR misnamed, misnumbered or with no title,
+// a line kept in two files.
+export type SetupDocIssueKind =
+  | 'size'
+  | 'path'
+  | 'glossary-shape'
+  | 'glossary-long'
+  | 'glossary-path'
+  | 'glossary-code'
+  | 'adr-name'
+  | 'adr-numbers'
+  | 'adr-title'
+  | 'duplicate'
+
+// One issue, in the file at its path from the root and the line where there is one; `detail` what
+// the kind wants named (the path, the size, the other file).
+export type SetupDocIssue = { file: string; line?: number; kind: SetupDocIssueKind; detail?: string }
+
+// The steps of /setup-project, in order.
+export type SetupStepId = 'matt' | 'openspec' | 'map' | 'standards' | 'workflow' | 'config'
+
+// Where a step stands: not reached, sent to Claude (or run), done, skipped by the person, or done
+// with its files failing the check, `isFixSent` once what failed went back to Claude.
+export type SetupStepState = { status: 'waiting' | 'sent' | 'done' | 'skipped' | 'failed'; isFixSent?: true; error?: string }
+
+// A run of /setup-project in a project: each step's state, the one under way.
+export type SetupRun = { root: string; steps: Record<SetupStepId, SetupStepState>; current: SetupStepId | null }
+
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
 
@@ -345,6 +376,11 @@ declare module 'claude-code' {
 
       // The guard: each agent's turn past the soft limit, by its loop ('main' for the main loop).
       'guard.alerts': Record<string, GuardAlert>
+
+      // /setup-project's run in this project, and what the last check of the docs found (null
+      // in a project not set up, where nothing is checked).
+      'setup.run': SetupRun | null
+      'setup.issues': SetupDocIssue[] | null
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]
