@@ -1,6 +1,6 @@
 # agent-lens
 
-A Claude Code mod for working with the agent, in three parts that know of each other:
+A Claude Code mod for working with the agent, in three parts that know of each other, and a guard over them all:
 
 - **What the agent changed.** Each edit is checked against the project's `CLAUDE.md` and
   `AGENTS.md` as Claude makes it, and Claude is told what it broke before it moves on. After each
@@ -13,6 +13,9 @@ A Claude Code mod for working with the agent, in three parts that know of each o
 - **The skill for each prompt.** Each prompt you send is read, and Claude is told which of your
   skills to load for it: your rules first, a quick model call where none fits. `/router` shows
   what it picked and why.
+- **The guard.** No agent works a turn on forever: a call repeated with nothing changing is
+  refused, an agent long at it is told to wrap up, and past the limit it is stopped and reports
+  what it did. `/changes guard` says the limits.
 
 It was four mods: review-lens, rules-watchdog, openspec-lens and skill-router.
 
@@ -41,6 +44,26 @@ those of the mods loaded after agent-lens, so a short band keeps them in view.
 - **The rules are checked once.** What the check of each edit caught joins the findings while it
   is still in the code, and the review after the turn is told not to report it again.
 - **One language.** `lang ru` after any of the three commands switches all of them.
+
+## The guard
+
+Each turn of every agent, Claude's own and each subagent's, the ones it starts and the ones a part
+of this mod starts, is held to limits counted from the turn's start, each loop on its own:
+
+- **A loop is refused at once**, as a stuck detector finds it: the same tool call with the same
+  input a fourth time in a row with the same result each time (a poll whose result moves on is no
+  loop), the same call a third time after it failed twice, or two calls taken in turn a sixth time
+  with the same results. The agent is told why, and to try another way or say what is in the way.
+- **Past half the limit** (30 min or 75 tool calls by default) the next tool result carries a note:
+  if the end is not near, stop and report what is done, what is left and what is in the way. You
+  get a toast, and the row above the prompt shows `⏱ Claude · 34 min · 80 steps`.
+- **Past the limit** (60 min or 150 tool calls) every tool is refused, so the agent answers with
+  what it did; you get a notification, and the row shows `■ Claude stopped`. Your next prompt starts
+  a new turn and a new count.
+
+The time is the agent's own work: a question put to you, a permission waiting on you, and a
+subagent it waits on (which keeps its own count) are left out. `/changes guard` says the limits and
+what is running; `/changes guard 90 200` sets them, `/changes guard off` turns the guard off.
 
 ## What the agent changed
 
@@ -385,6 +408,7 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | -------------------------- | -------------------------------------------------------------------- |
 | `/changes`                 | Open the review of what the agent changed.                           |
 | `/changes rules`           | How edits are checked, and the rule files that apply.               |
+| `/changes guard [on\|off\|<minutes> <steps>]` | The limits on each agent's turn and what runs now; sets them, as under The guard. |
 | `/spec`                    | Open the pane on the OpenSpec change in view.                        |
 | `/spec <change>`           | Pick another active change and open the pane on it.                  |
 | `/spec critic off\|button\|auto` | Whether an agent looks for holes in the change, as under Decide.  |
@@ -404,6 +428,9 @@ In `/plugin`, select agent-lens, then Configure:
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
 | Critic for the spec         | `off`   | `button`: an agent looks for holes in the change when you press `f` on Decide; `auto`: also after each turn that changes it, and the blockers it finds go to Claude to close, until a look finds none and three rounds at most, then it waits for `f`; `/spec critic` overrides it |
+| Guard over each agent's turn | `on`   | `off`: no limit on any agent's turn, as under The guard; `/changes guard` overrides it                                                               |
+| Guard: minutes per turn     | `60`    | The limit on one turn of an agent, in minutes of its own work; at half it is told to wrap up                                                         |
+| Guard: tool calls per turn  | `150`   | The limit on one turn of an agent, in tool calls; at half it is told to wrap up                                                                      |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |
 | Model for routing           | `haiku` | An alias or a full model id                                                                                                                          |
 

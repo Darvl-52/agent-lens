@@ -53,6 +53,28 @@
         "auto"
       ]
     },
+    "guard": {
+      "type": "string",
+      "title": "Guard over each agent's turn",
+      "description": "on: a call repeated with nothing changing is refused; past half the limits below an agent is told to wrap up, past them every tool is refused and it reports what it did; off: no limit. /changes guard overrides it",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "guardMinutes": {
+      "type": "number",
+      "title": "Guard: minutes per turn",
+      "description": "The hard limit on one turn of an agent, in minutes of its own work (time a person is asked is left out); the soft one is half",
+      "default": 60
+    },
+    "guardSteps": {
+      "type": "number",
+      "title": "Guard: tool calls per turn",
+      "description": "The hard limit on one turn of an agent, in tool calls; the soft one is half",
+      "default": 150
+    },
     "routerUseModel": {
       "type": "boolean",
       "title": "Route with a model",

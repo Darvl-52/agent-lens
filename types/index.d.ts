@@ -238,6 +238,19 @@ export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; 
 // The session's prompts routed, counted whole: the decisions keep only the last few.
 export type RouterStats = { prompts: number; withSkill: number; byRule: number; byModel: number; bySkill: Record<string, number> }
 
+// The guard over each agent's turn.
+
+// Why a call was refused as a loop: the same call with the same result again, the same call failing
+// again, or two calls taken in turn with the same results.
+export type GuardStuck = 'repeat' | 'error' | 'pingpong'
+
+// An agent's turn past the soft limit, as the row shows it: who it is, how long it has worked (time a
+// person was asked left out), its tool calls, and whether the hard limit stopped it.
+export type GuardAlert = { who: string; minutes: number; steps: number; isStopped?: true }
+
+// What /changes guard set: on or off, and the hard limit; the soft one is half of it.
+export type GuardSetting = { isOn: boolean; minutes: number; steps: number }
+
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
 
@@ -329,6 +342,9 @@ declare module 'claude-code' {
       // The critic agent's last look at each change, by its name, and the mode /spec critic set.
       'spec.critic': Record<string, SpecCritic>
       'spec.criticMode': SpecCriticMode | null
+
+      // The guard: each agent's turn past the soft limit, by its loop ('main' for the main loop).
+      'guard.alerts': Record<string, GuardAlert>
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]

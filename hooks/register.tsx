@@ -1,6 +1,7 @@
 import type { Hook, Register, RenderChildren } from 'claude-code'
 
 import { configureLang, restoreLang } from './core/lang'
+import { checkedGuard, clearGuard, configureGuard, endGuardTurn, guardAfter, guardBefore, guardCommand, guardLines, restoreGuard, startGuardTurn } from './guard/guard'
 import {
   aroundShell,
   beforeEdit,
@@ -38,9 +39,9 @@ import { PANE as ROUTER_PANE } from './router/state'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
-// Three parts in one module, each in its own folder, sharing the language: the review of what the
-// agent changed (with the check of each edit as it is made), the OpenSpec change in view, and the
-// skill each prompt gets. Every hook is registered here; on an event more than one part hears,
+// Four parts in one module, each in its own folder, sharing the language: the review of what the
+// agent changed (with the check of each edit as it is made), the OpenSpec change in view, the
+// skill each prompt gets, and the guard that holds each agent's turn to its limits. Every hook is registered here; on an event more than one part hears,
 // each part's work runs in turn, and one that fails does not stop the others.
 // Between the spec's part of the row and the review's; and the columns the spec keeps for itself
 // there, its name and a part or two, below which each goes on a row of its own.
@@ -53,6 +54,7 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
   await restoreLang($).catch(() => {})
   await rescanSpec($).catch(() => {})
   await restoreRouter($).catch(() => {})
+  await restoreGuard($).catch(() => {})
 }
 
 export const register: Register = (on, options) => {
@@ -60,9 +62,11 @@ export const register: Register = (on, options) => {
   configureReview(options)
   configureSpec(options)
   configureRouter(options)
+  configureGuard(options)
 
   on('session.start', async ($, e, next) => {
     await restoreLang($).catch(() => {})
+    await restoreGuard($).catch(() => {})
     await startReview($).catch(() => {})
     await startSpec($, e.isInteractive).catch(() => {})
     const started = await next(e)
@@ -79,6 +83,7 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       await restartReview($).catch(() => {})
       await clearRouter($).catch(() => {})
+      await clearGuard($).catch(() => {})
       await readBack($)
     }
     return ended
@@ -100,8 +105,9 @@ export const register: Register = (on, options) => {
   })
   on('prompt.autocomplete', ($, e, next) => promptAutocomplete($, e, next))
   on('skill.prompt', ($, e, next) => skillPrompt($, e, next))
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) startSpecTurn()
+    await startGuardTurn($, e.agentId).catch(() => {})
     return turnStart($, e, next)
   })
 
@@ -114,9 +120,17 @@ export const register: Register = (on, options) => {
     endRouterTurn(e.agentId, e.answer)
     if (e.agentId === undefined) endSpecTurn($, e.reason)
     else endSpecAgent($, e.agentId, e.answer)
+    await endGuardTurn($, e.agentId).catch(() => {})
     const result = await next(e)
     await endReviewTurn($, e.agentId, e.reason).catch(() => {})
     return result
+  })
+
+  // What the guard learns of a permission put to the person keeps their wait out of the agent's time.
+  on('tool.check', async ($, e, next) => {
+    const checked = await next(e)
+    checkedGuard(e.tool_use_id, checked.decision)
+    return checked
   })
 
   // Every edit, a subagent's too, is taken before it runs: what the file was is what the turn and
@@ -126,20 +140,24 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'NotebookEdit' }, ($, e, next) => beforeNotebookEdit($, e, next)).catch(($, e, next) => next(e))
   on('tool.call', { tool: 'Bash' }, ($, e, next) => aroundShell($, e, next)).catch(($, e, next) => next(e))
 
-  // Then each edit is checked against the rules, and the spec read again where the edit was to it.
+  // Then the guard holds the call to its loop's limits; each edit is checked against the rules, and
+  // the spec read again where the edit was to it.
   on('tool.call', async ($, e, next) => {
+    const held = await guardBefore($, e).catch(() => undefined)
+    if (held?.deny !== undefined) return { deny: held.deny }
     const refusal = await checkBefore($, e).catch(() => undefined)
     if (refusal !== undefined) return { deny: refusal }
     const ran = await next(e)
     if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) afterSpecEdit($, e.file_path)
-    return checkAfter($, e, ran)
+    const checked = checkAfter($, e, ran)
+    return guardAfter($, e, held, checked).catch(() => checked)
   }).catch(($, e, next) => next(e))
 
   on('classic.Stop', ($, e, next) => classicStop($, e, next)).catch(($, e, next) => next(e))
   on('classic.SubagentStop', ($, e, next) => classicSubagentStop($, e, next)).catch(($, e, next) => next(e))
 
   // `lang` after any of them switches every part.
-  on('command.run', { command: 'changes' }, async ($, e) => (await langCommand($, 'changes', e.args)) ?? reviewCommand($, e))
+  on('command.run', { command: 'changes' }, async ($, e) => (await langCommand($, 'changes', e.args)) ?? (await guardCommand($, e.args)) ?? reviewCommand($, e))
   on('command.run', { command: 'spec' }, async ($, e) => (await langCommand($, 'spec', e.args)) ?? specCommand($, e))
   on('command.run', { command: 'router' }, async ($, e) => (await langCommand($, 'router', e.args)) ?? routerCommand($, e))
 
@@ -173,6 +191,13 @@ export const register: Register = (on, options) => {
       spec && review && fits
         ? [row('lens-row', [...spec, <Text dimColor>{SPLIT}</Text>, review.item], [specButton, reviewButton])]
         : [...(spec ? [row('lens-row', spec, specButton)] : []), ...(review ? [row('review-row', review.item, reviewButton)] : [])]
+    // An agent past the guard's soft limit goes first, a row of its own: it is what wants a look now.
+    const guarded = (await guardLines($).catch(() => [])).map((g, i) => (
+      <Text key={`guard-row-${i}`} color={g.isStopped ? 'error' : 'warning'} wrap="truncate-end">
+        {g.text}
+      </Text>
+    ))
+    rows.unshift(...guarded)
     if (rows.length === 0) return below
     return (
       <Box flexDirection="column">
