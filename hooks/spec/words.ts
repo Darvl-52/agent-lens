@@ -183,6 +183,11 @@ No more than 350 words.`,
     `Archive the OpenSpec change "${change}" (${dir}). Where the project has its own skill or command for archiving OpenSpec changes (openspec-archive-change, /opsx:archive), follow it; otherwise run \`openspec archive ${change}\`. First check that every task is ticked and \`openspec validate ${change} --strict\` is clean, and stop and ask me if not. Then tell me what changed in the main specs.`,
   // Sent to the session as the person's own prompt: Claude does one task of the change.
   withSkill: (skill: string) => `Load the \`${skill}\` skill with the Skill tool first and follow it.`,
+  withTdd: (skill: string) =>
+    `Where the task changes how the code behaves, build it test-first with the \`${skill}\` skill (the Skill tool), at the test seam the design or the task names.`,
+  // A project /setup-project prepared: what the change settled goes to its docs before the archive.
+  archiveDocs:
+    'Before archiving, move what the change settled into the project\'s docs: each domain term its proposal, design or specs use that GLOSSARY.md lacks, in its form (**Term**:, a definition of a sentence or two, _Avoid_:); and each decision of its design that is hard to reverse, would surprise a reader and came from a real trade-off, as the next ADR in docs/adr/ (a # title, one to three sentences: the context, the decision, why). Add nothing else, and none where none qualifies.',
   taskPrompt: (change: string, dir: string, key: string, text: string) =>
     `Do task ${key} of the OpenSpec change "${change}" (${dir}): "${text}". First read tasks.md (its preamble too), proposal.md, design.md and the change's specs. Do this task alone, run its check if it names one, and tick it in tasks.md. Where the spec stands in the way or leaves something out, ask me before deciding yourself.`,
   uncoveredHead: (n: number) => `Scenarios with no test case (${n}):`,
@@ -409,6 +414,10 @@ const RU: typeof EN = {
   archivePrompt: (change, dir) =>
     `Заархивируй изменение OpenSpec «${change}» (${dir}). Если в проекте есть свой скилл или команда архивации изменений OpenSpec (openspec-archive-change, /opsx:archive), действуй по нему; иначе — \`openspec archive ${change}\`. Сначала проверь, что все задачи отмечены и \`openspec validate ${change} --strict\` чист, а если нет — остановись и спроси меня. Потом скажи, что изменилось в основных спеках.`,
   withSkill: skill => `Сначала загрузи навык \`${skill}\` через Skill и следуй ему.`,
+  withTdd: skill =>
+    `Если задача меняет поведение кода, строй её сначала тестом, скиллом \`${skill}\` (через Skill), на тестовом шве, который называет design или задача.`,
+  archiveDocs:
+    'Перед архивом перенеси в документы проекта то, что изменение решило: каждый термин предметной области, которым пользуются его proposal, design или спеки и которого нет в GLOSSARY.md, в его виде (**Термин**:, определение в одно-два предложения, _Avoid_:); и каждое решение его design, которое трудно отменить, удивит читателя и принято из реального выбора, следующим ADR в docs/adr/ (# заголовок, одно-три предложения: контекст, решение, почему). Больше ничего не добавляй, и ничего, если таких нет.',
   taskPrompt: (change, dir, key, text) =>
     `Сделай задачу ${key} из изменения OpenSpec «${change}» (${dir}): «${text}». Сначала прочитай tasks.md (и шапку с правилами), proposal.md, design.md и specs изменения. Сделай только эту задачу, выполни её проверку, если она указана, и отметь задачу в tasks.md как выполненную. Если спека мешает сделать задачу или в ней чего-то не хватает, спроси меня, прежде чем решать самому.`,
   uncoveredHead: n => `Сценарии без тест-кейса (${n}):`,

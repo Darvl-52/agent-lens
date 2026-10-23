@@ -86,6 +86,9 @@ End your answer with JSON alone: [{"file": "the file", "problem": "what is wrong
   judgeFix: (findings: Finding[]): string =>
     `The docs agent found these in what was just written to the project's docs. Fix each in its file, or say why it stands; change nothing else:\n${findings.map(f => `- ${f.file}: ${f.text}${f.fix ? ` Fix: ${f.fix}` : ''}`).join('\n')}`,
   minor: 'minor',
+  // After an archive.
+  retroOffer: (change: string): string => `"${change}" is archived: a retro of the work?`,
+  retroArgs: (change: string): string => `the work in this session on the OpenSpec change "${change}", up to its archive`,
   // What each step tells Claude.
   prompts: {
     map: (): string =>
@@ -185,6 +188,8 @@ ${edits}
   judgeFix: findings =>
     `Агент нашёл это в том, что только что записано в документы проекта. Исправь каждое в его файле или скажи, почему оно остаётся; больше ничего не меняй:\n${findings.map(f => `- ${f.file}: ${f.text}${f.fix ? ` Как: ${f.fix}` : ''}`).join('\n')}`,
   minor: 'мелочь',
+  retroOffer: change => `«${change}» в архиве: ретро по работе?`,
+  retroArgs: change => `работа в этой сессии над изменением OpenSpec «${change}», до его архива`,
   prompts: {
     map: () =>
       `${leadRu(3, 'карта')}

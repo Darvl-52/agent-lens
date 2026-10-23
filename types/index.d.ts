@@ -393,6 +393,8 @@ declare module 'claude-code' {
       'setup.run': SetupRun | null
       'setup.issues': SetupDocIssue[] | null
       'setup.judge': SetupJudge | null
+      // A change archived, offered a retro of the work by Matt's command of that name.
+      'setup.retro': { change: string; command: string } | null
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]

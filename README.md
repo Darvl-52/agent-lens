@@ -330,12 +330,17 @@ brief, say) waits its turn, and the pane says what comes next.
    by that prompt, so none is closed twice.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
    the session as your prompt, `do` on a task sends that one: Claude reads the change, does the
-   task alone, runs its check if it names one, and ticks it. A task sent is marked so until it is
+   task alone, runs its check if it names one, and ticks it; with Matt's `tdd` installed, a task that
+   changes behaviour is built test-first at the seam the design names. A task sent is marked so until it is
    ticked, and the next one skips it; `send again` sends it once more. Once every task is ticked
    the tab opens with what still stands between the change and its archive, or with `archive`: a
    second press sends it to the session, and Claude archives it the project's way (its archive
-   skill or command, else `openspec archive`) and says what changed in the main specs. While the
-   change is still there, `send again` sends the archiving once more.
+   skill or command, else `openspec archive`) and says what changed in the main specs. In a project
+   `/setup-project` prepared, it first moves what the change settled into the docs: its new domain
+   terms to `GLOSSARY.md`, its decisions that qualify to `docs/adr/`. While the change is still
+   there, `send again` sends the archiving once more. Once it is gone, where Matt's `retro` is
+   installed, the row above the prompt offers a retro of the work: `/retro` runs it as if you typed
+   it, `×` lets it go.
 5. **Tests.** Each test case of `test-cases.md` and where it stands: `✓ has a test` (the file its
    `Automated:` line names, under the project or a repository in it, holds a test with the case's
    id: `TC-01`, not `TC-010`), `● no test`, `◇ manual`, `✗ unmarked`. Press a case to pick it,

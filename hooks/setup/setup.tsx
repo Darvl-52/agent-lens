@@ -15,6 +15,7 @@ import { WORDS } from './words'
 const runAtom = atom({ plugin: 'agent-lens', key: 'setup.run' } as const, null)
 const issuesAtom = atom({ plugin: 'agent-lens', key: 'setup.issues' } as const, null)
 const judgeAtom = atom({ plugin: 'agent-lens', key: 'setup.judge' } as const, null)
+const retroAtom = atom({ plugin: 'agent-lens', key: 'setup.retro' } as const, null)
 export const PANE = 'agent-lens-setup'
 const runKey = (root: string) => `setup:${root}`
 
@@ -363,6 +364,38 @@ export async function setupCommand($: EngineInterface, args: string) {
   await openSetup($)
   void advance($).catch(() => {})
   return { text: `${w.ready(found.openspec, found.isInitialised)}\n${w.opened}` }
+}
+
+// Whether this project was prepared by /setup-project, or is being.
+export async function isSetUp($: EngineInterface) {
+  return (await read($, runAtom)) !== null || (await exists($, await $.session.root(), MARK))
+}
+
+// A change was archived: where Matt's retro is installed, the row offers it, the person's to run.
+export async function offerRetro($: EngineInterface, change: string) {
+  const command = (await $.command.list().catch(() => [])).find(c => c.name === `${MATT}:retro` || (c.plugin === MATT && c.name.endsWith('retro')))?.name
+  if (!command) return
+  await update($, retroAtom, () => ({ change, command }))
+  await $.ui.toast((await wordsIn($)).retroOffer(change))
+}
+
+// Matt's retro, run as if the person typed it, on the work of the change; or the offer let go.
+export async function runRetro($: EngineInterface) {
+  const retro = await read($, retroAtom)
+  if (!retro) return
+  await update($, retroAtom, () => null)
+  await $.command.run({ command: retro.command, args: (await wordsIn($)).retroArgs(retro.change) }).catch(async () => {
+    await update($, retroAtom, () => retro)
+  })
+}
+
+export async function dismissRetro($: EngineInterface) {
+  await update($, retroAtom, () => null)
+}
+
+export async function retroLine($: EngineInterface) {
+  const retro = await read($, retroAtom)
+  return retro ? (await wordsIn($)).retroOffer(retro.change) : null
 }
 
 // The row above the prompt: the files' issues and the docs agent's blockers not sent, while there are some.

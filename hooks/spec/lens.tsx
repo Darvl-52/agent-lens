@@ -4,7 +4,8 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions, TurnCompleteRea
 import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Hole, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
-import { sentWithSkill, specSkill } from '../router/catalog'
+import { sentWithSkill, specSkill, tddSkill } from '../router/catalog'
+import { isSetUp, offerRetro } from '../setup/setup'
 import {
   annotateRequirements,
   blocksArchive,
@@ -686,10 +687,15 @@ async function applyDecisions($: EngineInterface) {
 }
 
 // A task or an archiving goes to Claude naming OpenSpec's own skill for it, where the router has one.
+// A task names Matt's `tdd` too, where it is installed; in a project /setup-project prepared, an
+// archiving first moves what the change settled into the glossary and the ADRs.
 async function send($: EngineInterface, kind: 'task' | 'archive', text: string) {
   const skill = await specSkill($, kind).catch(() => undefined)
   const w = await wordsIn($)
-  const r = await $.prompt.submit({ text: skill ? `${text}\n\n${w.withSkill(skill)}` : text, asUser: true })
+  const tdd = kind === 'task' ? await tddSkill($).catch(() => undefined) : undefined
+  const docs = kind === 'archive' && (await isSetUp($).catch(() => false)) ? w.archiveDocs : undefined
+  const lines = [text, ...(docs ? [docs] : []), ...(tdd ? [w.withTdd(tdd)] : []), ...(skill ? [w.withSkill(skill)] : [])]
+  const r = await $.prompt.submit({ text: lines.join('\n\n'), asUser: true })
   if (skill && r.drop === undefined) await sentWithSkill($, skill, text).catch(() => {})
   return r
 }
@@ -818,6 +824,16 @@ async function archiveChange($: EngineInterface) {
   await $.ui.toast(w.archiveSent)
 }
 
+// The archiving sent, once its change's folder is gone: the person is offered a retro of the work.
+async function afterArchive($: EngineInterface) {
+  const archive = await read($, archiveAtom)
+  if (!archive?.isSent) return
+  const root = await $.session.root()
+  if (await $.fs.exists(join(root, 'openspec', 'changes', archive.change)).catch(() => true)) return
+  await update($, archiveAtom, () => null)
+  await offerRetro($, archive.change)
+}
+
 async function criticMode($: EngineInterface) {
   return (await read($, criticModeAtom)) ?? criticDefault
 }
@@ -942,6 +958,7 @@ async function closeHoles($: EngineInterface, change: string, isAll: boolean) {
 // holes waiting for the next.
 async function afterTurn($: EngineInterface, isAnswered: boolean) {
   await scan($)
+  await afterArchive($).catch(() => {})
   if (isAnswered) {
     const waiting = holesWaiting
     holesWaiting = undefined

@@ -226,8 +226,8 @@ const project = async (
   validate?: (change: string) => string,
   // The project's folder as the engine spells it; the commands not on the PATH by that name; the
   // changes whose folder is gone by the time the scan lists it.
-  // `slow`: the commands that run past their time.
-  { root = '/proj', missing = [] as readonly string[], gone = [] as readonly string[], slow = [] as readonly string[] } = {},
+  // `slow`: the commands that run past their time. `commands`: skills installed beside OpenSpec's.
+  { root = '/proj', missing = [] as readonly string[], gone = [] as readonly string[], slow = [] as readonly string[], commands = [] as readonly string[] } = {},
 ) => {
   // The disk is kept by POSIX path, however the engine spells one: on Windows it hands the hooks
   // `C:\proj\openspec\changes` for `/proj/openspec/changes`, and elsewhere a `C:\proj` the mod was
@@ -244,6 +244,10 @@ const project = async (
   // A file of the project outside `openspec`, a test, say.
   const putAt = (path: string, text: string) => disk.set(at(path), text)
   const putMain = (capability: string, text: string) => disk.set(`${openspec}/specs/${capability}/spec.md`, text)
+  // The change archived: its folder gone from changes/.
+  const archive = (change: string) => {
+    for (const p of [...disk.keys()]) if (p.startsWith(`${openspec}/changes/${change}/`)) disk.delete(p)
+  }
   for (const [change, files] of Object.entries(changes)) for (const [file, text] of Object.entries(files)) put(change, file, text)
   // The test TC-01 of the door change names: there, so its case has a test.
   disk.set(`${at(root).replace(/\/$/, '')}/e2e/door.spec.ts`, "test('TC-01 grant access', async () => {})\n")
@@ -270,7 +274,15 @@ const project = async (
   let reply = (e: ModelCompleteInput): string | null => (e.prompt.includes('Question:') || e.prompt.includes('Вопрос:') ? 'It is revoked at once (design.md, Grant).' : BRIEF_EN)
   const clock = mock.clock(on, { now: 10_000 })
   // The skills the session has: OpenSpec's own, as its slash commands name them.
-  on('command.list', () => ({ value: [{ name: 'opsx:apply', description: 'Implement the tasks of an OpenSpec change.', source: 'user' as const }] }))
+  on('command.list', () => ({
+    value: [
+      { name: 'opsx:apply', description: 'Implement the tasks of an OpenSpec change.', source: 'user' as const },
+      ...commands.map(name => ({ name, description: name, source: 'plugin' as const, plugin: name.split(':')[0] })),
+    ],
+  }))
+  // The commands the mod ran as if the person typed them.
+  const commandsRun: { command: string; args?: string }[] = []
+  on('command.run', ($, e) => (commandsRun.push({ command: e.command, ...(e.args ? { args: e.args } : {}) }), {}))
   on('session.root', () => ({ value: root }))
   on('fs.exists', ($, e) => ({ value: disk.has(at(e.path)) || isDir(e.path) }))
   // How long listing a folder takes, on the mocked clock.
@@ -362,7 +374,7 @@ const project = async (
   // A spawned agent's run ends with `answer`.
   const agentDone = (agentId: string, answer: string) =>
     $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { spawned, startTurn, agentDone, store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why), hold: (until: Promise<void> | undefined) => (held = until) }
+  return { archive, commandsRun, spawned, startTurn, agentDone, store, asked, opened, submitted, toasts, ran, spec, settle, write, put, putAt, putMain, turn, clock, reads, setListDelay: (ms: number) => (listDelay = ms), setReply: (r: typeof reply) => (reply = r), setDelay: (ms: number) => (delay = ms), refuse: (why: string | undefined) => (refusal = why), hold: (until: Promise<void> | undefined) => (held = until) }
 }
 
 // The text of a found element and everything under it.
@@ -1398,4 +1410,57 @@ test('the critic on a button: f looks for holes, h sends them; off, the tab says
   await agentDone('critic-3', 'All closed.\n[]')
   expect(await pane.find({ type: 'Text', text: /^✓ The agent found no holes\.$/ })).toBeDefined()
   await pane.unmount()
+})
+
+test('with Matt’s tdd installed, a task sent from /spec is built test-first, OpenSpec’s skill still last', async ($, on) => {
+  const { spec, settle, submitted } = await project($, on, { door: DOOR }, undefined, { commands: ['mattpocock-skills:tdd'] })
+  await spec()
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-tasks' })
+  await pane.press({ key: 'do-next' })
+  expect(submitted[0]!.text).toMatch(
+    /^Do task 1\.2 [\s\S]*\n\nWhere the task changes how the code behaves, build it test-first with the `mattpocock-skills:tdd` skill \(the Skill tool\), at the test seam the design or the task names\.\n\nLoad the `opsx:apply` skill/,
+  )
+  await pane.unmount()
+})
+
+test('in a project set up, the archive moves the change’s terms and decisions to the docs first; archived, a retro is offered', async ($, on) => {
+  const done = { ...DOOR, 'tasks.md': TASKS.replace('- [ ] 1.2', '- [x] 1.2') }
+  const { spec, settle, setReply, submitted, turn, putAt, archive, commandsRun } = await project($, on, { door: done }, report([]), {
+    commands: ['mattpocock-skills:retro'],
+  })
+  putAt('/proj/docs/agents/workflow.md', '# How work goes\n')
+  setReply(() => '## Gist\nManagers grant door access.\n## Up to you\nNothing.\n')
+  await spec()
+  await settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-tasks' })
+  await pane.press({ key: 'archive' })
+  await pane.press({ key: 'archive-confirm' })
+  await pane.unmount()
+  expect(submitted[0]!.text).toMatch(/^Archive the OpenSpec change "door"[\s\S]*\n\nBefore archiving, move what the change settled into the project's docs: each domain term [\s\S]*as the next ADR in docs\/adr\//)
+  // A turn that leaves the change where it was offers nothing.
+  await turn()
+  await settle()
+  const band = async () => {
+    const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND })
+    const row = await ui.find({ key: 'retro-row' })
+    return { ui, row }
+  }
+  let b = await band()
+  expect(b.row).toBeUndefined()
+  await b.ui.unmount()
+  // Archived: the row offers Matt's retro, run as if typed, on the work of the change.
+  archive('door')
+  await turn()
+  await settle()
+  b = await band()
+  expect(await b.ui.find({ type: 'Text', text: '"door" is archived: a retro of the work?' })).toBeDefined()
+  await b.ui.press({ key: 'run-retro' })
+  await b.ui.unmount()
+  expect(commandsRun.filter(c => c.command !== 'spec')).toEqual([{ command: 'mattpocock-skills:retro', args: 'the work in this session on the OpenSpec change "door", up to its archive' }])
+  b = await band()
+  expect(b.row).toBeUndefined()
+  await b.ui.unmount()
 })

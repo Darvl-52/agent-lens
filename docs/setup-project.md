@@ -99,4 +99,5 @@ Run again, it adds to what is there, never writes over it.
 
 1. Done: `/setup-project`, the check of what is installed, the steps in a pane, the checks without a model.
 2. Done: the docs agent on edits; `CODING_STANDARDS.md` among the review's rules; drift.
-3. With `/spec`: `tdd` named in the tasks it sends, the archive's move of terms and decisions, `retro`.
+3. Done: with `/spec`, `tdd` named in the tasks it sends, the archive's move of terms and decisions,
+   `retro` offered once the change is archived.

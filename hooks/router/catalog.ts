@@ -114,6 +114,13 @@ export async function specSkill($: EngineInterface, kind: 'task' | 'archive') {
   return skill === undefined || isLoaded(skill, await loadedIn($)) ? undefined : skill
 }
 
+// The skill a task is built test-first with, Matt's `tdd`, where it is installed and the router is
+// not off: named in each task the spec's pane sends, loaded already or not.
+export async function tddSkill($: EngineInterface) {
+  if ((await modeIn($)) === 'off') return undefined
+  return resolve('tdd', (await lookAround($)).skills)
+}
+
 // Once the prompt naming it went to the session, it is kept with the router's decisions.
 export async function sentWithSkill($: EngineInterface, skill: string, prompt: string) {
   const picks: Pick[] = [{ skill, why: (await wordsIn($)).fromSpec, by: 'rule' }]

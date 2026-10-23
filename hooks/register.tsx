@@ -36,7 +36,7 @@ import {
   startRouter,
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
-import { afterSetupEdit, beforeSetupEdit, endSetupAgent, endSetupTurn, judgeReport, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { afterSetupEdit, beforeSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -219,6 +219,14 @@ export const register: Register = (on, options) => {
         {g.text}
       </Text>
     ))
+    const retro = await retroLine($).catch(() => null)
+    if (retro)
+      rows.unshift(
+        row('retro-row', <Text color="warning">{retro}</Text>, [
+          <Button key="run-retro" label="/retro" plain onPress={() => void runRetro($).catch(() => {})} />,
+          <Button key="dismiss-retro" label="×" plain dimColor onPress={() => void dismissRetro($).catch(() => {})} />,
+        ]),
+      )
     const docs = await setupLine($).catch(() => null)
     if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(() => {})} />))
     rows.unshift(...guarded)
