@@ -36,7 +36,7 @@ import {
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
 import { langCommand } from './switch'
-import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, isCriticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
+import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
 // Three parts in one module, each in its own folder, sharing the language: the review of what the
 // agent changed (with the check of each edit as it is made), the OpenSpec change in view, and the
@@ -91,7 +91,13 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('session.compact', ($, e, next) => sessionCompact($, e, next))
-  on('prompt.submit', ($, e, next) => promptSubmit($, e, next))
+  // The spec critic's report is the Decide tab's, not a message for Claude: the engine queues a
+  // subagent's hand-back to the main conversation as a peer's prompt, and a delivery from outside
+  // the session reaches session.receive.
+  on('prompt.submit', async ($, e, next) => {
+    const kept = e.origin.kind === 'peer' ? await criticReport($, e.text).catch(() => undefined) : undefined
+    return kept ? { drop: kept } : promptSubmit($, e, next)
+  })
   on('prompt.autocomplete', ($, e, next) => promptAutocomplete($, e, next))
   on('skill.prompt', ($, e, next) => skillPrompt($, e, next))
   on('turn.start', ($, e, next) => {
@@ -99,10 +105,10 @@ export const register: Register = (on, options) => {
     return turnStart($, e, next)
   })
 
-  // The spec critic's report is the Decide tab's, not a message for Claude.
-  on('session.receive', async ($, e, next) =>
-    e.agentId === undefined && e.origin.kind === 'peer' && (await isCriticReport($, e.text).catch(() => false)) ? { consumed: 'the spec critic report, on the Decide tab' } : next(e),
-  )
+  on('session.receive', async ($, e, next) => {
+    const kept = e.agentId === undefined && e.origin.kind === 'peer' ? await criticReport($, e.text).catch(() => undefined) : undefined
+    return kept ? { consumed: kept } : next(e)
+  })
 
   on('turn.complete', async ($, e, next) => {
     endRouterTurn(e.agentId, e.answer)

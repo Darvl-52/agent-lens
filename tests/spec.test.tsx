@@ -182,6 +182,13 @@ test('the holes of the critic are read from the JSON its answer ends with; a tas
   expect(parseHoles('No list at all.')).toBeUndefined()
   const many = JSON.stringify(Array.from({ length: 7 }, (_, i) => ({ hole: `h${i}` })))
   expect(parseHoles(many)).toHaveLength(5)
+  // A detail the code settles is minor, and goes after the blockers; one that names none blocks.
+  const graded = '[{"hole": "Initial value", "severity": "minor"}, {"hole": "Two files disagree", "severity": "blocker"}, {"hole": "No task"}]'
+  expect(parseHoles(graded)!.map(h => [h.text, h.isMinor ?? false])).toEqual([
+    ['Two files disagree', false],
+    ['No task', false],
+    ['Initial value', true],
+  ])
   expect(criticPrint({ 'tasks.md': '- [x] 1.1 Do it\n' })).toBe(criticPrint({ 'tasks.md': '- [ ] 1.1 Do it\n' }))
   expect(criticPrint({ 'tasks.md': '- [ ] 1.1 Do it\n' })).not.toBe(criticPrint({ 'tasks.md': '- [ ] 1.1 Do it now\n' }))
 })
@@ -1181,7 +1188,7 @@ test('the critic starts once for two turns that end close together', async ($, o
   expect(spawned).toHaveLength(1)
 })
 
-test('the critic in auto mode: what it finds goes to Claude to close, three rounds in a row at most', async ($, on) => {
+test('the critic in auto mode: what it finds goes to Claude to close, three rounds of a change at most', async ($, on) => {
   const { spec, settle, submitted, toasts, put, turn, spawned, agentDone, startTurn, store } = await project($, on, { door: DOOR })
   expect((await spec('critic')).text).toMatch(/^The critic is off\./)
   expect((await spec('critic auto')).text).toMatch(/after each turn that changes it/)
@@ -1209,6 +1216,8 @@ test('the critic in auto mode: what it finds goes to Claude to close, three roun
   expect(submitted).toHaveLength(1)
   expect(submitted[0]).toMatchObject({ asUser: true })
   expect(submitted[0]!.text).toMatch(/found these holes[\s\S]*1\. No task revokes access \(tasks\.md\)\n   Fix: Add a revoke task/)
+  // Claude is given a way through them: close, ask or decline each, and say which it did.
+  expect(submitted[0]!.text).toMatch(/- close it:[\s\S]*- ask me[\s\S]*- decline it[\s\S]*End with a table/)
   expect(toasts.at(-1)).toBe('1 hole went to Claude to close.')
 
   // Claude closes them: the critic reads again, told what went before, and its holes go too.
@@ -1237,11 +1246,58 @@ test('the critic in auto mode: what it finds goes to Claude to close, three roun
   expect(await pane.find({ type: 'Text', text: /^round 3$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^• Hole 3 \(design\.md\)$/ })).toBeDefined()
   await pane.unmount()
-  // The text changed after that starts over.
+  // A change to the text after that starts none: the person asks again with f, and the rounds start over.
   put('door', 'design.md', '# Design\n\nSaid again.\n')
   await turn()
   await settle()
+  expect(spawned).toHaveLength(3)
+  const again = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await again.press({ key: 'tab-decide' })
+  await again.press({ key: 'find-holes' })
   expect(spawned).toHaveLength(4)
+  await agentDone('critic-4', '[{"hole": "Hole 4", "where": "design.md", "fix": "Say it"}]')
+  await settle()
+  expect(submitted).toHaveLength(4)
+  expect(await again.find({ type: 'Text', text: /^→ sent to Claude to close · round 1 of 3$/ })).toBeDefined()
+  await again.unmount()
+})
+
+test('in auto mode the details the code can settle stay on the tab, and a look with no blocker ends the rounds', async ($, on) => {
+  const { spec, settle, submitted, put, turn, spawned, agentDone } = await project($, on, { door: DOOR })
+  await spec('critic auto')
+  await turn()
+  await settle()
+  await agentDone('critic-1', '[{"hole": "No revoke task", "where": "tasks.md", "fix": "Add one", "severity": "blocker"}, {"hole": "Initial loading flag", "where": "design.md", "fix": "Say false", "severity": "minor"}]')
+  await settle()
+  expect(submitted).toHaveLength(1)
+  expect(submitted[0]!.text).toMatch(/No revoke task/)
+  expect(submitted[0]!.text).not.toMatch(/Initial loading flag/)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.press({ key: 'tab-decide' })
+  expect(await pane.find({ type: 'Text', text: /^Details the code can settle/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^• Initial loading flag \(design\.md\)$/ })).toBeDefined()
+  expect(await bandText($)).not.toMatch(/hole/)
+
+  // Closed: the next look finds details alone, and the change is ready; none goes by itself.
+  put('door', 'tasks.md', `${TASKS}- [ ] 1.3 Revoke access\n`)
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(2)
+  await agentDone('critic-2', '[{"hole": "Toast wording", "where": "specs", "fix": "Pick one", "severity": "minor"}]')
+  await settle()
+  expect(submitted).toHaveLength(1)
+  expect(await pane.find({ type: 'Text', text: /^✓ No blocking holes: the change can be built\.$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^The critic looks again on f, not by itself\.$/ })).toBeDefined()
+  // A change to the text after it starts no critic; h sends the details on the person's word.
+  put('door', 'design.md', '# Design\n\nMore.\n')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(2)
+  await pane.press({ key: 'close-holes' })
+  expect(submitted).toHaveLength(2)
+  expect(submitted[1]!.text).toMatch(/Toast wording/)
+  expect(await pane.find({ key: 'close-holes' })).toBeUndefined()
+  await pane.unmount()
 })
 
 test("the critic's report handed back to the main conversation is the Decide tab's, not read by Claude", async ($, on) => {
@@ -1254,6 +1310,30 @@ test("the critic's report handed back to the main conversation is the Decide tab
     $.session.receive({ origin: { kind: 'peer' }, text: `Another Claude session sent a message:\n<agent-message from="${from}">\n[Subagent hand-back] Found one.\n</agent-message>` })
   expect(await handBack('critic-1')).toMatchObject({ consumed: expect.any(String) })
   expect(await handBack('worker-7')).toMatchObject({ text: expect.stringMatching(/worker-7/) })
+})
+
+test("the critic's report the engine queues as a prompt once its run ended is dropped, its holes sent once", async ($, on) => {
+  const { spec, settle, turn, spawned, agentDone, submitted } = await project($, on, { door: DOOR })
+  await spec('critic auto')
+  await turn()
+  await settle()
+  expect(spawned).toHaveLength(1)
+  const report = '[{"hole": "No task revokes access", "where": "tasks.md", "fix": "Add a revoke task"}]'
+  await agentDone('critic-1', report)
+  await settle()
+  expect(submitted).toHaveLength(1)
+  // As a session's transcript keeps it: the hand-back queued after the agent's end, from a peer.
+  const handBack = (from: string) =>
+    $.prompt.submit({
+      text: `Another Claude session sent a message:\n<agent-message from="${from}">\n[Subagent hand-back] The text below is the final report of a subagent this session delegated to.\n\n${report}\n</agent-message>`,
+      origin: { kind: 'peer' },
+      isMeta: true,
+      wait: false,
+    })
+  expect(await handBack('critic-1')).toMatchObject({ drop: expect.any(String) })
+  expect(submitted).toHaveLength(1)
+  expect(await handBack('worker-7')).toMatchObject({ text: expect.stringMatching(/worker-7/) })
+  expect(submitted).toHaveLength(2)
 })
 
 test('a critic started while the holes before wait in the queue reads the next round, and its record stands', async ($, on) => {

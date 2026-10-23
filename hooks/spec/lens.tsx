@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Hook, MatchedHook, PluginOptions, TurnCompleteReason } from 'claude-code'
 
-import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
+import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Hole, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { sentWithSkill, specSkill } from '../router/catalog'
@@ -834,8 +834,9 @@ async function keepCritic($: EngineInterface, root: string, critic: Critic) {
 
 // The critic agent reads the change in view against the code for holes: when asked, or in auto mode
 // at a main turn's end once the change's text moved on from what it read last. Rounds whose holes
-// went to Claude count up while Claude's turns close them; once CRITIC_ROUNDS went, what the last
-// changed is left to the person, and the next change to the text starts over.
+// went to Claude count up while Claude's turns close them. Auto mode stops at a look that finds no
+// blocker, the change ready, or once CRITIC_ROUNDS went, what the last changed left to the person:
+// either way only the person asking again starts it over.
 async function critique($: EngineInterface, isAsked: boolean) {
   if (critiquing) {
     isAskedAgain ||= isAsked
@@ -862,13 +863,12 @@ async function startCritic($: EngineInterface, isAsked: boolean) {
   const at = await $.clock.now()
   if (was?.status === 'running' && at - was.at < CRITIC_STALE_MS) return
   const fingerprint = criticPrint(files)
-  if (!isAsked && was?.fingerprint === fingerprint) return
-  if (!isAsked && was?.isSent && was.round >= CRITIC_ROUNDS) {
-    const { isSent: _sent, ...rest } = was
-    await keepCritic($, lens.root, { ...rest, fingerprint, isCapped: true })
+  if (!isAsked && (was?.fingerprint === fingerprint || (was && (isReady(was) || was.isCapped)))) return
+  if (!isAsked && was && was.round >= CRITIC_ROUNDS) {
+    await keepCritic($, lens.root, { ...was, fingerprint, isCapped: true })
     return
   }
-  const round = was?.isSent ? was.round : 0
+  const round = isAsked ? 0 : (was?.round ?? 0)
   const w = await wordsIn($)
   const dir = join(lens.root, 'changes', lens.current)
   const task = w.criticTask(lens.current)
@@ -878,7 +878,7 @@ async function startCritic($: EngineInterface, isAsked: boolean) {
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
   if (agentId) critics.add(agentId)
   // What the rounds before sent stays in view while they go on.
-  const sent = was?.isSent ? (was.sent ?? []) : []
+  const sent = isAsked ? [] : (was?.sent ?? [])
   await keepCritic($, lens.root, { change: lens.current, fingerprint, at, holes: [], round, status: agentId ? 'running' : 'failed', ...(agentId ? { agentId } : {}), ...(sent.length > 0 ? { sent } : {}) })
 }
 
@@ -888,28 +888,42 @@ async function heardCritic($: EngineInterface, agentId: string, answer: string) 
   const critic = Object.values(await read($, criticAtom)).find(c => c.status === 'running' && c.agentId === agentId)
   if (!lens || !critic) return
   const holes = parseHoles(answer)
-  const { agentId: _id, ...rest } = critic
-  await keepCritic($, lens.root, { ...rest, status: holes ? 'done' : 'failed', holes: holes ?? [] })
-  if (holes && holes.length > 0 && (await criticMode($)) === 'auto') await closeHoles($, critic.change)
+  // Its id stays: the engine hands its report back after this end, and it is known by the id.
+  await keepCritic($, lens.root, { ...critic, status: holes ? 'done' : 'failed', holes: holes ?? [] })
+  if (holes?.some(hole => !hole.isMinor) && (await criticMode($)) === 'auto') await closeHoles($, critic.change, false)
 }
 
-// The holes found go to the session as the person's prompt: Claude closes them in the change's
-// files, and asks where one wants a decision only the person can make. Kept as decided, so neither
-// the brief nor the critic raises them again. While the main loop is in a turn they wait for its end.
-async function closeHoles($: EngineInterface, change: string) {
+// A look that found nothing that blocks the work: the change is ready to be built.
+const isReady = (critic: Critic) => critic.status === 'done' && !critic.holes.some(hole => !hole.isMinor)
+
+// The holes of the last look still to go to Claude: the blockers, and the details the code can settle.
+const holesLeft = (critic: Critic | undefined) => {
+  const left = critic?.status === 'done' ? critic.holes.filter(hole => !hole.isSent) : []
+  return { blockers: left.filter(hole => !hole.isMinor), minors: left.filter(hole => hole.isMinor) }
+}
+
+// The holes found go to the session as the person's prompt: Claude closes, asks about or declines
+// each in the change's files. Kept as decided, so neither the brief nor the critic raises them again.
+// In auto mode the blockers alone go; the person's h sends the details as well. While the main loop
+// is in a turn they wait for its end.
+async function closeHoles($: EngineInterface, change: string, isAll: boolean) {
   if (isMainTurn) {
     holesWaiting = change
     return
   }
   const lens = await read($, lensAtom)
   const critic = (await read($, criticAtom))[change]
-  if (!lens || !critic || critic.status !== 'done' || critic.holes.length === 0 || critic.isSent) return
+  const { blockers, minors } = holesLeft(critic)
+  const holes = isAll ? [...blockers, ...minors] : blockers
+  if (!lens || !critic || holes.length === 0) return
   const w = await wordsIn($)
   // Kept sent before the prompt goes: it waits in the queue while a turn runs, and a critic that
   // turn's end starts reads the round from this, not has its own record written over after.
   const round = critic.round + 1
-  await keepCritic($, lens.root, { ...critic, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes: critic.holes }] })
-  const r = await $.prompt.submit({ text: w.closeHolesPrompt(change, join(lens.root, 'changes', change), critic.holes), asUser: true })
+  const going = new Set(holes)
+  const marked = critic.holes.map(hole => (going.has(hole) ? { ...hole, isSent: true as const } : hole))
+  await keepCritic($, lens.root, { ...critic, holes: marked, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes }] })
+  const r = await $.prompt.submit({ text: w.closeHolesPrompt(change, join(lens.root, 'changes', change), holes), asUser: true })
   if (r.drop !== undefined) {
     // Taken back, unless a critic started since.
     const now = (await read($, criticAtom))[change]
@@ -917,8 +931,8 @@ async function closeHoles($: EngineInterface, change: string) {
     await fail($, w.notSent(r.drop))
     return
   }
-  await keepDecided($, { ...lens, current: change }, critic.holes.map(hole => ({ point: `${hole.text} (${hole.where})`, answer: hole.fix })))
-  await $.ui.toast(w.holesToast(critic.holes.length))
+  await keepDecided($, { ...lens, current: change }, holes.map(hole => ({ point: `${hole.text} (${hole.where})`, answer: hole.fix })))
+  await $.ui.toast(w.holesToast(holes.length))
 }
 
 // After a turn the row follows what agents ticked and rewrote; a spec that moved on from the
@@ -931,7 +945,7 @@ async function afterTurn($: EngineInterface, isAnswered: boolean) {
   if (isAnswered) {
     const waiting = holesWaiting
     holesWaiting = undefined
-    if (waiting !== undefined) await closeHoles($, waiting)
+    if (waiting !== undefined) await closeHoles($, waiting, false)
     else await critique($, false)
   }
   const lens = await read($, lensAtom)
@@ -1091,11 +1105,13 @@ export function endSpecTurn($: EngineInterface, reason: TurnCompleteReason) {
 
 // What a critic hands back to the main conversation as its run ends: the Decide tab holds it, and
 // the holes go to Claude by the mod's own prompt, in auto mode or on h; read by Claude as well, they
-// would be closed twice and the button would hold nothing back. By the agent's id in the text.
-export async function isCriticReport($: EngineInterface, text: string) {
+// would be closed twice and the button would hold nothing back. By the agent's id in the text: the
+// ids this module started, those the engine lists as this mod's, and each change's last critic.
+// What the person is told it went to, or undefined for any other text.
+export async function criticReport($: EngineInterface, text: string) {
   const listed = (await $.agent.list().catch(() => [])).filter(a => a.spawnedBy === 'agent-lens').map(a => a.id)
-  const running = Object.values(await read($, criticAtom)).flatMap(c => (c.agentId ? [c.agentId] : []))
-  return [...critics, ...listed, ...running].some(id => text.includes(id))
+  const kept = Object.values(await read($, criticAtom)).flatMap(c => (c.agentId ? [c.agentId] : []))
+  return [...critics, ...listed, ...kept].some(id => text.includes(id)) ? (await wordsIn($)).criticReportKept : undefined
 }
 
 // A subagent's run ended: the critic's, its answer is read.
@@ -1148,7 +1164,8 @@ export async function specLine($: EngineInterface, e: AbovePromptEvent, taken: n
   add(s.toApply > 0, 'apply', () => w.toApply(s.toApply), 'decide', 'warning')
   const critic = (await read($, criticAtom))[lens.current]
   add(critic?.status === 'running', 'critic', () => w.criticBusy, 'decide', 'warning')
-  add(critic?.status === 'done' && critic.holes.length > 0 && !critic.isSent, 'holes', () => w.holes(critic!.holes.length), 'decide', 'warning')
+  const { blockers } = holesLeft(critic)
+  add(blockers.length > 0, 'holes', () => w.holes(blockers.length), 'decide', 'warning')
   add(lens.deltas.length > 0, 'changed', () => w.changed, 'changes', 'warning')
   add(s.warnings > 0, 'warnings', () => w.specWarnings(s.warnings), 'spec', 'warning')
   add(s.untested > 0, 'untested', () => w.untested(s.untested), 'tests', 'warning')
@@ -1312,8 +1329,16 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     // The critic agent's last look at the change: what it found, and where that stands.
     const mode = await criticMode($)
     const critic = (await read($, criticAtom))[lens.current]
-    const holes = critic?.status === 'done' && !critic.isSent ? critic.holes : []
+    const { blockers, minors } = holesLeft(critic)
+    const holes = [...blockers, ...minors]
     const sentHoles = critic?.sent ?? []
+    const holeRows = (list: readonly Hole[]) =>
+      list.map(hole => (
+        <Box flexDirection="column" paddingLeft={2}>
+          <Text>{`• ${hole.text}${hole.where ? ` (${hole.where})` : ''}`}</Text>
+          {hole.fix ? <Text dimColor>{`  → ${hole.fix}`}</Text> : null}
+        </Box>
+      ))
     const criticRow =
       mode === 'off' ? (
         <Text dimColor>{w.criticOff}</Text>
@@ -1326,32 +1351,26 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               <Text color="error">{`✗ ${w.criticFailed}`}</Text>
             ) : critic?.status === 'done' && critic.holes.length === 0 ? (
               <Text color="success">{`✓ ${w.criticNone}`}</Text>
-            ) : holes.length > 0 ? (
-              <Text color="warning">{w.criticFound(holes.length)}</Text>
+            ) : critic && isReady(critic) ? (
+              <Text color="success">{`✓ ${w.criticReady}`}</Text>
+            ) : blockers.length > 0 ? (
+              <Text color="warning">{w.criticFound(blockers.length)}</Text>
             ) : null}
-            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'h', once('holes', () => closeHoles($, lens.current)), { variant: 'primary' }) : null}
+            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'h', once('holes', () => closeHoles($, lens.current, true)), { variant: 'primary' }) : null}
             {critic?.status === 'running' ? null : keyed('find-holes', w.findHoles, 'f', once('critic', () => critique($, true)), { dimColor: true })}
           </Box>
-          {holes.map(hole => (
-            <Box flexDirection="column" paddingLeft={2}>
-              <Text>{`• ${hole.text}${hole.where ? ` (${hole.where})` : ''}`}</Text>
-              {hole.fix ? <Text dimColor>{`  → ${hole.fix}`}</Text> : null}
-            </Box>
-          ))}
+          {holeRows(blockers)}
+          {minors.length > 0 ? <Text dimColor>{w.minorHoles}</Text> : null}
+          {holeRows(minors)}
           {critic?.isSent ? <Text color="warning">{`→ ${w.holesSent(critic.round, CRITIC_ROUNDS)}`}</Text> : null}
-          {critic?.isCapped ? <Text dimColor>{w.criticCapped(CRITIC_ROUNDS)}</Text> : null}
+          {critic?.isCapped ? <Text dimColor>{w.criticCapped(CRITIC_ROUNDS)}</Text> : critic && isReady(critic) && mode === 'auto' ? <Text dimColor>{w.criticResting}</Text> : null}
           {sentHoles.length > 0 ? (
             <Box flexDirection="column" marginTop={1}>
               <Text dimColor>{w.sentHoles}</Text>
               {sentHoles.map(r => (
                 <Box flexDirection="column" paddingLeft={2}>
                   <Text bold>{w.round(r.round)}</Text>
-                  {r.holes.map(hole => (
-                    <Box flexDirection="column" paddingLeft={2}>
-                      <Text>{`• ${hole.text}${hole.where ? ` (${hole.where})` : ''}`}</Text>
-                      {hole.fix ? <Text dimColor>{`  → ${hole.fix}`}</Text> : null}
-                    </Box>
-                  ))}
+                  {holeRows(r.holes)}
                 </Box>
               ))}
             </Box>

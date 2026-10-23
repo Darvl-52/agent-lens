@@ -250,13 +250,20 @@ brief, say) waits its turn, and the pane says what comes next.
    five holes at the top of the tab, each with where it shows and how to close it: something the
    change names that is not there, code it will touch and does not mention, its files contradicting
    each other, a requirement no task builds or no case checks, a case the specs leave undefined.
-   `f` sends it to look; `h` sends what it found to the session as your prompt, and Claude closes
-   each hole in the change's files, asking you where only you can decide. In `auto` it also looks
-   after each turn that changed the change's text (a task ticked is not a change), and what it finds
-   goes to Claude by itself, once the turn running has ended with an answer: a turn you stop with
-Esc, or one an error ends, leaves them waiting and starts no critic. Each round is told what was decided and
-   sent before, so it does not report it again; after three rounds in a row it stops, and what the
-   last one changed is yours to look at. The next change to the text starts over. The report the
+   Each hole is a **blocker** (built as the files say, the work goes wrong or a requirement goes
+   unchecked) or **minor** (a detail the code settles without asking anyone, such as an initial
+   value), the way an inspection sorts major and minor defects. `f` sends it to look; `h` sends what
+   it found to the session as your prompt, and Claude takes the holes one at a time: closes each in
+   the change's file where it belongs, asks you where only you can decide (what you leave open goes
+   under Open Questions in `design.md`), or declines it in a line of `design.md` where the code shows
+   the agent is wrong, and ends with a table of what it did. In `auto` it also looks after each turn
+   that changed the change's text (a task ticked is not a change), and the blockers it finds go to
+   Claude by itself, once the turn running has ended with an answer: a turn you stop with Esc, or
+   one an error ends, leaves them waiting and starts no critic. The minor ones stay on the tab for
+   `h`. Each round is told what was decided and sent before, so it does not report it again. Auto
+   mode stops at a look with no blocker (`✓ No blocking holes`), or after three rounds of the change,
+   what the last one changed yours to look at; either way only `f` starts it again, the rounds
+   counted anew. The report the
    engine hands back to the session as the agent ends is kept from Claude: the holes reach it only
    by that prompt, so none is closed twice.
 4. **Tasks.** The tasks of `tasks.md` under their headings, ticked or not. `n` sends the next one to
@@ -301,7 +308,8 @@ ask. The decisions you send with `a` are a turn of the session itself, on its ow
 
 The critic is an agent that reads the code, not one call: from about 100k tokens for a small change
 to 300k for a large one, most of them from the cache. In `auto` mode that is once per version of the
-change's text, and three rounds at most in a row, each followed by Claude's turn closing what it found.
+change's text, and three rounds at most until you press `f`, each followed by Claude's turn closing
+what it found; a look with no blocker ends them sooner.
 
 ## The skill for each prompt
 
@@ -395,7 +403,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit; an edit refused twice in a turn for one rule goes through on the next try, on Findings for you to judge); `off` leaves the rules to the review |
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
-| Critic for the spec         | `off`   | `button`: an agent looks for holes in the change when you press `f` on Decide; `auto`: also after each turn that changes it, and what it finds goes to Claude to close, three rounds in a row at most; `/spec critic` overrides it |
+| Critic for the spec         | `off`   | `button`: an agent looks for holes in the change when you press `f` on Decide; `auto`: also after each turn that changes it, and the blockers it finds go to Claude to close, until a look finds none and three rounds at most, then it waits for `f`; `/spec critic` overrides it |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |
 | Model for routing           | `haiku` | An alias or a full model id                                                                                                                          |
 

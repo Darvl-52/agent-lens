@@ -325,7 +325,8 @@ export const criticPrint = (files: Files) =>
   fingerprintOf(Object.fromEntries(Object.entries(files).map(([path, text]) => [path, /(^|\/)tasks\.md$/.test(path) ? text.replace(/^(\s*[-*]\s+)\[[xX]\]/gm, '$1[ ]') : text])))
 
 // The holes the critic agent reported, from the JSON array its answer ends with, fenced or not, the
-// most serious first and five at most; undefined where it holds no such array.
+// blockers first and five at most; undefined where it holds no such array. A hole that names no
+// severity is a blocker.
 export const parseHoles = (text: string): Hole[] | undefined => {
   const end = text.lastIndexOf(']')
   for (let at = text.indexOf('['); at >= 0 && at < end; at = text.indexOf('[', at + 1)) {
@@ -339,8 +340,9 @@ export const parseHoles = (text: string): Hole[] | undefined => {
     const said = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
     return list
       .filter((h): h is Record<string, unknown> => typeof h === 'object' && h !== null)
-      .map(h => ({ text: said(h.hole), where: said(h.where), fix: said(h.fix) }))
+      .map(h => ({ text: said(h.hole), where: said(h.where), fix: said(h.fix), ...(said(h.severity).toLowerCase() === 'minor' ? { isMinor: true as const } : {}) }))
       .filter(h => h.text !== '')
+      .sort((a, b) => Number(a.isMinor ?? false) - Number(b.isMinor ?? false))
       .slice(0, 5)
   }
   return undefined

@@ -169,13 +169,15 @@ export type SpecAnswer = { question: string; text: string }
 
 // What the model is working on.
 // A hole the critic agent found in a change: what is missing or wrong, where that shows, and how
-// to close it.
-export type SpecHole = { text: string; where: string; fix: string }
+// to close it. `isMinor`: a detail the code can settle, which in auto mode does not go to Claude;
+// `isSent` once it went to Claude to close.
+export type SpecHole = { text: string; where: string; fix: string; isMinor?: true; isSent?: true }
 
 // The critic agent's last look at a change, at the version of its text it read (task ticks aside),
-// started `at`. `round`: how many times in a row its holes went to Claude to close; `isSent` once
-// the last of them went; `isCapped` once the rounds ran out and what the last ones changed was left
-// to the person. `sent`: the holes each round of this run of rounds sent to Claude, the first first.
+// started `at`. `round`: how many times its holes went to Claude to close since the person last
+// asked it to look; `isSent` once the last of them went; `isCapped` once the rounds ran out and what
+// the last ones changed was left to the person. `sent`: the holes each of those rounds sent to
+// Claude, the first first.
 export type SpecCritic = {
   change: string
   fingerprint: string
