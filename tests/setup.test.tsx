@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import { DENY, expand, newRed, parseConfig, permissionIssues, timingIssues } from '../hooks/setup/checks'
-import { checkDocs, parseFindings, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
+import { checkDocs, hasTaskRules, parseFindings, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const MATT = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro', 'diagnosing-bugs', 'code-review']
@@ -523,7 +523,7 @@ test('without Matt’s skills and OpenSpec, how work goes names none of them', a
 test('a project with CI has a job added that runs the same checks; done once the CI names agent-lens', async ($, on) => {
   const files = {
     ...UP_TO_CHECKS,
-    'openspec/config.yaml': 'context: see GLOSSARY.md\n',
+    'openspec/config.yaml': 'context: see GLOSSARY.md\nrules:\n  tasks:\n    - each task names the rules and the lenses it touches\n',
     'CLAUDE.md': 'Read `ARCHITECTURE.md`.\n',
     'docs/agents/workflow.md': '# How work goes\n',
     '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}, "run": null}',
@@ -645,4 +645,124 @@ test('OpenSpec’s config has each task name the rules and the lenses it touches
   await w.setup()
   await w.settle()
   expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*LENSES\.md where it is there[\s\S]*each task names the test seam it is built at, and the rules of CODING_STANDARDS\.md and the lenses it touches/)
+})
+
+test('in any project with OpenSpec, a config whose tasks name no rules or lenses is offered the rule, and let go for good on ×', async ($, on) => {
+  const w = await world($, on, { files: { 'openspec/config.yaml': 'schema: spec-driven\nrules:\n  proposal:\n    - use the glossary\n' } })
+  await w.settle()
+  const band = () =>
+    $.ui.mount({
+      plugin: 'agent-lens',
+      surface: 'terminal',
+      component: 'AbovePrompt' as const,
+      props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+    })
+  const row = await band()
+  expect(await row.find({ type: 'Text', text: /^OpenSpec’s config has the tasks name no rules or lenses of the code/ })).toBeDefined()
+  await row.press({ key: 'add-rules' })
+  await row.unmount()
+  expect(w.submitted.at(-1)).toMatch(/^Add one rule to this project's `openspec\/config\.yaml`[\s\S]*the artifact of the config's schema that writes the tasks[\s\S]*Code not in its layer or its folder; A form not by the project's convention;[\s\S]*Shared code\. Change nothing else/)
+})
+
+test('the rule is looked for under rules alone: a context that names LENSES.md is no rule of the tasks', async ($, on) => {
+  const config = (rules: string) => `schema: spec-driven\ncontext: |\n  LENSES.md holds the lenses; agent-lens reads them.\nrules:\n${rules}`
+  const w = await world($, on, { files: { 'openspec/config.yaml': config('  proposal:\n    - use the glossary\n') } })
+  await w.settle()
+  const band = () =>
+    $.ui.mount({
+      plugin: 'agent-lens',
+      surface: 'terminal',
+      component: 'AbovePrompt' as const,
+      props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+    })
+  const before = await band()
+  expect(await before.find({ type: 'Text', text: /^OpenSpec’s config has the tasks name/ })).toBeDefined()
+  await before.unmount()
+  // A comment that speaks of lenses is no rule.
+  w.disk.set('/proj/openspec/config.yaml', config('  # TODO: the lenses\n  proposal:\n    - use the glossary\n'))
+  await w.turn()
+  await w.settle()
+  const commented = await band()
+  expect(await commented.find({ type: 'Text', text: /^OpenSpec’s config has the tasks name/ })).toBeDefined()
+  await commented.unmount()
+  // Written by hand under rules, past a comment at the line's start, it is found and nothing is offered.
+  w.disk.set('/proj/openspec/config.yaml', config('# the tasks\n  tasks:\n    - each task names the rules and the lenses it touches\n'))
+  await w.turn()
+  await w.settle()
+  const after = await band()
+  expect(await after.find({ type: 'Text', text: /^OpenSpec’s config has the tasks name/ })).toBeUndefined()
+  await after.unmount()
+})
+
+test('in Russian the rule names the lenses as /changes lenses names them; while /setup-project goes, the row does not offer it', async ($, on) => {
+  const w = await world($, on, { files: { ...UP_TO_CHECKS, 'openspec/config.yaml': 'schema: spec-driven\n' } })
+  await w.settle()
+  await $.command.run({ command: 'changes', args: 'lang ru', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const row = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  await row.press({ key: 'add-rules' })
+  await row.unmount()
+  expect(w.submitted.at(-1)).toMatch(/^Добавь одно правило[\s\S]*Код не на своём слое и не в своём каталоге; Форма не по конвенции проекта;/)
+  // A run of /setup-project started: its own step adds the rule, and the row offers it no more.
+  await w.setup()
+  await w.settle()
+  const during = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await during.find({ type: 'Text', text: /^В конфиге OpenSpec задачи не называют/ })).toBeUndefined()
+  await during.unmount()
+})
+
+test('the rule of the tasks turned down with × is not offered again in this project', async ($, on) => {
+  const w = await world($, on, { files: { 'openspec/config.yaml': 'schema: spec-driven\n' } })
+  await w.settle()
+  const row = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  await row.press({ key: 'dismiss-rules' })
+  await row.unmount()
+  expect(w.store.get('setup:rules-dismissed:/proj')).toBe(true)
+  await w.turn()
+  await w.settle()
+  const again = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await again.find({ type: 'Text', text: /^OpenSpec’s config has the tasks name/ })).toBeUndefined()
+  await again.unmount()
+})
+
+test('the rule of the tasks is read under rules as YAML holds it: comments out, quoted and block text kept', () => {
+  const rules = (body: string) => `schema: x\ncontext: |\n  LENSES.md holds the lenses\nrules:\n${body}\nother: 1\n`
+  expect(hasTaskRules(rules('  tasks:\n    - each task names the lenses it touches'))).toBe(true)
+  expect(hasTaskRules(rules('  proposal:\n    - use the glossary'))).toBe(false)
+  // A comment is no rule, wherever it stands; one at the line's start ends no section.
+  expect(hasTaskRules(rules('  # TODO: the lenses\n  proposal:\n    - a rule # of lenses, later'))).toBe(false)
+  expect(hasTaskRules(rules('# the tasks\n  tasks:\n    - names the lenses'))).toBe(true)
+  // A `#` in quotes, or in a block scalar, is text.
+  expect(hasTaskRules(rules("  tasks:\n    - 'see issue #12 about lenses'"))).toBe(true)
+  expect(hasTaskRules(rules('  tasks: |\n    # Lenses: each task names them'))).toBe(true)
+  // The next key of the top level ends it.
+  expect(hasTaskRules('rules:\n  tasks:\n    - x\nnotes: the lenses\n')).toBe(false)
+  expect(hasTaskRules('rules: {tasks: [name the lenses]}\n')).toBe(true)
+  expect(hasTaskRules('schema: x\n')).toBe(false)
+  // The comment on the line of rules itself, an apostrophe of plain text, a block on its own dash, an escaped quote.
+  expect(hasTaskRules('rules: # lens TODO\n  proposal:\n    - x\n')).toBe(false)
+  expect(hasTaskRules(rules("  tasks:\n    - Don't skip tests # see lenses"))).toBe(false)
+  expect(hasTaskRules(rules('  tasks:\n    - |\n      # Lenses each task names'))).toBe(true)
+  expect(hasTaskRules(rules('  tasks:\n    - "a \\"quoted\\" word # and the lenses"'))).toBe(true)
+  expect(hasTaskRules(rules("  tasks:\n    - 'it''s # the lenses'"))).toBe(true)
+  expect(hasTaskRules(rules('  tasks:\n    - a -> b\n    # lenses later'))).toBe(false)
 })

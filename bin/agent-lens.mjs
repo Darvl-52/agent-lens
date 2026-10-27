@@ -420,6 +420,10 @@ ${f.output}`).join(`
 
 `)}`,
   noChecks: "The project has no fast checks in .claude/agent-lens.json: /setup-project writes them.",
+  rulesOffer: "OpenSpec’s config has the tasks name no rules or lenses of the code, so the agent that builds a change meets them only once it broke them: add the rule?",
+  rulesPrompt: (lenses) => `Add one rule to this project's \`openspec/config.yaml\`, as OpenSpec gives the agent that builds a change the rules of the artifacts only while it writes them, and \`tasks.md\` is what it reads as it builds.
+
+Find the artifact of the config's schema that writes the tasks (\`tasks\` in most; \`openspec schemas\` or the schema's file says), and add to its list under \`rules\`, creating the list where there is none and keeping all that is there, in the file's language and form: each task names, by their names, the rules of the code it touches, from the files the project keeps them in (CLAUDE.md, AGENTS.md, CODING_STANDARDS.md, the rule files of its parts: read which there are and name those), and the lenses it touches, from LENSES.md where the project has one, and from these of agent-lens: ${lenses.join("; ")}. Change nothing else. Then run \`openspec validate --all --strict\`, and show me the rule as you wrote it.`,
   baselineKept: (failures) => failures.length === 0 ? "The fast checks are green on this commit: nothing kept as red before the agent." : `Kept as red before the agent on this commit: ${failures.map((f) => f.command).join(", ")}. The gate does not send these back until the commit changes.`,
   judgeTask: "The docs in this turn",
   judgePrompt: (root, edits) => `Read what this turn changed in the files the agent and the person of the project at ${root} work by, and report what should not be there. The files and what each holds:
@@ -616,6 +620,10 @@ ${f.output}`).join(`
 
 `)}`,
   noChecks: "В .claude/agent-lens.json нет быстрых проверок: их пишет /setup-project.",
+  rulesOffer: "В конфиге OpenSpec задачи не называют ни правил кода, ни линз, и агент, который строит change, встречает их, только когда нарушил: дописать правило?",
+  rulesPrompt: (lenses) => `Добавь одно правило в \`openspec/config.yaml\` этого проекта: правила артефактов OpenSpec даёт агенту, который строит change, только пока он их пишет, а \`tasks.md\` — то, что он читает, пока строит.
+
+Найди артефакт схемы конфига, который пишет задачи (\`tasks\` у большинства; скажет \`openspec schemas\` или файл схемы), и добавь в его список под \`rules\` — создай список, если его нет, и сохрани всё, что там есть, на языке и в виде файла: каждая задача называет по именам правила кода, которые задевает, из файлов, где проект их держит (CLAUDE.md, AGENTS.md, CODING_STANDARDS.md, файлы правил его частей: прочитай, какие есть, и назови их), и линзы, которые задевает, — из LENSES.md, если он есть в проекте, и из этих линз agent-lens: ${lenses.join("; ")}. Больше ничего не меняй. Потом запусти \`openspec validate --all --strict\` и покажи мне правило, как ты его записал. Отвечай по-русски.`,
   baselineKept: (failures) => failures.length === 0 ? "Быстрые проверки на этом коммите зелёные: красного до агента не запомнено." : `Запомнено как красное до агента на этом коммите: ${failures.map((f) => f.command).join(", ")}. Гейт не отправляет их назад, пока коммит не сменится.`,
   judgeTask: "Документы в этом ходе",
   judgePrompt: (root, edits) => `Прочитай, что этот ход поменял в файлах, по которым работают агент и человек в проекте ${root}, и сообщи, чему там не место. Файлы и что в каждом:

@@ -48,6 +48,17 @@
       "description": "Also review the branch through your personal lenses, beside the mod's own and the project's LENSES.md",
       "default": false
     },
+    "lenses": {
+      "type": "string",
+      "title": "Lenses",
+      "description": "off: the branch through lenses only on /changes lenses; offer: the row offers it once an OpenSpec change has every task ticked; auto: it runs by itself then, and before the agent pushes commits it has not read, its findings sent to Claude ahead of the push",
+      "default": "offer",
+      "options": [
+        "off",
+        "offer",
+        "auto"
+      ]
+    },
     "specCritic": {
       "type": "string",
       "title": "Critic for the spec",

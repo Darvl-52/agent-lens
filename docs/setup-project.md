@@ -117,7 +117,8 @@ each step:
    to the glossary as they settle.
 3. Tasks: `tdd` at the seams the design names; `diagnosing-bugs` for a bug.
 4. Review: agent-lens on each edit and each turn; once every task is ticked, the branch through the
-   lenses (offered on the row); `code-review` on the whole.
+   lenses (offered on the row, or run by itself in Lenses: auto, which also reads the work before
+   the agent pushes it); `code-review` on the whole.
 5. Archive: terms and decisions moved to `GLOSSARY.md` and the ADRs, checked; then `retro`.
 
 `docs/agents/workflow.md` says this for the project, and the person decides where it says so.
@@ -149,7 +150,8 @@ shows what failed and sends it back to Claude.
    the checks in a line that points to `.claude/agent-lens.json`.
 10. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts, each task
     naming the rules and the lenses it touches, as OpenSpec hands the agent that builds a change no
-    rules of its own.
+    rules of its own. A project with OpenSpec and without that rule, set up or not, is offered it on
+    the row.
 11. A CI job running the check of the docs and the full tier through the CLI.
 
 Run again, it adds to what is there, never writes over it.

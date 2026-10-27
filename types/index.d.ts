@@ -332,6 +332,8 @@ export type LensReview = {
   at: number
   base: string
   asked: string
+  // The commits of the project's repositories when it started: what it read.
+  heads?: string
   agentId?: string
   results: LensResult[]
   outside: string[]
@@ -440,6 +442,9 @@ declare module 'claude-code' {
       'setup.issues': SetupDocIssue[] | null
       'setup.judge': SetupJudge | null
       'setup.gate': SetupGate | null
+      // OpenSpec's config with no rule for each task to name the rules and lenses it touches, offered
+      // to have it added.
+      'setup.rulesOffer': Record<string, never> | null
 
       // The last review of the branch by lenses.
       'lenses.review': LensReview | null

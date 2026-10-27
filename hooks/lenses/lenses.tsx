@@ -4,10 +4,11 @@ import type { EngineInterface, PluginOptions } from 'claude-code'
 import type { LensReview } from '../../types'
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
-import { joinPath } from '../review/diff'
-import { parseLensReport } from './report'
-import { type Catalog, WORDS } from './words'
+import { below, joinPath } from '../review/diff'
+import { parseLensReport, sendsOut } from './report'
+import { type Catalog, type RepoChanges, WORDS } from './words'
 
 // The review of the branch by lenses: the kinds of mistake reviews catch, each looked for across the
 // whole change by an agent that made none of it, its findings shown and sent to Claude on the
@@ -20,6 +21,14 @@ const offerAtom = atom({ plugin: 'agent-lens', key: 'lenses.offer' } as const, n
 // The changes offered the review once, by project: one ticked again after a task reopened is not
 // offered again.
 const offeredKey = (root: string) => `lenses:offered:${root}`
+// The commits of the project's repositories when the lenses last read them, and whether a push held
+// for that read may go once whatever came after it: in `auto` a push of other commits waits for
+// them. Kept across sessions, as the work is.
+const reviewedKey = (root: string) => `lenses:reviewed:${root}`
+type Reviewed = { heads: string; passUntil?: number }
+// How long a push held for the review may go once past the fixes its findings bring: the turn or two
+// that settles them, not the work of the days after.
+const PASS_MS = 2 * 60 * 60_000
 export const PANE = 'agent-lens-lenses'
 // The project's lenses, and the person's, beside the mod's own.
 const LENSES = 'LENSES.md'
@@ -35,12 +44,21 @@ const MODEL = 'sonnet'
 // Where the branch most likely forks from, where the remote names no default.
 const BASES = ['main', 'master', 'develop', 'trunk']
 
-let settings = { includeUserLenses: false }
+// off: the lenses only on /changes lenses; offer: the row offers them once a change's tasks are
+// ticked; auto: they run by themselves then, and before the agent pushes the work.
+type Mode = 'off' | 'offer' | 'auto'
+let settings: { includeUserLenses: boolean; mode: Mode } = { includeUserLenses: false, mode: 'offer' }
+// The review a push waits for, by its agent, or the one starting, whose agent is not known yet: its
+// outcome goes to Claude as the next prompt, and the push with it. Another review's end is no answer
+// to that push.
+const STARTING = '\0starting'
+let pushFor: string | null = null
 // The agents this part started, by id, as long as it runs: their report is the pane's.
 const agents = new Set<string>()
 
 export function configureLenses(options: PluginOptions) {
-  settings = { includeUserLenses: options.includeUserLenses === true }
+  const mode = options.lenses === 'off' || options.lenses === 'auto' ? options.lenses : 'offer'
+  settings = { includeUserLenses: options.includeUserLenses === true, mode }
 }
 
 async function wordsIn($: EngineInterface) {
@@ -64,6 +82,13 @@ async function baseOf($: EngineInterface, root: string, given: string) {
   }
   return null
 }
+
+// One repository looked at: its folder, whether the base given is one of its, and, where it has a
+// base, what changed there since, how the person reads the base, and how many files.
+type Looked = { folder: string; isAsked: boolean } & ({ read?: undefined } | { read: RepoChanges; label: string; count: number })
+
+// A base as the person reads it: by the folder of its repository where it is not the project's own.
+const labelOf = (base: string, folder: string) => (folder === '.' ? base : `${base} (${folder})`)
 
 const lines = (out: string | null) => (out ?? '').split('\n').map(s => s.trim()).filter(Boolean)
 const countOf = (review: Pick<LensReview, 'results' | 'outside'>) => review.results.reduce((n, r) => n + r.findings.length, 0) + review.outside.length
@@ -108,26 +133,56 @@ export async function lensesCommand($: EngineInterface, args: string) {
     return { text: w.running }
   }
   const isOurs = (cur: LensReview | null) => cur?.status === 'running' && cur.at === at && cur.agentId === undefined
-  const stop = async (text: string) => (await update($, reviewAtom, cur => (isOurs(cur) ? was : cur)), { text })
+  // A push waiting on this start is answered: nothing holds it now.
+  const stop = async (text: string) => {
+    await update($, reviewAtom, cur => (isOurs(cur) ? was : cur))
+    if (pushFor === STARTING) {
+      pushFor = null
+      await $.prompt.submit({ text: w.pushFree, asUser: true })
+    }
+    return { text }
+  }
   // A base read as an option of git is none.
   if (given.startsWith('-')) return stop(w.noBase(given))
-  if ((await gitOut($, root, ['rev-parse', '--show-toplevel'])) === null) return stop(w.noRepo)
-  const base = await baseOf($, root, given)
-  if (!base) return stop(w.noBase(given))
-  const changed = lines(await gitOut($, root, ['diff', '--name-only', base]))
-  const untracked = lines(await gitOut($, root, ['ls-files', '--others', '--exclude-standard']))
-  if (changed.length + untracked.length === 0) return stop(w.nothing(base))
-  const named = [...untracked.slice(0, FILES_LIMIT), ...(untracked.length > FILES_LIMIT ? [w.more(untracked.length - FILES_LIMIT)] : [])]
-  const prompt = w.prompt(root, base, changed.length, named, await catalogsOf($, root))
+  // The project's own repository, and each of its own in a top folder, as dev-env keeps its clones:
+  // a branch of the work lives in them as much as in the project's.
+  const isRepo = (await gitOut($, root, ['rev-parse', '--show-toplevel'])) !== null
+  const repos = [...(isRepo ? [root] : []), ...(await nestedRepos($, root))]
+  if (repos.length === 0) return stop(w.noRepo)
+  // A base given is read where it is; elsewhere each repository from where it forks by default. One
+  // with neither is said so, not left out unsaid.
+  const looked = await Promise.all(
+    repos.map(async (repo): Promise<Looked> => {
+      const folder = below(repo, root) ?? '.'
+      const asked = given !== '' ? await baseOf($, repo, given) : null
+      const base = asked ?? (await baseOf($, repo, ''))
+      if (!base) return { folder, isAsked: false }
+      const changed = lines(await gitOut($, repo, ['diff', '--name-only', base]))
+      // A clone in a folder of this repository is listed as a folder git does not know of: no file.
+      const untracked = lines(await gitOut($, repo, ['ls-files', '--others', '--exclude-standard'])).filter(f => !f.endsWith('/'))
+      const named = [...untracked.slice(0, FILES_LIMIT), ...(untracked.length > FILES_LIMIT ? [w.more(untracked.length - FILES_LIMIT)] : [])]
+      return { folder, isAsked: asked !== null, read: { path: repo, base, changed: changed.length, untracked: named }, label: labelOf(base, folder), count: changed.length + untracked.length }
+    }),
+  )
+  if (given !== '' && !looked.some(l => l.isAsked)) return stop(w.noBase(given))
+  const based = looked.flatMap(l => (l.read !== undefined ? [l] : []))
+  if (based.length === 0) return stop(w.noBase(''))
+  const found = based.filter(l => l.count > 0)
+  if (found.length === 0) return stop(w.nothing(based.map(l => l.label).join(', ')))
+  const base = found.map(l => l.label).join(', ')
+  const unread = looked.filter(l => l.read === undefined).map(l => (l.folder === '.' ? w.ownRepo : l.folder))
+  const prompt = w.prompt(root, found.map(l => l.read), await catalogsOf($, root))
   const spawned = await $.agent.spawn({ prompt, description: w.task, subagentType: 'Explore', model: MODEL }).catch(() => undefined)
   const agentId =
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === w.task)?.id : undefined)
   if (!agentId) return stop(w.failedSpawn)
   agents.add(agentId)
-  await update($, reviewAtom, cur => (isOurs(cur) ? { ...running, base, agentId } : cur))
+  const heads = await headsOf($, root)
+  await update($, reviewAtom, cur => (isOurs(cur) ? { ...running, base, agentId, heads } : cur))
+  if (pushFor === STARTING) pushFor = agentId
   await update($, offerAtom, () => null)
   await openPane($)
-  return { text: w.started(changed.length + untracked.length, base) }
+  return { text: `${w.started(found.reduce((n, l) => n + l.count, 0), base)}${unread.length > 0 ? ` ${w.unread(unread)}` : ''}` }
 }
 
 // A subagent's run ended: the review's, its answer is read.
@@ -137,7 +192,58 @@ export async function endLensAgent($: EngineInterface, agentId: string, answer: 
   const report = parseLensReport(answer)
   await update($, reviewAtom, (): LensReview => ({ ...review, status: report ? 'done' : 'failed', results: report?.results ?? [], outside: report?.outside ?? [], untouched: report?.untouched ?? [] }))
   const n = report ? countOf(report) : 0
-  if (n > 0) await $.ui.toast((await wordsIn($)).band(n))
+  const root = await $.session.root()
+  const isForPush = pushFor === agentId
+  if (isForPush) pushFor = null
+  const w = await wordsIn($)
+  // Read, whatever the agent makes of it: the commits it started on push. A push held for it goes
+  // once, for a while, even past the fixes its findings bring, so a review never follows its own
+  // findings round after round; findings the engine dropped earn no such pass. A review that gave no
+  // list holds no push of the commits it was started on.
+  const isSent = isForPush && n > 0 ? await sendFindings($, w.pushAfter) : false
+  const was = (await $.store.get(reviewedKey(root)).catch(() => undefined)) as Reviewed | undefined
+  const at = await $.clock.now()
+  const passUntil = isSent ? at + PASS_MS : was?.passUntil !== undefined && was.passUntil > at ? was.passUntil : undefined
+  if (report || isForPush) await $.store.set(reviewedKey(root), { heads: review.heads ?? (await headsOf($, root)), ...(passUntil ? { passUntil } : {}) } satisfies Reviewed)
+  if (isForPush && n === 0) await $.prompt.submit({ text: report ? w.pushClean : w.pushFailed, asUser: true })
+  if (!isForPush && n > 0) await $.ui.toast(w.band(n))
+}
+
+// The commits of the project's own repository and of each in a top folder, as one string.
+async function headsOf($: EngineInterface, root: string) {
+  const repos = [root, ...(await nestedRepos($, root))]
+  return (await Promise.all(repos.map(async repo => `${repo}@${(await gitOut($, repo, ['rev-parse', 'HEAD'])) ?? ''}`))).join('\n')
+}
+
+// In `auto`, the main loop's push of commits the lenses have not read is refused once, the review
+// started, its outcome sent as the next prompt. The same commits push again freely, a pull request
+// opened after its push among them. A subagent's push goes: its outcome would land on the main loop,
+// which did not push. Where the review cannot run (no repository, no fork point, nothing changed),
+// the push goes; a review gone past its time holds nothing.
+export async function lensesBeforePush($: EngineInterface, command: string, agentId: string | undefined) {
+  if (settings.mode !== 'auto' || agentId !== undefined || !sendsOut(command)) return undefined
+  const root = await $.session.root()
+  const reviewed = (await $.store.get(reviewedKey(root)).catch(() => undefined)) as Reviewed | undefined
+  const heads = await headsOf($, root)
+  const at = await $.clock.now()
+  const isPassed = reviewed?.passUntil !== undefined && reviewed.passUntil > at
+  if (reviewed && (reviewed.heads === heads || isPassed)) {
+    // The pass is spent on the commits it lets out, not on a push of those already read.
+    if (reviewed.heads !== heads) await $.store.set(reviewedKey(root), { heads } satisfies Reviewed)
+    return undefined
+  }
+  const w = await wordsIn($)
+  const was = await read($, reviewAtom)
+  // One running, its agent known or still starting, is waited for: no second review.
+  if (was?.status === 'running' && at - was.at < STALE_MS) {
+    pushFor = was.agentId ?? STARTING
+    return w.pushRunning
+  }
+  await lensesCommand($, 'lenses')
+  const review = await read($, reviewAtom)
+  if (review?.status !== 'running' || review.agentId === undefined) return undefined
+  pushFor = review.agentId
+  return w.pushHeld
 }
 
 // The review's report the engine hands back as it ends is the pane's, not Claude's to read.
@@ -146,22 +252,27 @@ export async function lensReport($: EngineInterface, text: string) {
   return [...agents, ...(kept ? [kept] : [])].some(id => text.includes(id)) ? (await wordsIn($)).task : undefined
 }
 
-async function sendFindings($: EngineInterface) {
+// Whether the findings went to Claude: not where they went before, or the engine dropped them.
+async function sendFindings($: EngineInterface, after = '') {
   const review = await read($, reviewAtom)
-  if (!review || review.status !== 'done' || review.isSent || countOf(review) === 0) return
+  if (!review || review.status !== 'done' || review.isSent || countOf(review) === 0) return false
   await update($, reviewAtom, () => ({ ...review, isSent: true as const }))
-  const r = await $.prompt.submit({ text: (await wordsIn($)).sendText(review.results, review.outside), asUser: true })
+  const r = await $.prompt.submit({ text: `${(await wordsIn($)).sendText(review.results, review.outside)}${after}`, asUser: true })
   if (r.drop !== undefined) await update($, reviewAtom, () => review)
+  return r.drop === undefined
 }
 
 // An OpenSpec change with every task ticked: before its archive, the row offers the branch read
 // through the lenses, once a change, the person's to run. OpenSpec hands the agent that builds a
 // change no rules of the code, so this is the look at the whole of it before it is done.
 export async function offerLenses($: EngineInterface, change: string) {
+  if (settings.mode === 'off') return
   const root = await $.session.root()
   const offered = ((await $.store.get(offeredKey(root)).catch(() => undefined)) ?? []) as string[]
   if (offered.includes(change)) return
   await $.store.set(offeredKey(root), [...offered, change].slice(-50))
+  // In `auto` it runs by itself, its findings on the row as any review's.
+  if (settings.mode === 'auto') return void (await runOffered($))
   await update($, offerAtom, () => ({ change }))
   await $.ui.toast((await wordsIn($)).offer(change))
 }

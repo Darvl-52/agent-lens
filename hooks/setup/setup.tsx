@@ -4,11 +4,16 @@ import type { EngineInterface, Hook, TurnCompleteReason } from 'claude-code'
 import type { Baseline, DocIssue, Finding, Gate, Judge, Run, StepId, StepState } from '../../types/setup'
 import type { PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { WORDS as LENS_WORDS } from '../lenses/words'
 import { below, joinPath, parentOf } from '../review/diff'
 import { diffLines } from '../spec/spec'
 import { baselineOf, CONFIG, DENY, type Exec, fingerprintOf, joinRel, newRed, parseConfig, permissionIssues, runTier, SETTINGS, timingIssues, whereOf } from './checks'
-import { ADR_DIR, type Disk, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
+import { ADR_DIR, type Disk, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
 import { WORDS } from './words'
+
+// The mod's own lenses by their names in a language, as a rule of the tasks names them where the
+// project has no LENSES.md, by the names /changes lenses gives them.
+const lensTitles = (lang: keyof typeof LENS_WORDS) => [...LENS_WORDS[lang].lenses.matchAll(/^\d+\. ([^.]+)\./gm)].map(m => m[1]!)
 
 // /setup-project: prepares a project for work with the agent, one step at a time, each sent to the
 // session once the turn before it has ended, and keeps the files those steps write to their form.
@@ -19,6 +24,11 @@ const issuesAtom = atom({ plugin: 'agent-lens', key: 'setup.issues' } as const, 
 const judgeAtom = atom({ plugin: 'agent-lens', key: 'setup.judge' } as const, null)
 const retroAtom = atom({ plugin: 'agent-lens', key: 'setup.retro' } as const, null)
 const gateAtom = atom({ plugin: 'agent-lens', key: 'setup.gate' } as const, null)
+const rulesOfferAtom = atom({ plugin: 'agent-lens', key: 'setup.rulesOffer' } as const, null)
+const rulesDismissedKey = (root: string) => `setup:rules-dismissed:${root}`
+// The project whose rule went to Claude: not offered again there while Claude is at it; offered
+// again after a /clear where it is still missing.
+let rulesSentIn: string | null = null
 export const PANE = 'agent-lens-setup'
 const runKey = (root: string) => `setup:${root}`
 // What the fast checks were red on, by folder, on the commit they ran on before the agent.
@@ -265,7 +275,10 @@ async function ciTexts($: EngineInterface, root: string) {
 
 async function isWritten($: EngineInterface, root: string, step: StepId) {
   if (step === 'existing') return !(await hasOwnDocs($, root))
-  if (step === 'config') return ((await readRel($, root, 'openspec/config.yaml')) ?? '').includes('GLOSSARY.md')
+  if (step === 'config') {
+    const config = (await readRel($, root, 'openspec/config.yaml')) ?? ''
+    return config.includes('GLOSSARY.md') && hasTaskRules(config)
+  }
   // Written out of its form, the step goes back with what is wrong, as a file of any other step does.
   if (step === 'checks' || step === 'run') {
     const text = await readRel($, root, CONFIG)
@@ -346,6 +359,7 @@ async function advance($: EngineInterface) {
 // A main turn ended with an answer: the step with Claude is done once its files are there and pass
 // the check; where they fail, what failed goes back once, then it waits for the person.
 async function afterTurn($: EngineInterface) {
+  await lookForTaskRules($).catch(() => {})
   const issues = await checkProject($)
   await settleStep($, issues)
   await startJudge($).catch(() => {})
@@ -599,6 +613,42 @@ export async function startSetup($: EngineInterface) {
   await update($, runAtom, () => (kept && steps ? { ...kept, steps } : null))
   await checkProject($).catch(() => {})
   void lookForDrift($).catch(() => {})
+  rulesSentIn = null
+  void lookForTaskRules($).catch(() => {})
+}
+
+// In any project with OpenSpec, set up or not: OpenSpec gives the agent that builds a change the
+// rules of the artifacts only while it writes them, so a config whose tasks do not name the rules
+// and lenses they touch leaves the agent to find them once it broke them. Offered to be added, once
+// it is sent; let go for good where the person says so. A row and no toast: it stands until it is
+// answered, and a toast at every session of a project would be noise. While /setup-project's steps
+// go, its own step adds it.
+async function lookForTaskRules($: EngineInterface) {
+  const root = await $.session.root()
+  const config = await readRel($, root, 'openspec/config.yaml')
+  const isMissing = config !== undefined && config.trim() !== '' && !hasTaskRules(config)
+  if (!isMissing && rulesSentIn === root) rulesSentIn = null
+  const isDismissed = (await $.store.get(rulesDismissedKey(root)).catch(() => undefined)) === true
+  const isOffered = isMissing && !isDismissed && rulesSentIn !== root && !isRunning(await read($, runAtom))
+  await update($, rulesOfferAtom, () => (isOffered ? {} : null))
+}
+
+export async function rulesLine($: EngineInterface) {
+  return (await read($, rulesOfferAtom)) ? (await wordsIn($)).rulesOffer : null
+}
+
+export async function addTaskRules($: EngineInterface) {
+  if (!(await read($, rulesOfferAtom)) || isRunning(await read($, runAtom))) return
+  const lang = await langIn($)
+  const r = await $.prompt.submit({ text: WORDS[lang].rulesPrompt(lensTitles(lang)), asUser: true })
+  if (r.drop !== undefined) return
+  rulesSentIn = await $.session.root()
+  await update($, rulesOfferAtom, () => null)
+}
+
+export async function dismissTaskRules($: EngineInterface) {
+  await $.store.set(rulesDismissedKey(await $.session.root()), true)
+  await update($, rulesOfferAtom, () => null)
 }
 
 async function openPane($: EngineInterface) {
@@ -641,6 +691,8 @@ export async function setupCommand($: EngineInterface, args: string) {
     await keepRun($, run)
   }
   await openSetup($)
+  // The run's own step adds the rule: the row does not offer it beside.
+  await lookForTaskRules($).catch(() => {})
   void advance($).catch(() => {})
   return { text: `${w.ready(found)}\n${w.opened}` }
 }

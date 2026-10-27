@@ -9,6 +9,9 @@ const plural = (n: number, one: string, few: string, many: string) => {
 
 // What the agent is told of the catalogs beside the mod's own: the project's, the person's.
 export type Catalog = { name: string; text: string }
+// What changed in one repository of the project: where it is, from which commit it is read, how many
+// files the diff holds, and the files git does not know of yet, which no diff shows.
+export type RepoChanges = { path: string; base: string; changed: number; untracked: string[] }
 
 const EN = {
   // How to look, whatever the lens: what makes a look a check and not an opinion.
@@ -30,10 +33,12 @@ const EN = {
 11. What is said matches the code. A description, comment, doc or spec this same diff made untrue. Look at: each claim, whether the diff holds it.
 12. Edge cases and states. Empty, long, first and last, quick repeats; a cold cache, an error, an empty answer. Look at: each list and request, its four states.
 13. Shared code. A change to a shared component, hook or helper: every consumer by grep, the default behaviour changed only by a new option.`,
-  prompt: (root: string, base: string, changed: number, untracked: string[], catalogs: Catalog[]): string =>
+  prompt: (root: string, repos: RepoChanges[], catalogs: Catalog[]): string =>
     `Review the changes of the project at ${root} through each lens below. You made none of them: read them as a reviewer who was not there.
 
-The changes: \`git -C ${root} diff ${base}\`, ${changed} ${changed === 1 ? 'file' : 'files'}, what is committed since the base and what is not${untracked.length > 0 ? `, and these files git does not know of yet, which the diff does not show: ${untracked.join(', ')}` : ''}. Read the code around them as much as you need.
+The changes, by repository, each what is committed since its base and what is not:
+${repos.map(r => `- \`git -C ${r.path} diff ${r.base}\`: ${r.changed} ${r.changed === 1 ? 'file' : 'files'}${r.untracked.length > 0 ? `, and these files git does not know of yet, which the diff does not show: ${r.untracked.join(', ')}` : ''}`).join('\n')}
+A finding names its file by its path from ${root}. Read the code around the changes as much as you need.
 
 How to look:
 ${EN.howToLook}
@@ -56,8 +61,18 @@ End your answer with JSON alone: {"lenses": [{"lens": "1. the lens's name", "sta
   noRepo: 'The project is not a git repository: the review by lenses reads a diff.',
   more: (n: number) => `and ${n} more, the list cut here`,
   offer: (change: string) => `"${change}" has every task ticked: read the branch through lenses before the archive?`,
+  // A push held for the lenses, in `auto`: said to the agent, which waits for the next prompt.
+  pushHeld:
+    'agent-lens reads the work through the lenses before it leaves the machine (Lenses: auto), and it has not been read since the last push. The review has started: end your turn now, without pushing. What it finds comes as the next prompt, and the push goes once that is settled.',
+  pushRunning: 'The review by lenses is still reading the work: end your turn now, without pushing. What it finds comes as the next prompt, and the push goes once that is settled.',
+  pushAfter: '\n\nThen push, as you meant to.',
+  pushClean: 'The review of the work by lenses found nothing. Push now, as you meant to.',
+  pushFree: 'The review by lenses could not read the work, so nothing holds the push. Push now, as you meant to.',
+  pushFailed: 'The review by lenses gave no list, so nothing holds the push. Push now, as you meant to.',
   noBase: (given: string) =>
-    given === '' ? 'Where the branch forks from is not found: no origin/HEAD, main, master, develop or trunk. Name the base: /changes lenses <base>.' : `"${given}" is no commit or branch of this repository.`,
+    given === '' ? 'Where the branch forks from is not found: no origin/HEAD, main, master, develop or trunk. Name the base: /changes lenses <base>.' : `"${given}" is no commit or branch of any repository of the project.`,
+  unread: (folders: string[]) => `Left unread, no fork point found: ${folders.join(', ')}.`,
+  ownRepo: 'the project’s own repository',
   failedSpawn: 'The agent of the review by lenses did not start.',
   reading: (base: string) => `◌ Reading the branch against ${base} through each lens…`,
   failed: 'The review by lenses gave no list.',
@@ -96,10 +111,12 @@ const RU: typeof EN = {
 11. Заявленное совпадает с кодом. Описание, комментарий, дока или спека, которые этот же дифф сделал неверными. Смотреть: каждое утверждение — есть ли оно в диффе.
 12. Граничные случаи и состояния. Пустое, длинное, первый и последний элемент, быстрые повторы; холодный кэш, ошибка, пустой ответ. Смотреть: каждый список и запрос — четыре состояния.
 13. Общий код. Правка общего компонента, хука или утилиты — все потребители по grep, поведение по умолчанию меняется только новой опцией.`,
-  prompt: (root, base, changed, untracked, catalogs) =>
+  prompt: (root, repos, catalogs) =>
     `Проверь изменения проекта в ${root} через каждую линзу ниже. Ты их не делал: читай как ревьюер, которого при этом не было.
 
-Изменения: \`git -C ${root} diff ${base}\`, ${changed} ${plural(changed, 'файл', 'файла', 'файлов')}, то, что закоммичено после базы, и то, что нет${untracked.length > 0 ? `, и эти файлы, которых git ещё не знает и которых дифф не покажет: ${untracked.join(', ')}` : ''}. Код вокруг читай сколько нужно.
+Изменения по репозиториям, в каждом — то, что закоммичено после его базы, и то, что нет:
+${repos.map(r => `- \`git -C ${r.path} diff ${r.base}\`: ${r.changed} ${plural(r.changed, 'файл', 'файла', 'файлов')}${r.untracked.length > 0 ? `, и эти файлы, которых git ещё не знает и которых дифф не покажет: ${r.untracked.join(', ')}` : ''}`).join('\n')}
+Файл в находке называй путём от ${root}. Код вокруг изменений читай сколько нужно.
 
 Как смотреть:
 ${RU.howToLook}
@@ -121,8 +138,17 @@ ${catalogs.map(c => `\nЛинзы ${c.name}, вдобавок к ним. Где 
   noRepo: 'Проект не git-репозиторий: ревью по линзам читает дифф.',
   more: n => `и ещё ${n}, список здесь обрезан`,
   offer: change => `В «${change}» отмечены все задачи: прочитать ветку через линзы до архива?`,
+  pushHeld:
+    'agent-lens читает работу через линзы, прежде чем она уйдёт с машины (Lenses: auto), а с прошлого пуша её не читали. Ревью запущено: закончи ход сейчас и не пушь. Что оно найдёт, придёт следующим промптом, и пуш пойдёт, когда это решится. Отвечай по-русски.',
+  pushRunning: 'Ревью по линзам ещё читает работу: закончи ход сейчас и не пушь. Что оно найдёт, придёт следующим промптом, и пуш пойдёт, когда это решится. Отвечай по-русски.',
+  pushAfter: '\n\nПотом запушь, как собирался.',
+  pushClean: 'Ревью работы по линзам ничего не нашло. Пушь, как собирался. Отвечай по-русски.',
+  pushFree: 'Ревью по линзам не смогло прочитать работу, так что пуш ничто не держит. Пушь, как собирался. Отвечай по-русски.',
+  pushFailed: 'Ревью по линзам не дало списка, так что пуш ничто не держит. Пушь, как собирался. Отвечай по-русски.',
   noBase: given =>
-    given === '' ? 'Не нашлось, откуда ответвилась ветка: нет origin/HEAD, main, master, develop и trunk. Назови базу: /changes lenses <база>.' : `«${given}» — не коммит и не ветка этого репозитория.`,
+    given === '' ? 'Не нашлось, откуда ответвилась ветка: нет origin/HEAD, main, master, develop и trunk. Назови базу: /changes lenses <база>.' : `«${given}» — не коммит и не ветка ни одного репозитория проекта.`,
+  unread: folders => `Не прочитано, точка ответвления не найдена: ${folders.join(', ')}.`,
+  ownRepo: 'репозиторий самого проекта',
   failedSpawn: 'Агент ревью по линзам не запустился.',
   reading: base => `◌ Читаю ветку относительно ${base} через каждую линзу…`,
   failed: 'Ревью по линзам не дало списка.',

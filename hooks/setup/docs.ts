@@ -233,3 +233,49 @@ export async function harnessIssues(disk: Disk) {
   }
   return issues
 }
+
+// The `rules` of OpenSpec's config as YAML holds them, its comments taken out: a whole line of one,
+// and one after a value, where the `#` stands outside quotes; the lines of a block scalar (`|`, `>`)
+// are text, a `#` among them too. It ends at the next key of the top level, which no comment is.
+export function rulesSection(config: string) {
+  const lines = config.split(/\r?\n/)
+  const at = lines.findIndex(l => /^rules:/.test(l))
+  if (at < 0) return undefined
+  const out: string[] = []
+  let block: number | null = null
+  for (const [i, line] of lines.slice(at).entries()) {
+    const indent = line.length - line.trimStart().length
+    if (block !== null && (line.trim() === '' || indent > block)) {
+      out.push(line)
+      continue
+    }
+    block = null
+    if (i > 0 && /^[^\s#]/.test(line)) break
+    if (/^\s*#/.test(line)) continue
+    const value = withoutComment(i === 0 ? line.slice('rules:'.length) : line)
+    if (/(^\s*|:\s+|-\s+)[|>][-+0-9]*\s*$/.test(value)) block = indent
+    out.push(value)
+  }
+  return out.join('\n')
+}
+
+// A line of YAML up to its comment: a `#` after a space, outside quotes. A quote opens a scalar only
+// where one starts (after a key, a dash, a bracket, a comma, or at the start), so the apostrophe of
+// plain text opens none; a double-quoted one takes its escapes.
+function withoutComment(line: string) {
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!
+    if (quote === '"' && c === '\\') i++
+    else if (quote === "'" && c === "'" && line[i + 1] === "'") i++
+    else if (quote) quote = c === quote ? null : quote
+    else if ((c === "'" || c === '"') && /(^|[:\-[{,]\s*|^\s*)$/.test(line.slice(0, i))) quote = c
+    else if (c === '#' && (i === 0 || /\s/.test(line[i - 1]!))) return line.slice(0, i)
+  }
+  return line
+}
+
+// A rule that has OpenSpec's tasks name the lenses they touch: told by the word, in whatever language
+// the config is written, under `rules` only, as its `context` names LENSES.md and agent-lens whatever
+// its rules say.
+export const hasTaskRules = (config: string) => /lens|линз/i.test(rulesSection(config) ?? '')

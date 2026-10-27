@@ -42,9 +42,12 @@ those of the mods loaded after agent-lens, so a short band keeps them in view.
   tells Claude to load OpenSpec's own skill for it (`openspec-apply-change` or `opsx:apply`,
   `openspec-archive-change` or `opsx:archive`), where one is installed and not loaded yet, with no
   model asked. The router keeps it among its decisions.
+- **OpenSpec's tasks name the rules.** OpenSpec gives the agent that builds a change the rules of
+  the artifacts only while it writes them. In any project with OpenSpec, set up or not, a config
+  whose tasks name no rules or lenses has the row offer to add the rule; `×` lets it go for good.
 - **A change done is read through the lenses.** Once every task of the change in view is ticked,
-  the row offers `/changes lenses` before the archive, once a change: the look at the whole of it
-  that the review of each turn does not give.
+  the row offers `/changes lenses` before the archive, once a change, or runs it in Lenses: auto:
+  the look at the whole of it that the review of each turn does not give.
 - **The review reads the change in view.** Beside the diff it is told the OpenSpec change in
   progress: its tasks not done yet and what its specs require, each requirement with its
   scenarios. It reports code that goes against a requirement or a scenario, and a task the request
@@ -272,12 +275,13 @@ A rule says what one edit must not do; a lens is a kind of mistake and where to 
 another layer's place, an API wider than its callers need, a fix in create and not in edit, a test
 that would pass without the change. `/changes lenses` reads the branch, from where it forks from the
 remote's default branch (or from a branch or commit you give, `/changes lenses <base>`), with what
-is uncommitted, through each lens. An agent that made none of the changes reports for every lens:
-its findings, each a file and line, what is wrong and what it risks; or clean, with what it checked
-and the numbers; or not applicable. The pane shows them, the row says `lenses: N findings`, and `j`
-sends them to Claude to check against the code, fix what holds and say why the rest does not; a bug
-it finds in code the branch does not touch is shown apart and not sent. `r` reads again; `/changes
-lenses <commit>` reads only what changed since it.
+is uncommitted, through each lens. A repository of its own in a top folder of the project, as
+dev-env keeps its clones, is read too, each from where it forks. An agent that made none of the
+changes reports for every lens: its findings, each a file and line, what is wrong and what it risks;
+or clean, with what it checked and the numbers; or not applicable. The pane shows them, the row says
+`lenses: N findings`, and `j` sends them to Claude to check against the code, fix what holds and say
+why the rest does not; a bug it finds in code the branch does not touch is shown apart and not sent.
+`r` reads again; `/changes lenses <commit>` reads only what changed since it.
 
 The lenses are the mod's own, thirteen kinds in any stack, so it works for anyone. A project adds
 its own in `LENSES.md` at its root, the kinds its reviews catch, 150 lines at most, checked with the
@@ -285,6 +289,15 @@ other files of `/setup-project`. Your own `~/.claude/review-lenses.md` joins the
 settings ask for it: its kinds are of your projects, not this one. Where two name the same kind,
 they are one lens with the examples of both. It reads the branch, not a turn: a look this wide is
 worth its cost before a commit or a merge request.
+
+Run by hand by default. The setting Lenses says when else: `offer` (the default), the row offers the
+review once an OpenSpec change has every task ticked; `auto`, it runs by itself then, and before the
+agent sends out commits the lenses have not read (`git push`, `gh pr create`, `glab mr create`, read
+by their words, quotes and dry runs aside): the push is refused once, the review starts, and its
+findings come to Claude as the next prompt, the push after them. That push goes once even past the
+fixes the findings bring, so the review does not follow its own findings round after round; the same
+commits push again freely, and a subagent's push goes. Where nothing can be read, or a review went
+past its time, the push goes. `off`, only `/changes lenses`.
 
 ### The model and what it costs
 
@@ -557,6 +570,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
 | Include ~/.claude/review-lenses.md | off | Also read the branch through your personal lenses, beside the mod's own and the project's `LENSES.md`                                    |
+| Lenses                      | `offer` | `off`: only `/changes lenses`; `offer`: the row offers them once a change's tasks are ticked; `auto`: they run by themselves then, and before the agent pushes commits they have not read |
 | Critic for the spec         | `off`   | `button`: an agent looks for holes in the change when you press `f` on Decide; `auto`: also after each turn that changes it, and the blockers it finds go to Claude to close, until a look finds none and three rounds at most, then it waits for `f`; `/spec critic` overrides it |
 | Guard over each agent's turn | `on`   | `off`: no limit on any agent's turn, as under The guard; `/changes guard` overrides it                                                               |
 | Guard: minutes per turn     | `60`    | The limit on one turn of an agent, in minutes of its own work; at half it is told to wrap up                                                         |

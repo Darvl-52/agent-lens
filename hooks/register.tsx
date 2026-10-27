@@ -36,8 +36,8 @@ import {
   startRouter,
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
-import { afterSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, gateStop, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
-import { configureLenses, dismissOffer, endLensAgent, lensesCommand, lensesLine, lensReport, offerLine, openPane as openLenses, PANE as LENSES_PANE, pane as lensesPane, runOffered } from './lenses/lenses'
+import { addTaskRules, afterSetupEdit, dismissRetro, dismissTaskRules, endSetupAgent, endSetupTurn, gateStop, judgeReport, retroLine, rulesLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { configureLenses, dismissOffer, endLensAgent, lensesBeforePush, lensesCommand, lensesLine, lensReport, offerLine, openPane as openLenses, PANE as LENSES_PANE, pane as lensesPane, runOffered } from './lenses/lenses'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -167,6 +167,9 @@ export const register: Register = (on, options) => {
     if (held?.deny !== undefined) return { deny: held.deny }
     const refusal = await checkBefore($, e).catch(() => undefined)
     if (refusal !== undefined) return { deny: refusal }
+    // In Lenses: auto, work not read through the lenses since the last push waits for them.
+    const unread = e.tool === 'Bash' ? await lensesBeforePush($, e.command, e.agentId).catch(() => undefined) : undefined
+    if (unread !== undefined) return { deny: unread }
     const ran = await next(e)
     if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) {
       afterSpecEdit($, e.file_path)
@@ -228,6 +231,14 @@ export const register: Register = (on, options) => {
         row('retro-row', <Text color="warning">{retro}</Text>, [
           <Button key="run-retro" label="/retro" plain onPress={() => void runRetro($).catch(() => {})} />,
           <Button key="dismiss-retro" label="×" plain dimColor onPress={() => void dismissRetro($).catch(() => {})} />,
+        ]),
+      )
+    const rules = await rulesLine($).catch(() => null)
+    if (rules)
+      rows.unshift(
+        row('rules-offer-row', <Text color="warning">{rules}</Text>, [
+          <Button key="add-rules" label="add" plain onPress={() => void addTaskRules($).catch(() => {})} />,
+          <Button key="dismiss-rules" label="×" plain dimColor onPress={() => void dismissTaskRules($).catch(() => {})} />,
         ]),
       )
     const offered = await offerLine($).catch(() => null)

@@ -4,6 +4,7 @@ import type { EngineInterface, Hook, MatchedHook, ModelEffort, ModelUsage, Plugi
 import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode, ShellRun, Spent, Tab } from '../../types/review'
 import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
 import { specInView } from '../spec/lens'
 import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
@@ -104,8 +105,6 @@ const REPO_FILES_LIMIT = 300
 // The repository each folder is in, by `git rev-parse`, each path in its one spelling (`canonical`);
 // null outside any.
 const repos = new Map<string, string | null>()
-// So many of the project's top folders looked in for a repository of their own, at most.
-const NESTED_LIMIT = 40
 // A review asked for while one runs: made once that one is done.
 let reviewNext: Diff | undefined
 // The model's context for the last few diffs, by `blocksOf`'s key.
@@ -208,15 +207,6 @@ async function sessionRepos($: EngineInterface) {
     if (repo) found.add(repo)
   }
   return [...found]
-}
-
-// Every repository of its own in a top folder of the project, as dev-env keeps its clones
-// (`__front`, ignored by its own repository): the shell may edit one no tool did. Looked for again
-// each turn, so a clone made since is found.
-async function nestedRepos($: EngineInterface, root: string) {
-  const dirs = (await $.fs.list(root).catch(() => [])).filter(x => x.kind === 'dir' && !x.name.startsWith('.')).slice(0, NESTED_LIMIT)
-  const found = await Promise.all(dirs.map(async d => ((await $.fs.exists(joinPath(root, `${d.name}/.git`)).catch(() => false)) ? joinPath(root, d.name) : null)))
-  return found.filter((d): d is string => d !== null).map(canonical)
 }
 
 // What is uncommitted in every repository the session edited a file in, and in the project's own:

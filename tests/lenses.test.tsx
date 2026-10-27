@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { parseLensReport } from '../hooks/lenses/report'
+import { parseLensReport, sendsOut } from '../hooks/lenses/report'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const REPORT = `Read the branch.
@@ -14,8 +14,8 @@ const REPORT = `Read the branch.
 
 // A repository at /proj on a branch off origin/main, with `files` on its disk and `changed` the
 // files that differ from where it forks.
-const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; changed?: string[]; untracked?: string[]; isRepo?: boolean; noDefault?: boolean; noSpawn?: boolean } = {}) => {
-  mock.clock(on, { now: 1_000_000 })
+const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; changed?: string[]; untracked?: string[]; isRepo?: boolean; noDefault?: boolean; noSpawn?: boolean; clones?: Record<string, string[]>; rootNoBase?: boolean } = {}) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
   mock.env(on, { HOME: '/home/me' })
   const disk = new Map(Object.entries(opts.files ?? {}))
   const store = new Map<string, unknown>()
@@ -23,10 +23,11 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   const submitted: string[] = []
   const opened: string[] = []
   const toasts: string[] = []
+  let head = 'h1'
   on('session.root', () => ({ value: '/proj' }))
-  on('fs.exists', ($, e) => ({ value: disk.has(e.path) }))
+  on('fs.exists', ($, e) => ({ value: disk.has(e.path) || Object.keys(opts.clones ?? {}).some(c => e.path === `/proj/${c}/.git`) }))
   on('fs.read', ($, e) => (disk.has(e.path) ? { value: disk.get(e.path)! } : { deny: 'ENOENT' }))
-  on('fs.list', () => ({ value: [] }))
+  on('fs.list', ($, e) => ({ value: e.path.replace(/\/$/, '') === '/proj' ? Object.keys(opts.clones ?? {}).map(name => ({ name, kind: 'dir' as const, size: 1, mtimeMs: 1, isLink: false })) : [] }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => (store.set(e.key, e.value), { value: undefined }))
   on('store.delete', ($, e) => (store.delete(e.key), { value: undefined }))
@@ -35,16 +36,18 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('command.register', () => ({ value: { command: 'x' } }))
   on('process.run', ($, e) => {
     const args = e.argv[0] === 'git' ? e.argv.slice(e.argv.indexOf('-C') + 2) : []
+    const clone = e.argv[0] === 'git' ? Object.keys(opts.clones ?? {}).find(c => e.argv[e.argv.indexOf('-C') + 1] === `/proj/${c}`) : undefined
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (opts.isRepo === false || e.argv[0] !== 'git') return { value: { exitCode: 128, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') return ok(`${head}\n`)
     if (args[0] === 'rev-parse') return ok('/proj\n')
-    if (args[0] === 'symbolic-ref' && !opts.noDefault) return ok('origin/main\n')
-    if (args[0] === 'merge-base' && args[2] === 'origin/main' && !opts.noDefault) return ok('abc123def4567890\n')
-    if (args[0] === 'merge-base' && args[2] === 'release') return ok('d3ve10fork000000\n')
+    if (args[0] === 'symbolic-ref' && !opts.noDefault && !(opts.rootNoBase && !clone)) return ok('origin/main\n')
+    if (args[0] === 'merge-base' && args[2] === 'origin/main' && !opts.noDefault && !(opts.rootNoBase && !clone)) return ok('abc123def4567890\n')
+    if (args[0] === 'merge-base' && args[2] === 'release' && !clone) return ok('d3ve10fork000000\n')
     // git would take a base like this for an option and answer something: only the guard stops it.
     if (args[0] === 'merge-base' && args[2]?.startsWith('-')) return ok('0pt10n00000000\n')
-    if (args[0] === 'diff' && args.includes('--name-only')) return ok((opts.changed ?? ['src/orders.ts']).join('\n'))
-    if (args[0] === 'ls-files') return ok((opts.untracked ?? []).join('\n'))
+    if (args[0] === 'diff' && args.includes('--name-only')) return ok((clone ? opts.clones![clone]! : (opts.changed ?? ['src/orders.ts'])).join('\n'))
+    if (args[0] === 'ls-files') return ok((clone ? [] : [...(opts.untracked ?? []), ...Object.keys(opts.clones ?? {}).map(c => `${c}/`)]).join('\n'))
     return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('agent.spawn', ($, e) => (opts.noSpawn ? { deny: 'no agents here' } : (spawned.push({ prompt: e.prompt, model: e.model, description: e.description }), { model: e.model ?? 'sonnet' })))
@@ -57,6 +60,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
   })
+  on('tool.call', ($, e) => (e.tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false } } : { deny: 'unexpected' }) as never)
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -64,7 +68,9 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   const changes = (args: string) => $.command.run({ command: 'changes', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
   const agentDone = (agentId: string, answer: string) =>
     $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
-  return { spawned, submitted, opened, toasts, changes, agentDone }
+  const settle = () => clock.advance(10)
+  const commit = (sha: string) => (head = sha)
+  return { clock, spawned, submitted, opened, toasts, changes, agentDone, settle, commit }
 }
 
 test('the answer of the review by lenses is read from the JSON it ends with: a lens with findings is one whatever it says', () => {
@@ -142,10 +148,10 @@ test('outside a git repository the review by lenses says it reads a diff', async
 test('a base given is read from where the branch forks from it; one not there, or none found, is said so', async ($, on) => {
   const w = await world($, on, { noDefault: true, untracked: ['src/new.ts'] })
   expect((await w.changes('lenses')).text).toBe('Where the branch forks from is not found: no origin/HEAD, main, master, develop or trunk. Name the base: /changes lenses <base>.')
-  expect((await w.changes('lenses nope')).text).toBe('"nope" is no commit or branch of this repository.')
+  expect((await w.changes('lenses nope')).text).toBe('"nope" is no commit or branch of any repository of the project.')
   expect((await w.changes('lenses release')).text).toBe('The review by lenses reads 2 files against d3ve10fork00; its findings show on the pane.')
   // The new files are named, as the diff does not show them; the tracked ones are counted.
-  expect(w.spawned[0]!.prompt).toMatch(/git -C \/proj diff d3ve10fork00`, 1 file, [^\n]*these files git does not know of yet, which the diff does not show: src\/new\.ts/)
+  expect(w.spawned[0]!.prompt).toMatch(/git -C \/proj diff d3ve10fork00`: 1 file, and these files git does not know of yet, which the diff does not show: src\/new\.ts/)
 })
 
 test('an answer with no list fails the review; r reads again, from the base it was asked for, and says how it went', async ($, on) => {
@@ -165,11 +171,131 @@ test('an agent that does not start leaves the review as it was, so the next one 
   const w = await world($, on, { noSpawn: true })
   expect((await w.changes('lenses')).text).toBe('The agent of the review by lenses did not start.')
   expect((await w.changes('lenses')).text).toBe('The agent of the review by lenses did not start.')
-  expect((await w.changes('lenses --output=/tmp/x')).text).toBe('"--output=/tmp/x" is no commit or branch of this repository.')
+  expect((await w.changes('lenses --output=/tmp/x')).text).toBe('"--output=/tmp/x" is no commit or branch of any repository of the project.')
 })
 
 test('past 200 new files the list is cut, and the agent is told so', async ($, on) => {
   const w = await world($, on, { untracked: Array.from({ length: 203 }, (_, i) => `n${i}.ts`) })
   await w.changes('lenses')
-  expect(w.spawned[0]!.prompt).toMatch(/n199\.ts, and 3 more, the list cut here\./)
+  expect(w.spawned[0]!.prompt).toMatch(/n199\.ts, and 3 more, the list cut here\n/)
+})
+
+test('a repository of its own in a top folder, as dev-env keeps its clones, is read too, each from where it forks', async ($, on) => {
+  const w = await world($, on, { clones: { __bff: ['src/doors.ts', 'src/codes.ts'], __front: [] } })
+  expect((await w.changes('lenses')).text).toBe('The review by lenses reads 3 files against abc123def456, abc123def456 (__bff); its findings show on the pane.')
+  const prompt = w.spawned[0]!.prompt
+  expect(prompt).toMatch(/- `git -C \/proj diff abc123def456`: 1 file\n- `git -C \/proj\/__bff diff abc123def456`: 2 files\nA finding names its file by its path from \/proj\./)
+  // A clone with nothing changed is not named.
+  expect(prompt).not.toMatch(/__front/)
+})
+
+test('a base given in the project’s own repository and not in a clone: the clone is read from where it forks by default', async ($, on) => {
+  const w = await world($, on, { clones: { __bff: ['src/doors.ts'] } })
+  expect((await w.changes('lenses release')).text).toBe('The review by lenses reads 2 files against d3ve10fork00, abc123def456 (__bff); its findings show on the pane.')
+  // The clone's folder, which the project's own git lists as a folder it does not know, is no new file.
+  expect(w.spawned[0]!.prompt).not.toMatch(/does not show: __bff/)
+})
+
+test('a repository whose fork point is not found is said left unread, the project’s own by name', async ($, on) => {
+  const w = await world($, on, { rootNoBase: true, clones: { __bff: ['src/doors.ts'] } })
+  expect((await w.changes('lenses')).text).toBe('The review by lenses reads 1 file against abc123def456 (__bff); its findings show on the pane. Left unread, no fork point found: the project’s own repository.')
+})
+
+const push = ($: Parameters<TestBody>[0], command = 'git push -u origin feature/x', agentId?: string) =>
+  $.tool.call({ tool: 'Bash', command, ...(agentId ? { agentId } : {}) } as never) as Promise<{ deny?: string }>
+
+test('what sends the work out is read by its words: quotes are text, git’s own options passed over, a dry run sends nothing', () => {
+  expect(sendsOut('git push -u origin feature/x')).toBe(true)
+  expect(sendsOut('git -c core.x=y --no-pager -C "a b" push')).toBe(true)
+  expect(sendsOut('cd __bff && /usr/bin/git push')).toBe(true)
+  expect(sendsOut('gh -R o/r pr create --fill')).toBe(true)
+  expect(sendsOut('glab mr create --squash-before-merge')).toBe(true)
+  expect(sendsOut('git commit -m "fix git push hook"')).toBe(false)
+  expect(sendsOut("echo 'a; git push'")).toBe(false)
+  expect(sendsOut('git push --dry-run')).toBe(false)
+  expect(sendsOut('git push-to-checkout')).toBe(false)
+  expect(sendsOut('gh pr view 1')).toBe(false)
+  // Groups, prefixes and variables before the command are passed over.
+  for (const c of ['(cd x && git push)', '{ git push; }', 'sudo git push', 'sudo -u root git push', 'nice -n 10 git push', 'env -i FOO=1 git push', 'time git push', 'GIT_SSH_COMMAND="ssh -i k" git push', 'git --config-env a=B push', 'if true; then git push; fi'])
+    expect([c, sendsOut(c)]).toEqual([c, true])
+  // Text of a heredoc, of a log, of a search is no push.
+  for (const c of ['cat <<EOF > notes.md\ngit push\nEOF', "cat <<'EOF'\ngh pr create\nEOF\necho ok", 'git log --grep push', 'grep -r "git push" .', 'npm run push', 'git stash push'])
+    expect([c, sendsOut(c)]).toEqual([c, false])
+})
+
+test('Lenses: auto holds a push of commits the lenses have not read: the review starts, its findings come next, then the push goes once', { options: { lenses: 'auto' } }, async ($, on) => {
+  const w = await world($, on)
+  expect((await push($)).deny).toMatch(/^agent-lens reads the work through the lenses before it leaves the machine \(Lenses: auto\)/)
+  expect(w.spawned).toHaveLength(1)
+  // Asked again while it reads: held, no second review.
+  expect((await push($, 'gh pr create --fill')).deny).toMatch(/^The review by lenses is still reading the work/)
+  expect(w.spawned).toHaveLength(1)
+  await w.agentDone('lenses-1', REPORT)
+  await w.settle()
+  expect(w.submitted.at(-1)).toMatch(/^The review of the branch by lenses found these\.[\s\S]*Then push, as you meant to\.$/)
+  // The fixes are a commit of their own: the push it held goes once all the same, not into another round.
+  w.commit('h2')
+  expect((await push($)).deny).toBeUndefined()
+  // The same commits go again freely, the pull request after the push among them, and spend nothing.
+  expect((await push($, 'gh pr create --fill')).deny).toBeUndefined()
+  expect((await push($)).deny).toBeUndefined()
+  // Work of later commits is read before its push.
+  w.commit('h3')
+  expect((await push($)).deny).toMatch(/^agent-lens reads the work/)
+  expect(w.spawned).toHaveLength(2)
+})
+
+test('Lenses: auto lets a subagent’s push go, and a review gone past its time holds nothing', { options: { lenses: 'auto' } }, async ($, on) => {
+  const w = await world($, on)
+  expect((await push($, 'git push', 'sub-1')).deny).toBeUndefined()
+  expect(w.spawned).toHaveLength(0)
+  await w.changes('lenses')
+  await w.clock.advance(31 * 60_000)
+  expect((await push($)).deny).toMatch(/^agent-lens reads the work/)
+  expect(w.spawned).toHaveLength(2)
+})
+
+test('Lenses: auto, a review that finds nothing sends the push on, and one that gave no list holds it no more', { options: { lenses: 'auto' } }, async ($, on) => {
+  const w = await world($, on)
+  await push($)
+  await w.agentDone('lenses-1', '{"lenses": [{"lens": "1. Layer", "status": "clean", "checked": "2 files", "findings": []}], "outside": []}')
+  await w.settle()
+  expect(w.submitted.at(-1)).toBe('The review of the work by lenses found nothing. Push now, as you meant to.')
+  expect((await push($)).deny).toBeUndefined()
+  w.commit('h2')
+  await push($)
+  await w.agentDone('lenses-2', 'No list.')
+  await w.settle()
+  expect(w.submitted.at(-1)).toBe('The review by lenses gave no list, so nothing holds the push. Push now, as you meant to.')
+  expect((await push($)).deny).toBeUndefined()
+})
+
+test('Lenses: offer leaves a push alone', async ($, on) => {
+  const w = await world($, on)
+  expect((await push($)).deny).toBeUndefined()
+  expect(w.spawned).toHaveLength(0)
+})
+
+test('Lenses: auto, where nothing changed there is nothing to read and the push goes', { options: { lenses: 'auto' } }, async ($, on) => {
+  const w = await world($, on, { changed: [] })
+  expect((await push($)).deny).toBeUndefined()
+  expect(w.spawned).toHaveLength(0)
+})
+
+test('Lenses: auto, the commits a review read are those it started on; a review by hand keeps the pass a held push was given', { options: { lenses: 'auto' } }, async ($, on) => {
+  const w = await world($, on)
+  await push($)
+  // A commit made while the review reads is not among what it read.
+  w.commit('h2')
+  await w.agentDone('lenses-1', '{"lenses": [{"lens": "1. Layer", "status": "clean", "checked": "1 file", "findings": []}], "outside": []}')
+  await w.settle()
+  expect((await push($)).deny).toMatch(/^agent-lens reads the work/)
+  await w.agentDone('lenses-2', REPORT)
+  await w.settle()
+  // A review by hand before the push does not take the pass back.
+  w.commit('h3')
+  await w.changes('lenses')
+  await w.agentDone('lenses-3', REPORT)
+  await w.settle()
+  expect((await push($)).deny).toBeUndefined()
 })
