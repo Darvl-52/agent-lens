@@ -37,6 +37,7 @@ One fact lives in one file. Each file has one job and a size it may not pass.
 | `openspec/config.yaml` | `context`: pointers to the files above; `rules`: per artifact             | Copies of their text                      |             |
 | `.claude/agent-lens.json` | The checks in two tiers, by folder where the project has parts; how it is brought up and tried | The commands copied as text into `CLAUDE.md` or CI | |
 | `.claude/settings.json` | What the agent may run, and what it may not: what cannot be taken back, the project's secrets | | |
+| `.claude/lessons.json` (next) | The cases of the agent's mistakes with their fixes, and each kind's rule or refusal | What the rule says: that is in its file | |
 
 `CLAUDE.md` is read into every agent's context, so it stays small and points. The standards are
 read at review: agent-lens checks each edit against `CODING_STANDARDS.md` beside `CLAUDE.md`.
@@ -157,6 +158,54 @@ a piece moves rather than being copied, and the steps after it write only what i
 Nothing moves without the person's yes. Matt's skills read the glossary as `GLOSSARY.md`; one kept
 under the name they used before, `CONTEXT.md`, is renamed, as the check flags it until it is.
 
+## Lessons: what the agent's own mistakes teach (next)
+
+Today a mistake the agent fixes leaves nothing behind: the gate goes green, the finding is closed, and
+the same kind of mistake is made again next week, in another file, and found again from nothing. A
+lesson is that mistake kept: shown to an agent that did not make it, put to the person, written where
+the project's knowledge of its code lives, and then looked for in the rest of the code. A rule of the
+fix is tried on the few cases first, then on all of them.
+
+What a lesson teaches is a rule, and a rule has a home already: a judgement goes to
+`CODING_STANDARDS.md`, a mechanical one to the linter, a term to `GLOSSARY.md`. The cases it came
+from are kept apart, in `.claude/lessons.json`, committed with the project: the team sees what the
+agent got wrong and what it was taught, and a colleague's agent does not learn it again. The file
+holds cases and nothing a rule says. It is checked as the other files are, held to its form and
+its size: once a rule is written, its cases are cut to the few that show it, and a kind turned down
+keeps only its name.
+
+1. **Kept.** A case is a mistake with its fix, each taken where the mod sees both:
+   - the gate: a check red at a turn's end, green by the end of its rounds, with the diff between;
+   - the review: a finding Claude fixed, with the hunk that fixed it;
+   - the check of each edit: a rule of `CODING_STANDARDS.md` broken again, with what broke it. This
+     teaches no new rule; it says the rule is unclear, or belongs to the linter.
+   A red that was not of the agent's changes, one let go, and a fix that weakened a check or a test
+   are not cases. A subagent's mistakes count as the main loop's: the gate and the review see them
+   alike. The person's own corrections in a prompt are not taken, as they cannot be told from a new
+   request. Cases are grouped by their kind, a small model naming it, and a kind becomes a
+   candidate once it is seen twice, or once the person marks a single case.
+2. **Judged.** An agent that made none of them (Explore, as the docs agent) reads the cases against
+   the code and answers for each candidate:
+   - whether the fixes were right, not merely green: a fix that bent a test teaches the wrong rule;
+   - the rule, in the form of `CODING_STANDARDS.md` (what, why, where it shows, what checks it), and
+     its home: the linter with the rule's config and a test of its own where a tool can check it;
+   - whether the rule is already written, in its file or the linter's config, and then which.
+   What it cannot settle from the code it says, and the candidate waits.
+3. **Put to the person.** A tab of the pane shows each candidate: the cases, the fixes, how often,
+   the rule and its home. Taken, it is written there, and the docs agent reads the edit as any
+   other. Edited, it is written as edited. Turned down, its kind is not offered again. Nothing is
+   written without this, so it is the fifth of the known ways the files change.
+4. **Looked for in the rest of the code.** A rule written, the code that already breaks it is found:
+   the linter run on the whole project for a linter rule; for a rule of the review, an agent
+   sweeping the code it names. What it finds is a list, `file:line` and why, never an edit: the
+   person sends it as a task, makes an issue of it, or lets it be.
+5. **Kept true.** Each rule from a lesson keeps its cases and how often the review has cited it.
+   A kind seen again after its rule says the rule does not hold, and is shown so. A rule never cited
+   in months goes to the drift check, as a term no code uses does.
+
+What a lesson does not catch: a mistake neither the gate nor the review sees. The checks the agent is
+not shown, held out of the gate as tests are held out of a migration, are their own stage.
+
 ## Stages
 
 1. Done: `/setup-project`, the check of what is installed, the steps in a pane, the checks without a model.
@@ -165,3 +214,5 @@ under the name they used before, `CONTEXT.md`, is renamed, as the check flags it
    `retro` offered once the change is archived.
 4. Done: any project: what is installed recommended, not required; the checks, the gate on them,
    bringing it up, permissions, CI.
+5. Next: lessons, as above: the cases kept, judged by an agent that made none of them, put to the
+   person, looked for in the rest of the code, kept true.
