@@ -6,7 +6,8 @@ A Claude Code mod for working with the agent, in three parts that know of each o
   `AGENTS.md` as Claude makes it, and Claude is told what it broke before it moves on. After each
   turn that edits files, the diff across every repository it touched is reviewed against what you
   asked for and the same rules. `/changes` opens the diff, what each piece is for, the findings
-  and a walkthrough.
+  and a walkthrough. Before a commit, `/changes lenses` reads the whole branch through the kinds
+  of mistake reviews catch, in an agent that made none of it.
 - **The OpenSpec change.** In a project with `openspec/changes`, `/spec` gives the change's gist,
   what changed since you last looked, what is left for you to decide, its tasks and its spec, and
   answers questions about it.
@@ -16,8 +17,10 @@ A Claude Code mod for working with the agent, in three parts that know of each o
 - **The guard.** No agent works a turn on forever: a call repeated with nothing changing is
   refused, an agent long at it is told to wrap up, and past the limit it is stopped and reports
   what it did. `/changes guard` says the limits.
-- **Setting a project up.** `/setup-project` prepares any project for work with the agent, a step at
-  a time, and keeps the files it writes from rotting: each is checked like code.
+- **Setting a project up.** `/setup-project` prepares any project for work with the agent, whatever
+  its stack, a step at a time, and keeps the files it writes from rotting: each is checked like code.
+  The project's checks run at the end of each turn that changed it, and a turn that leaves them red
+  goes back to Claude.
 
 It was four mods: review-lens, rules-watchdog, openspec-lens and skill-router.
 
@@ -39,6 +42,9 @@ those of the mods loaded after agent-lens, so a short band keeps them in view.
   tells Claude to load OpenSpec's own skill for it (`openspec-apply-change` or `opsx:apply`,
   `openspec-archive-change` or `opsx:archive`), where one is installed and not loaded yet, with no
   model asked. The router keeps it among its decisions.
+- **A change done is read through the lenses.** Once every task of the change in view is ticked,
+  the row offers `/changes lenses` before the archive, once a change: the look at the whole of it
+  that the review of each turn does not give.
 - **The review reads the change in view.** Beside the diff it is told the OpenSpec change in
   progress: its tasks not done yet and what its specs require, each requirement with its
   scenarios. It reports code that goes against a requirement or a scenario, and a task the request
@@ -49,9 +55,10 @@ those of the mods loaded after agent-lens, so a short band keeps them in view.
 
 ## Setting a project up
 
-`/setup-project` needs Matt Pocock's skills (`mattpocock-skills`) and the OpenSpec CLI: missing,
-it says how to install them and does not run; found, it says so in a line. Then the steps go to
-Claude one at a time, each once the turn before has ended, in a pane that shows where each stands:
+`/setup-project` works in any project. Matt Pocock's skills (`mattpocock-skills`), the OpenSpec CLI
+and a CI are recommended, not required: it says in a line what it found and how to install what is
+missing, and leaves out the steps that need it. Then the steps go to Claude one at a time, each once
+the turn before has ended, in a pane that shows where each stands:
 
 1. Matt's `setup-matt-pocock-skills`, run as if you typed it: the tracker, the labels, the domain layout.
 2. `openspec init --tools claude`, run by the mod, where the project has no `openspec/`.
@@ -65,12 +72,27 @@ Claude one at a time, each once the turn before has ended, in a pane that shows 
    rule (a banned API, an import's shape, where a file lives) goes to the project's linter, as a
    tool checks it better than prose; a judgement goes to `CODING_STANDARDS.md`. Each says what, why
    (the mistake it prevents), where it shows, and what checks it (`eslint: <rule>` or `review`).
-6. `docs/agents/workflow.md`: how work goes (OpenSpec for the changes, Matt's skills at each step),
+6. The checks, read from the project's own scripts and put to you, in `.claude/agent-lens.json`:
+   `fast` for the end of each turn (lint, types, the tests of the changed files, `{files}` where a
+   command takes them) and `full` for before a commit, push or merge; by folder in a monorepo. The
+   mod runs the fast tier once: a command that does not start or is too slow goes back, and what is
+   red is kept as red before the agent.
+7. Bringing it up: the commands that bring the project up, try its main path and take it down, or
+   nothing for a library; a smoke test proposed where there is none.
+8. What the agent may run, in `.claude/settings.json`: denied always the usual forms of what cannot
+   be taken back (`git push --force`, `git reset --hard`, `git clean -f`, `rm -rf`; by prefix, so a
+   rail against the slip, not a sandbox), the project's secrets and
+   deploys on your word, the commands of the checks allowed.
+9. `docs/agents/workflow.md`: how work goes (OpenSpec and Matt's skills where they are installed),
    when a task is done here, and how the work is shared between the main agent and its subagents.
    And `CLAUDE.md`: the language you are spoken to in first, pointers to the files (`GLOSSARY.md`
-   imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in
-   two tiers (what the change touches while working, everything before a commit or push).
-7. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them.
+   imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in a
+   line that points to `.claude/agent-lens.json`.
+10. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them,
+    and each task names the rules of `CODING_STANDARDS.md` and the lenses it touches: OpenSpec gives
+    the agent the rules of the artifacts only while it writes them, and `tasks.md` is what it reads
+    as it builds.
+11. A job in the project's CI that runs the check of the docs and the full tier, as under The gate.
 
 A step is done once its files are there and pass the check; where they fail, what failed goes back
 to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). Run
@@ -93,6 +115,29 @@ spec critic's is.
 
 It is told the lines each file gained and lost, not both sides whole, and reads the rest itself; while
 `/setup-project`'s steps go it waits, and reads what they all wrote once, at the run's end.
+
+### The gate
+
+At the end of a main turn that changed the project, through a tool or, in a git repository, the
+shell, the fast tier of `.claude/agent-lens.json` runs. What is red goes back to Claude with the
+tail of its output, and the same turn goes on to fix it: three rounds at most, then the turn ends
+and the row says `checks: 1 red`. A turn sent back that changes nothing has said the red is not of
+its changes: it is let go then, not sent back again for the same red. Where no classic Stop hook
+runs, it goes as the next prompt. What was red on the same commit before the agent is not sent
+back: the step of the checks keeps it when it first runs them, and `/setup-project baseline` keeps
+it again once you say so; on another commit, or with none kept, Claude is told the red may be older
+than its changes. The review's notes wait while the gate keeps the turn going. A project with
+`.claude/agent-lens.json` has the gate, set up or not; while `/setup-project`'s steps go, it waits.
+
+The same file runs in CI, for everyone, the colleague with no mod included:
+
+```sh
+npx -y github:Darvl-52/agent-lens check          # the check of the docs
+npx -y github:Darvl-52/agent-lens checks full    # the full tier
+```
+
+Each exits 1 on what failed; Node 20 or later. `checks fast` runs the fast tier too, but on a clean
+tree, as in CI, a command that takes the changed files has none, and says it did not run.
 
 While a check fails, or the agent's blockers wait, the row above the prompt says `docs: 2 issues`;
 `/setup-project check` lists them. Why each file holds what it holds, and what comes next, is in
@@ -220,6 +265,26 @@ its folder and of every folder above it, up to the project folder (for `__front/
 `__front/src/`, `__front/` and the project's own), then those Claude Code read at the start from
 the folders above the project, each with its `@` imports. Your own `~/.claude/CLAUDE.md` only where
 the settings ask for it. Each is read up to 16k characters, all of them up to 48k.
+
+### The branch through lenses
+
+A rule says what one edit must not do; a lens is a kind of mistake and where to look for it: code in
+another layer's place, an API wider than its callers need, a fix in create and not in edit, a test
+that would pass without the change. `/changes lenses` reads the branch, from where it forks from the
+remote's default branch (or from a branch or commit you give, `/changes lenses <base>`), with what
+is uncommitted, through each lens. An agent that made none of the changes reports for every lens:
+its findings, each a file and line, what is wrong and what it risks; or clean, with what it checked
+and the numbers; or not applicable. The pane shows them, the row says `lenses: N findings`, and `j`
+sends them to Claude to check against the code, fix what holds and say why the rest does not; a bug
+it finds in code the branch does not touch is shown apart and not sent. `r` reads again; `/changes
+lenses <commit>` reads only what changed since it.
+
+The lenses are the mod's own, thirteen kinds in any stack, so it works for anyone. A project adds
+its own in `LENSES.md` at its root, the kinds its reviews catch, 150 lines at most, checked with the
+other files of `/setup-project`. Your own `~/.claude/review-lenses.md` joins them only where the
+settings ask for it: its kinds are of your projects, not this one. Where two name the same kind,
+they are one lens with the examples of both. It reads the branch, not a turn: a look this wide is
+worth its cost before a commit or a merge request.
 
 ### The model and what it costs
 
@@ -468,9 +533,11 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | -------------------------- | -------------------------------------------------------------------- |
 | `/changes`                 | Open the review of what the agent changed.                           |
 | `/changes rules`           | How edits are checked, and the rule files that apply.               |
+| `/changes lenses [base]`   | Read the branch through each lens, as under The branch through lenses. |
 | `/changes guard [on\|off\|<minutes> <steps>]` | The limits on each agent's turn and what runs now; sets them, as under The guard. |
 | `/setup-project`           | Prepare the project for work with the agent, as under Setting a project up. |
 | `/setup-project check`     | The check of the files it writes.                                    |
+| `/setup-project baseline`  | Run the fast checks and keep what is red as red before the agent on this commit. |
 | `/spec`                    | Open the pane on the OpenSpec change in view.                        |
 | `/spec <change>`           | Pick another active change and open the pane on it.                  |
 | `/spec critic off\|button\|auto` | Whether an agent looks for holes in the change, as under Decide.  |
@@ -489,6 +556,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Rules while Claude edits    | `warn`  | `warn` checks each edit beside the turn and tells Claude; `block` checks it before it lands and refuses it (a few seconds on every edit; an edit refused twice in a turn for one rule goes through on the next try, on Findings for you to judge); `off` leaves the rules to the review |
 | Model for the edit check    | `haiku` | An alias or a full model id                                                                                                                          |
 | Include ~/.claude/CLAUDE.md | off     | Also check edits and reviews against your personal `CLAUDE.md`                                                                                       |
+| Include ~/.claude/review-lenses.md | off | Also read the branch through your personal lenses, beside the mod's own and the project's `LENSES.md`                                    |
 | Critic for the spec         | `off`   | `button`: an agent looks for holes in the change when you press `f` on Decide; `auto`: also after each turn that changes it, and the blockers it finds go to Claude to close, until a look finds none and three rounds at most, then it waits for `f`; `/spec critic` overrides it |
 | Guard over each agent's turn | `on`   | `off`: no limit on any agent's turn, as under The guard; `/changes guard` overrides it                                                               |
 | Guard: minutes per turn     | `60`    | The limit on one turn of an agent, in minutes of its own work; at half it is told to wrap up                                                         |
@@ -542,6 +610,10 @@ claude plugin validate .
 claude plugin test .
 claude --plugin-dir .
 ```
+
+After an edit to `bin/cli.mjs` or what it imports (`hooks/setup/checks.ts`, `docs.ts`, `words.ts`),
+`bun run build` bundles the CLI again into `bin/agent-lens.mjs`, which is committed: npx runs it.
+A release bumps the version in `package.json` with `plugin.json` and `marketplace.json`.
 
 `hooks/register.tsx` registers every hook; each part lives in its own folder under `hooks/`
 (`review`, `spec`, `router`), what they share under `hooks/core`.

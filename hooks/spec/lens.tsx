@@ -5,6 +5,7 @@ import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Hole, Lens, Ove
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { sentWithSkill, specSkill, tddSkill } from '../router/catalog'
+import { offerLenses } from '../lenses/lenses'
 import { isSetUp, offerRetro } from '../setup/setup'
 import {
   annotateRequirements,
@@ -959,6 +960,9 @@ async function closeHoles($: EngineInterface, change: string, isAll: boolean) {
 async function afterTurn($: EngineInterface, isAnswered: boolean) {
   await scan($)
   await afterArchive($).catch(() => {})
+  // Every task ticked: the branch is offered a look through the lenses before the archive.
+  const scanned = await read($, lensAtom)
+  if (scanned && scanned.tasks.total > 0 && scanned.tasks.done === scanned.tasks.total) await offerLenses($, scanned.current).catch(() => {})
   if (isAnswered) {
     const waiting = holesWaiting
     holesWaiting = undefined

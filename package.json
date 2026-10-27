@@ -1,0 +1,20 @@
+{
+  "name": "agent-lens",
+  "version": "0.11.0",
+  "private": true,
+  "description": "The checks of agent-lens for CI: the docs /setup-project writes, and the tiers of .claude/agent-lens.json.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "agent-lens": "bin/agent-lens.mjs"
+  },
+  "files": [
+    "bin/agent-lens.mjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "bun build bin/cli.mjs --target=node --format=esm --outfile bin/agent-lens.mjs"
+  }
+}

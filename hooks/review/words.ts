@@ -16,7 +16,7 @@ const plural = (n: number, one: string, few: string, many: string) => {
 // Every word the mod shows, and what it asks the model, in English and Russian. English is the
 // default; `/changes lang ru` switches both, kept for every session.
 const EN = {
-  description: 'Review what the agent changed: the diff, what each piece is for, what looks wrong, a walkthrough; rules: the CLAUDE.md in force; guard: the limits on each agent’s turn; lang: en or ru',
+  description: 'Review what the agent changed: the diff, what each piece is for, what looks wrong, a walkthrough; rules: the CLAUDE.md in force; guard: the limits on each agent’s turn; lenses: the branch read through each lens; lang: en or ru',
   title: 'Review',
   opened: 'Opened the review.',
   nothing: 'Nothing to review yet: Claude has not edited a file in this session.',
@@ -137,7 +137,7 @@ const EN = {
 }
 
 const RU: typeof EN = {
-  description: 'Посмотреть, что изменил агент: дифф, зачем каждый кусок, что выглядит неверно, разбор; rules: какие CLAUDE.md действуют; guard: пределы на ход каждого агента; lang: en или ru',
+  description: 'Посмотреть, что изменил агент: дифф, зачем каждый кусок, что выглядит неверно, разбор; rules: какие CLAUDE.md действуют; guard: пределы на ход каждого агента; lenses: ветка через каждую линзу; lang: en или ru',
   title: 'Ревью',
   opened: 'Открыто ревью.',
   nothing: 'Смотреть пока нечего: в этой сессии Claude ещё не правил файлы.',
