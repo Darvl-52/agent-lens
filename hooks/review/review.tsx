@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Hook, MatchedHook, ModelEffort, ModelUsage, PluginOptions, ToolCallResult } from 'claude-code'
 
 import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode, ShellRun, Spent, Tab } from '../../types/review'
-import type { AbovePromptEvent, PaneHook } from '../core/hooks'
+import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { specInView } from '../spec/lens'
 import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
@@ -1130,7 +1130,7 @@ export async function endReviewTurn($: EngineInterface, agentId: string | undefi
 // Where classic hooks run, they keep the same turn going instead of starting a new one.
 // A stop already kept going once, or kept going by another hook, carries no notes: they wait for the
 // loop's next tool result, or, a subagent let go, for the main loop.
-export async function classicStop($: Parameters<Hook<'classic.Stop'>>[0], e: Parameters<Hook<'classic.Stop'>>[1], next: Parameters<Hook<'classic.Stop'>>[2]) {
+export async function classicStop($: Parameters<Hook<'classic.Stop'>>[0], e: Parameters<Hook<'classic.Stop'>>[1], next: StopNext) {
   stopped.add(MAIN)
   const delivered = await settle($, MAIN)
   const result = await next(e)

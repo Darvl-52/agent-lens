@@ -1,4 +1,5 @@
 import type { DocIssue, Finding } from '../../types/setup'
+import { CONFIG, DENY, parseConfig, permissionIssues, SETTINGS } from './checks'
 
 // The files the agent and the person both work by, each with one job and a size it may not pass:
 // the check of them, as `openspec validate --strict` checks a change. No model is asked.
@@ -188,4 +189,46 @@ export const parseFindings = (answer: string): Finding[] | undefined => {
       .slice(0, 8)
   }
   return undefined
+}
+
+// The project's files as the check reads them, by their path from the root: the engine's in the
+// mod, the disk's in the CLI.
+export type Disk = {
+  read: (rel: string) => Promise<string | undefined>
+  exists: (rel: string) => Promise<boolean>
+  list: (rel: string) => Promise<{ name: string; kind: 'file' | 'dir' }[]>
+}
+
+// The files the check reads: those named, the glossaries the map links, the ADRs.
+export async function readDocs(disk: Disk) {
+  const files: Record<string, string> = {}
+  const take = async (rel: string) => {
+    const text = await disk.read(rel)
+    if (text !== undefined) files[rel] = text
+  }
+  await Promise.all(DOC_FILES.map(take))
+  if (files['GLOSSARY-MAP.md']) await Promise.all(mappedGlossaries(files['GLOSSARY-MAP.md']).map(take))
+  const adrs = await disk.list(ADR_DIR)
+  await Promise.all(adrs.filter(f => f.kind === 'file' && f.name.endsWith('.md')).map(f => take(`${ADR_DIR}/${f.name}`)))
+  return files
+}
+
+export async function issuesIn(disk: Disk) {
+  const files = await readDocs(disk)
+  // Missing: not there, where it claims the project's own folder.
+  const named = pathsNamed(files)
+  const missing = await Promise.all(named.map(async p => !(await disk.exists(p)) && (!p.includes('/') || (await disk.exists(firstOf(p))))))
+  return [...checkDocs(files, new Set(named.filter((_, i) => missing[i]))), ...(await harnessIssues(disk))]
+}
+
+// The checks' file out of its form; the settings missing a rule of those every project gets, once
+// they hold one of them: a settings file the permissions step has not reached is the project's.
+export async function harnessIssues(disk: Disk) {
+  const [config, settings] = await Promise.all([disk.read(CONFIG), disk.read(SETTINGS)])
+  const issues = config === undefined ? [] : parseConfig(config).issues
+  if (settings !== undefined) {
+    const found = permissionIssues(settings)
+    if (found.some(i => i.kind === 'permissions-shape') || DENY.some(rule => settings.includes(rule))) issues.push(...found)
+  }
+  return issues
 }

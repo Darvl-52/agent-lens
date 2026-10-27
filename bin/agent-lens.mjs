@@ -1,0 +1,815 @@
+#!/usr/bin/env node
+
+// bin/cli.mjs
+import { spawn } from "node:child_process";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
+
+// hooks/setup/checks.ts
+var CONFIG = ".claude/agent-lens.json";
+var SETTINGS = ".claude/settings.json";
+var FILES = /\{files(?::([\w.,\s]+))?\}/g;
+var COMMAND_TIMEOUT_MS = 300000;
+var OUTPUT_LINES = 60;
+var OUTPUT_CHARS = 4000;
+var ROOT = ".";
+var isCommands = (v) => Array.isArray(v) && v.every((c) => typeof c === "string" && c.trim() !== "");
+var isFolder = (f) => f !== "" && !f.startsWith("/") && !/^[a-z]:/i.test(f) && !f.split(/[\\/]/).includes("..");
+var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var whereOf = (f) => f.folder === ROOT ? f.command : `${f.folder}: ${f.command}`;
+function tierOf(v) {
+  if (isCommands(v))
+    return { [ROOT]: v };
+  if (!isObject(v))
+    return "a list of commands, or lists by folder";
+  const out = {};
+  for (const [folder, list] of Object.entries(v)) {
+    if (!isFolder(folder))
+      return `the folder "${folder}" is not one of the project's`;
+    if (!isCommands(list))
+      return `the commands of "${folder}" are not a list of commands`;
+    const key = folder.replace(/^\.\//, "").replace(/\/$/, "") || ROOT;
+    if (key in out)
+      return `the folder "${key}" is named twice`;
+    out[key] = list;
+  }
+  return out;
+}
+function parseConfig(text) {
+  const issue = (detail) => ({ file: CONFIG, kind: "checks-shape", detail });
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { config: {}, issues: [issue("not JSON")] };
+  }
+  if (!isObject(raw))
+    return { config: {}, issues: [issue("not a JSON object")] };
+  const config = {};
+  const issues = [];
+  if (raw.checks !== undefined) {
+    const c = raw.checks;
+    if (!isObject(c) || Object.keys(c).some((k) => k !== "fast" && k !== "full"))
+      issues.push(issue("checks: an object of fast and full"));
+    else {
+      const fast = c.fast === undefined ? {} : tierOf(c.fast);
+      const full = c.full === undefined ? {} : tierOf(c.full);
+      if (typeof fast === "string")
+        issues.push(issue(`checks.fast: ${fast}`));
+      if (typeof full === "string")
+        issues.push(issue(`checks.full: ${full}`));
+      if (typeof fast !== "string" && typeof full !== "string")
+        config.checks = { fast, full };
+    }
+  }
+  if (raw.run !== undefined) {
+    const r = raw.run;
+    if (r === null)
+      config.run = null;
+    else if (!isObject(r) || Object.keys(r).length === 0 || Object.entries(r).some(([k, v]) => !["up", "smoke", "down"].includes(k) || typeof v !== "string"))
+      issues.push(issue("run: null, or up, smoke and down, each a command"));
+    else
+      config.run = r;
+  }
+  return { config, issues };
+}
+var takesFiles = (command) => new RegExp(FILES.source).test(command);
+function expand(command, files, shell) {
+  let isEmpty = false;
+  const line = command.replace(FILES, (_, exts) => {
+    const wanted = exts?.split(/[\s,]+/).filter(Boolean).map((e) => `.${e.replace(/^\./, "")}`);
+    const taken = wanted ? files.filter((f) => wanted.some((e) => f.endsWith(e))) : files;
+    if (taken.length === 0)
+      isEmpty = true;
+    return taken.map((f) => shell === "sh" ? `'${f.replace(/'/g, `'\\''`)}'` : `"${f.replace(/"/g, '""')}"`).join(" ");
+  });
+  return isEmpty ? null : line;
+}
+var argvOf = (shell, command) => shell === "sh" ? ["sh", "-c", command] : ["cmd", "/d", "/s", "/c", command];
+async function shellOf(exec, cwd) {
+  const r = await exec(["sh", "-c", "exit 0"], cwd, 15000).catch(() => null);
+  return r?.exitCode === 0 ? "sh" : "cmd";
+}
+var joinRel = (root, folder) => folder === ROOT ? root : `${root.replace(/[\\/]$/, "")}/${folder}`;
+function tailOf(stdout, stderr) {
+  const text = [stdout, stderr].filter((s) => s.trim() !== "").join(`
+`).trimEnd();
+  const tail = text.split(`
+`).slice(-OUTPUT_LINES).join(`
+`);
+  return tail.length > OUTPUT_CHARS ? tail.slice(-OUTPUT_CHARS) : tail;
+}
+async function gitIn(exec, cwd, args) {
+  const r = await exec(["git", "-c", "core.quotePath=false", "-C", cwd, ...args], cwd, 15000).catch(() => null);
+  return r?.exitCode === 0 ? r.stdout : null;
+}
+var namesOf = (out) => (out ?? "").split(`
+`).map((s) => s.trim()).filter(Boolean);
+async function changedIn(exec, cwd) {
+  const [diff, untracked] = await Promise.all([gitIn(exec, cwd, ["diff", "HEAD", "--name-only", "--relative", "--diff-filter=d"]), gitIn(exec, cwd, ["ls-files", "--others", "--exclude-standard"])]);
+  return [...new Set([...namesOf(diff), ...namesOf(untracked)])];
+}
+async function runTier(exec, root, tier, opts) {
+  const shell = await shellOf(exec, root);
+  const failures = [];
+  const timings = [];
+  const skipped = [];
+  for (const [folder, commands] of Object.entries(tier)) {
+    const cwd = joinRel(root, folder);
+    const files = opts.isFast && commands.some(takesFiles) ? await changedIn(exec, cwd) : [];
+    for (const command of commands) {
+      const line = opts.isFast ? expand(command, files, shell) : command.replace(FILES, ".");
+      if (line === null) {
+        skipped.push({ folder, command });
+        continue;
+      }
+      const at = await opts.now();
+      const r = await exec(argvOf(shell, line), cwd, COMMAND_TIMEOUT_MS).catch((err) => ({ exitCode: -1, stdout: "", stderr: String(err) }));
+      timings.push({ folder, command, ms: await opts.now() - at, exitCode: r.exitCode });
+      if (r.exitCode !== 0)
+        failures.push({ folder, command, exitCode: r.exitCode, output: tailOf(r.stdout, r.stderr) });
+    }
+  }
+  return { failures, timings, skipped };
+}
+var DENY = ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)", "Bash(git clean -f:*)", "Bash(rm -rf:*)", "Bash(rm -fr:*)"];
+function permissionIssues(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return [{ file: SETTINGS, kind: "permissions-shape", detail: "not JSON" }];
+  }
+  const deny = raw?.permissions?.deny;
+  if (deny !== undefined && !isCommands(deny))
+    return [{ file: SETTINGS, kind: "permissions-shape", detail: "permissions.deny is not a list of rules" }];
+  const missing = DENY.filter((rule) => !(deny ?? []).includes(rule));
+  return missing.length > 0 ? [{ file: SETTINGS, kind: "permissions-deny", detail: missing.join(", ") }] : [];
+}
+
+// hooks/setup/docs.ts
+var LIMITS = {
+  "CLAUDE.md": 120,
+  "ARCHITECTURE.md": 150,
+  "CODING_STANDARDS.md": 300,
+  "docs/agents/workflow.md": 120
+};
+var OLD_GLOSSARIES = { "CONTEXT.md": "GLOSSARY.md", "CONTEXT-MAP.md": "GLOSSARY-MAP.md" };
+var DOC_FILES = ["CLAUDE.md", "AGENTS.md", "GLOSSARY.md", "GLOSSARY-MAP.md", "ARCHITECTURE.md", "CODING_STANDARDS.md", "docs/agents/workflow.md", ...Object.keys(OLD_GLOSSARIES)];
+var ADR_DIR = "docs/adr";
+var isGlossary = (file) => /(^|\/)GLOSSARY\.md$/.test(file);
+var isAdr = (file) => file.startsWith(`${ADR_DIR}/`);
+var mappedGlossaries = (map) => [...map.matchAll(/\]\(\.?\/?([^)\s]+GLOSSARY\.md)\)/g)].map((m) => m[1].replace(/^\.\//, "")).filter((p) => !p.includes(".."));
+var PATH = /^(?:[\w.@-]+\/)+[\w.@-]*$|^[\w-]+\.(?:md|ts|tsx|js|jsx|mjs|cjs|json|ya?ml|toml|py|go|rs|rb|java|kt|swift|cs|php|sql|sh)$/;
+var pathsIn = (text) => [...new Set([...text.matchAll(/`([^`\n]+)`/g)].map((m) => m[1].trim()).filter((p) => PATH.test(p) && !/[*<>{}$]|:\/\//.test(p) && !p.startsWith("-") && !p.startsWith("..")))];
+var DOC_NAMES = new Set(DOC_FILES.filter((f) => !f.includes("/")));
+var firstOf = (path) => path.split("/")[0];
+function pathsNamed(files) {
+  const named = new Set;
+  for (const [file, text] of Object.entries(files))
+    if (!isGlossary(file))
+      for (const p of pathsIn(text)) {
+        const path = p.replace(/^\.\//, "").replace(/\/$/, "");
+        if (path.includes("/") || DOC_NAMES.has(path))
+          named.add(path);
+      }
+  return [...named];
+}
+var lines = (text) => text.replace(/\r\n/g, `
+`).split(`
+`);
+var sentences = (text) => text.split(/(?<=[.!?])\s+/).filter((s) => s.trim() !== "").length;
+function glossaryIssues(file, text) {
+  const issues = [];
+  let isTerms = false;
+  let after = null;
+  let isFenced = false;
+  lines(text).forEach((raw, i) => {
+    const line = raw.trim();
+    const at = { file, line: i + 1 };
+    if (line.startsWith("```")) {
+      isFenced = !isFenced;
+      if (isFenced)
+        issues.push({ ...at, kind: "glossary-code" });
+      return;
+    }
+    if (isFenced || line === "")
+      return;
+    if (/`[^`]+`/.test(line) && pathsIn(line).length > 0)
+      issues.push({ ...at, kind: "glossary-path" });
+    if (line.startsWith("#")) {
+      if (/^##\s/.test(line))
+        isTerms = true;
+      after = null;
+      return;
+    }
+    const term = line.match(/^\*\*(.+?)\*\*:\s*(.*)$/);
+    if (term) {
+      isTerms = true;
+      after = term[2] ? "definition" : "term";
+      if (term[2] && sentences(term[2]) > 2)
+        issues.push({ ...at, kind: "glossary-long", detail: term[1] });
+      return;
+    }
+    if (/^_Avoid_:/i.test(line)) {
+      if (after !== "definition")
+        issues.push({ ...at, kind: "glossary-shape" });
+      after = "avoid";
+      return;
+    }
+    if (after === "term") {
+      if (sentences(line) > 2)
+        issues.push({ ...at, kind: "glossary-long" });
+      after = "definition";
+      return;
+    }
+    if (isTerms)
+      issues.push({ ...at, kind: "glossary-shape" });
+  });
+  return issues;
+}
+function adrIssues(adrs) {
+  const issues = [];
+  const numbers = [];
+  for (const [file, text] of Object.entries(adrs)) {
+    const name = file.slice(ADR_DIR.length + 1);
+    const m = name.match(/^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/);
+    if (!m)
+      issues.push({ file, kind: "adr-name" });
+    else
+      numbers.push(Number(m[1]));
+    const body = text.replace(/\r\n/g, `
+`).replace(/^---\n[\s\S]*?\n---\n/, "");
+    if (!lines(body).find((l) => l.trim() !== "")?.startsWith("# "))
+      issues.push({ file, line: 1, kind: "adr-title" });
+  }
+  const sorted = [...numbers].sort((a, b) => a - b);
+  sorted.forEach((n, i) => {
+    if (n !== i + 1 && !issues.some((x) => x.kind === "adr-numbers"))
+      issues.push({ file: ADR_DIR, kind: "adr-numbers", detail: String(n) });
+  });
+  return issues;
+}
+function duplicateIssues(files) {
+  const seen = new Map;
+  const issues = [];
+  for (const [file, text] of Object.entries(files))
+    lines(text).forEach((raw, i) => {
+      const line = raw.trim().replace(/^[-*]\s+|^\d+\.\s+/, "");
+      if (line.length < 60 || line.startsWith("#") || line.startsWith("|"))
+        return;
+      const was = seen.get(line);
+      if (was === undefined)
+        seen.set(line, file);
+      else if (was !== file && !(isAdr(was) && isAdr(file)))
+        issues.push({ file, line: i + 1, kind: "duplicate", detail: was });
+    });
+  return issues;
+}
+var importsOf = (text) => [...text.matchAll(/^@(\S+)\s*$/gm)].map((m) => m[1].replace(/^\.\//, ""));
+function checkDocs(files, missing) {
+  const issues = [];
+  for (const [file, text] of Object.entries(files)) {
+    const renamed = OLD_GLOSSARIES[file];
+    if (renamed) {
+      issues.push({ file, kind: "glossary-name", detail: renamed });
+      continue;
+    }
+    const limit = LIMITS[file];
+    const imported = file === "CLAUDE.md" ? importsOf(text).filter((f) => files[f] !== undefined) : [];
+    const count = lines(text.trimEnd()).length + imported.reduce((n, f) => n + lines(files[f].trimEnd()).length, 0);
+    if (limit !== undefined && count > limit)
+      issues.push({ file, kind: "size", detail: `${count}/${limit}${imported.length > 0 ? ` with ${imported.map((f) => `@${f}`).join(", ")}` : ""}` });
+    if (isGlossary(file))
+      issues.push(...glossaryIssues(file, text));
+    else
+      lines(text).forEach((line, i) => {
+        for (const p of pathsIn(line))
+          if (missing.has(p.replace(/^\.\//, "").replace(/\/$/, "")))
+            issues.push({ file, line: i + 1, kind: "path", detail: p });
+      });
+  }
+  issues.push(...adrIssues(Object.fromEntries(Object.entries(files).filter(([f]) => isAdr(f)))));
+  issues.push(...duplicateIssues(files));
+  return issues;
+}
+async function readDocs(disk) {
+  const files = {};
+  const take = async (rel) => {
+    const text = await disk.read(rel);
+    if (text !== undefined)
+      files[rel] = text;
+  };
+  await Promise.all(DOC_FILES.map(take));
+  if (files["GLOSSARY-MAP.md"])
+    await Promise.all(mappedGlossaries(files["GLOSSARY-MAP.md"]).map(take));
+  const adrs = await disk.list(ADR_DIR);
+  await Promise.all(adrs.filter((f) => f.kind === "file" && f.name.endsWith(".md")).map((f) => take(`${ADR_DIR}/${f.name}`)));
+  return files;
+}
+async function issuesIn(disk) {
+  const files = await readDocs(disk);
+  const named = pathsNamed(files);
+  const missing = await Promise.all(named.map(async (p) => !await disk.exists(p) && (!p.includes("/") || await disk.exists(firstOf(p)))));
+  return [...checkDocs(files, new Set(named.filter((_, i) => missing[i]))), ...await harnessIssues(disk)];
+}
+async function harnessIssues(disk) {
+  const [config, settings] = await Promise.all([disk.read(CONFIG), disk.read(SETTINGS)]);
+  const issues = config === undefined ? [] : parseConfig(config).issues;
+  if (settings !== undefined) {
+    const found = permissionIssues(settings);
+    if (found.some((i) => i.kind === "permissions-shape") || DENY.some((rule) => settings.includes(rule)))
+      issues.push(...found);
+  }
+  return issues;
+}
+
+// hooks/setup/words.ts
+var ROLES = `- CLAUDE.md: pointers to the files below, and the few rules every turn needs. 120 lines at most.
+- GLOSSARY.md: the project's own domain terms, a definition of a sentence or two each and the words to avoid. No paths, code or decisions.
+- ARCHITECTURE.md: the map: modules, their bounds, who calls whom, where the data lives. 150 lines at most.
+- docs/adr/NNNN-slug.md: one decision each that is hard to reverse, surprising, and the result of a trade-off, and why.
+- CODING_STANDARDS.md: rules for code a reviewer can check an edit against. 300 lines at most.
+- docs/agents/workflow.md: how work goes, step by step, and where the person decides.`;
+var plural = (n, one, few, many) => {
+  const ten = n % 10;
+  const hundred = n % 100;
+  return ten === 1 && hundred !== 11 ? one : ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14) ? few : many;
+};
+var leadEn = (n, what) => `Step ${n} of /setup-project, which prepares this project for work with the agent: ${what}. Add to what is there; never write over it, and ask me before taking out anything I wrote.`;
+var leadRu = (n, what) => `Шаг ${n} из /setup-project, который готовит проект к работе с агентом: ${what}. Дополняй то, что есть; ничего не перезаписывай и спроси меня, прежде чем убрать что-то, что написал я. Вопросы, варианты ответов и итоги — по-русски.`;
+var EN = {
+  description: "Prepare the project for work with the agent: the glossary and the map, the coding standards, the checks and the gate on them, how work goes; check: the check of those files; baseline: what is red now, kept as red before the agent",
+  title: "Setup",
+  ready: (found) => [
+    found.missing.length === 0 ? "✓ Matt’s skills installed" : `○ Matt’s skills recommended (${found.missing.join(", ")} missing): /plugin install mattpocock-skills`,
+    found.openspec === null ? "○ OpenSpec recommended: npm install -g @fission-ai/openspec" : `✓ OpenSpec ${found.openspec}${found.isInitialised ? ", openspec/ is here" : ", a step initialises openspec/"}`,
+    found.ci.length > 0 ? `✓ CI: ${found.ci.join(", ")}` : "○ no CI: its step is left out"
+  ].join(" · ") + (found.missing.length > 0 || found.openspec === null ? `
+The steps that need what is missing are left out; installed later, /setup-project once the run is done brings them in.` : ""),
+  needsMatt: "left out: Matt’s skills are not installed (/plugin install mattpocock-skills)",
+  needsOpenspec: "left out: the OpenSpec CLI is not installed (npm install -g @fission-ai/openspec)",
+  needsCi: "left out: the project has no CI to add a job to",
+  opened: "Opened the setup: the steps go to Claude one at a time.",
+  steps: {
+    matt: "Matt’s skills: the tracker, the labels, the domain layout",
+    openspec: "OpenSpec in the project",
+    existing: "What is already written",
+    map: "The map: glossary, architecture, ADRs",
+    standards: "The coding standards",
+    checks: "The checks, and the gate at each turn’s end",
+    run: "Bringing the project up, and its smoke test",
+    permissions: "What the agent may and may not run",
+    workflow: "How work goes, and CLAUDE.md",
+    config: "OpenSpec reads the files",
+    ci: "The checks in CI"
+  },
+  status: { waiting: "waiting", sent: "with Claude", done: "done", skipped: "skipped", failed: "check failed" },
+  fixSent: "what failed went back to Claude",
+  next: "send the next step",
+  skip: "skip",
+  again: "send again",
+  fix: "send what failed",
+  allDone: "Every step is done. The files are checked at each session’s start and at the end of each turn that edits them; the fast checks at the end of each turn that changes the project.",
+  commit: "commit the setup",
+  commitHint: "Commit what the steps wrote: the map is checked for staleness against its last commit.",
+  commitPrompt: "Commit the files /setup-project wrote (CLAUDE.md, GLOSSARY.md, ARCHITECTURE.md, CODING_STANDARDS.md, docs/, openspec/, .claude/agent-lens.json, .claude/settings.json, the CI job, the smoke test, and what openspec init put in .claude/). First show me git status; commit only those, with a message in the style of the project’s commits.",
+  checkTitle: "The check of the files",
+  checkClean: "The files pass the check.",
+  notSetUp: "This project is not set up yet: /setup-project.",
+  band: (n) => `docs: ${n} ${n === 1 ? "issue" : "issues"}`,
+  checked: (issues) => issues.length === 0 ? "The files pass the check." : `The check found ${issues.length}:
+${issues.map((i) => `  ${EN.issue(i)}`).join(`
+`)}`,
+  issue: (i) => {
+    const at = `${i.file}${i.line ? `:${i.line}` : ""}`;
+    const what = {
+      size: `past its size (${i.detail} lines): move what another file holds there`,
+      path: `names \`${i.detail}\`, which is not there`,
+      "glossary-shape": "not a term entry: **Term**:, a definition, _Avoid_:",
+      "glossary-name": `the glossary by its old name, which Matt’s skills no longer read: git mv it to ${i.detail}, and name ${i.detail} in docs/agents/domain.md`,
+      "glossary-long": "a definition longer than two sentences",
+      "glossary-path": "a path in the glossary: it holds terms, not code",
+      "glossary-code": "code in the glossary",
+      "adr-name": "an ADR not named NNNN-slug.md",
+      "adr-numbers": `the ADR numbers skip or repeat (at ${i.detail})`,
+      "adr-title": "an ADR with no # title",
+      duplicate: `the same line as in ${i.detail}: keep it in one file`,
+      "stale-map": `may be stale: ${i.detail} commits to it since the map was last edited`,
+      "stale-term": `the term "${i.detail}" is found nowhere outside the glossaries: still in use?`,
+      "checks-shape": `out of its form: ${i.detail}`,
+      "checks-start": `the fast check \`${i.detail}\` does not start: not found or not executable from its folder`,
+      "checks-slow": `the fast check ${i.detail} is too slow for every turn’s end: move it to full, or give it {files}`,
+      "permissions-shape": `out of its form: ${i.detail}`,
+      "permissions-deny": `permissions.deny lacks what cannot be taken back: ${i.detail}`
+    };
+    return `${at}: ${what[i.kind]}`;
+  },
+  gateTitle: "The gate: the fast checks at the turn’s end",
+  gateStatus: (g, max) => g.status === "green" ? "✓ green at the last turn’s end" : g.status === "base" ? "○ red as on this commit before the agent: not sent back (/setup-project baseline once fixed)" : g.status === "released" ? `✗ red after ${g.rounds} rounds: let go, yours to look at` : g.status === "answered" ? "○ red, held by Claude as not of its changes: let go (/setup-project baseline keeps it)" : `✗ red: sent back to Claude (round ${g.rounds} of ${max})`,
+  gateBand: (n) => `checks: ${n} red`,
+  gateBase: "The fast checks are red as on this commit before the agent: the gate lets the turn end. Fix the base first, then /setup-project baseline, or the gate holds no turn to them.",
+  gateReleased: (rounds) => `The fast checks are still red after ${rounds} rounds: the gate let the turn end. /setup-project shows what.`,
+  gateAnswered: "Sent back, Claude changed nothing: it holds the red is not of its changes. The gate let the turn end; /setup-project baseline keeps it as red before the agent.",
+  gateBlock: (failures, round, max, known) => `The project's fast checks (.claude/agent-lens.json) are red after this turn (round ${round} of ${max}). Fix what your changes broke, run the command again to see it green, then end the turn. Where a failure is not of your changes, say so in a line and end the turn without changing anything; do not weaken a check or a test to pass it.${known === "other" ? " What was red before you is known for another commit only, so this red may be older than your changes." : known === "none" ? " What was red before you was never taken, so this red may be older than your changes." : ""}
+
+${failures.map((f) => `$ ${f.folder === "." ? "" : `(in ${f.folder}) `}${f.command}   → exit ${f.exitCode}
+${f.output}`).join(`
+
+`)}`,
+  noChecks: "The project has no fast checks in .claude/agent-lens.json: /setup-project writes them.",
+  baselineKept: (failures) => failures.length === 0 ? "The fast checks are green on this commit: nothing kept as red before the agent." : `Kept as red before the agent on this commit: ${failures.map((f) => f.command).join(", ")}. The gate does not send these back until the commit changes.`,
+  judgeTask: "The docs in this turn",
+  judgePrompt: (root, edits) => `Read what this turn changed in the files the agent and the person of the project at ${root} work by, and report what should not be there. The files and what each holds:
+${ROLES}
+
+For each change, check it against the code (read it): is it true of the code now; is it in the file it belongs in; does it change what an agent does or would it change nothing (a no-op, a wish, a truism); does it repeat what another of the files already says; does it pass what its file may hold. A blocker: untrue, in the wrong file, or repeated. A minor one: a no-op, or wordier than it needs. CLAUDE.md is read into every turn of every agent, so it must not grow: each line added to it is a pointer, or a rule every turn needs; anything else is a blocker, and its fix names the file it belongs in (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, an ADR, a skill of the project). Report only what the change added or altered, not what was there before; none is a good answer. Do not change any file.
+
+${edits}
+
+End your answer with JSON alone: [{"file": "the file", "problem": "what is wrong, one sentence", "fix": "what to do, one sentence", "severity": "blocker" or "minor"}], or [] when there is nothing.`,
+  judgeTitle: "What the docs agent found in the last edits",
+  judgeRunning: "The docs agent is reading the last edits against the code…",
+  judgeFailed: "The docs agent gave no list.",
+  judgeNone: "The docs agent found nothing to take out.",
+  judgeSend: (n) => `send to Claude (${n})`,
+  judgeSent: "sent to Claude",
+  judgeFix: (findings) => `The docs agent found these in what was just written to the project's docs. Fix each in its file, or say why it stands; change nothing else:
+${findings.map((f) => `- ${f.file}: ${f.text}${f.fix ? ` Fix: ${f.fix}` : ""}`).join(`
+`)}`,
+  minor: "minor",
+  retroOffer: (change) => `"${change}" is archived: a retro of the work?`,
+  retroArgs: (change) => `the work in this session on the OpenSpec change "${change}", up to its archive`,
+  speak: "",
+  prompts: {
+    existing: (n, _) => `${leadEn(n, "what is already written")}
+
+Find every document this project's agents and people work by: CLAUDE.md and the files it imports with \`@\`, AGENTS.md, a glossary by its old name (CONTEXT.md, CONTEXT-MAP.md), notes on the architecture and on decisions wherever they lie, the rules of other agents (.cursor/rules, .cursorrules, .github/copilot-instructions.md), the project's skills (.claude/skills, .agents/skills), and the parts of README.md written for those who change the code.
+
+Cut each into pieces (a section, a rule, a fact) and give each piece one home:
+${ROLES}
+- a rule a tool can check: the linter, at the step of the coding standards; until then it stays where it is.
+- where it is: a project skill, the README for people, Matt's docs/agents/.
+- out: untrue of the code now, a second copy, or what an agent does anyway.
+
+Put the plan to me with AskUserQuestion, file by file, a few pieces a question with multiSelect, each with its home, and move only what I pick. A piece moves word for word and leaves its old place, so each fact stays in one file. A glossary by its old name moves with \`git mv\` (CONTEXT.md to GLOSSARY.md, CONTEXT-MAP.md to GLOSSARY-MAP.md, with the glossaries it links), and docs/agents/domain.md then names the new name. ADRs kept elsewhere move to docs/adr/, numbered on in order. The steps after this one add what is still missing, so this one writes nothing new.
+
+Done when every piece of every file found has my answer. End with a table: the piece, where it was, where it went.`,
+    map: (n, _) => `${leadEn(n, "the map")}
+
+Read the code: its entry points, its modules and what each owns, its data, how they call each other. Then write, adding to each file where it is there:
+- \`GLOSSARY.md\` at the root: the project's own domain terms and nothing else. The form: \`# {Context}\` and a sentence or two on what it is; \`## Language\`; for each term \`**Term**:\` on a line, a definition of one or two sentences on the next (what it is, not what it does), and \`_Avoid_: other words\` where the code or people use other words for it. No paths, no code, no decisions, no general programming terms.
+- \`ARCHITECTURE.md\` at the root, 150 lines at most: the modules and what each owns, their bounds, who calls whom, where the data lives, where to start reading. Name each module by its path in backticks. Leave out what the code says better.
+- \`docs/adr/NNNN-slug.md\`, numbered on from the last number in docs/adr/ (0001 where there is none): one for each decision the code shows that is hard to reverse, would surprise a reader, came from a real trade-off, and no ADR records yet. A \`# title\` and one to three sentences: the context, the decision, why. None where none qualifies.
+Where the project has parts with domains of their own (repositories or packages), write a GLOSSARY.md in each part's folder and a GLOSSARY-MAP.md at the root that links them. Where a term or a decision is not clear from the code, ask me instead of guessing. End with what you wrote, file by file.`,
+    standards: (n, _) => `${leadEn(n, "the coding standards")}
+
+Read the code and find the rules it keeps: how errors are raised and returned, how files and modules are named and laid out, how the layers call each other, how input is validated, how tests are written and where they go. Take only rules a reviewer can check one edit against; leave out general advice. The rules CODING_STANDARDS.md and the linter's config already hold count as found: put to me only the rules they lack, and offer to move to the linter those in CODING_STANDARDS.md it could check.
+
+Sort each rule:
+- mechanical (a banned API or pattern, the shape of an import, where a file lives, a fixed syntactic form): a tool checks it, not prose. Where the project has a linter (eslint, stylelint, ruff, …), it goes to the linter's config as an existing rule, or a small custom one with a test of its own, and the lint script runs it. A rule the linter already enforces is left out.
+- a judgement (consistency across files, the right layer, a name that says what it is): it goes to \`CODING_STANDARDS.md\`.
+Each rule in a line or two: what, why (the mistake it prevents, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\`, \`stylelint: <rule>\`, or \`review\`).
+
+Put the rules to me with AskUserQuestion, a few at a time with multiSelect, saying for each whether it goes to the linter or to the file, and write only those I pick: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. Then run the lint script and say what the new rules found.`,
+    checks: (n, _) => `${leadEn(n, "the checks")}
+
+Read how this project is checked, whatever its stack: its manifests and scripts (package.json, pyproject.toml, Cargo.toml, go.mod, a Makefile or justfile, the build files), its linters and type checkers, its test runners, what its CI runs. Sort what you find into two tiers:
+- fast: runs at the end of each of my agent's turns that changed the project, so seconds, a minute or two at most: lint and the type check, and the tests of the changed files where the runner can take files. Where a command takes files, put \`{files}\` where they go (\`eslint {files}\`, \`vitest related --run {files}\`, \`ruff check {files}\`): it then runs on the files changed against the commit, and not at all where there are none. A tool that fails on a file it does not read takes only its own, by extension: \`{files:py,pyi}\`. A command with no \`{files}\` runs on its whole folder.
+- full: before a commit, push or merge: everything (lint, types, all tests, e2e, the build).
+Where the project has parts with tools of their own (a monorepo, packages, repositories in folders), give each part's commands by its folder.
+Put both tiers to me with AskUserQuestion, then write them to \`.claude/agent-lens.json\`, keeping what else is there: \`{"checks": {"fast": ["…"], "full": ["…"]}}\`, or by folder, \`{"checks": {"fast": {"api": ["…"], "web": ["…"]}, "full": {…}}}\`. Each command is a line for the shell, run from its folder as a person would type it; the project's own scripts where it has them. Do not run them yourself: agent-lens runs the fast tier once the file is written, keeps what is red now as red before you, and tells you what does not start or is too slow.`,
+    run: (n, _) => `${leadEn(n, "bringing the project up, and its smoke test")}
+
+Find out what this project is: a service or a web app that is brought up, a command-line tool, a library. A library has nothing to bring up: write \`{"run": null}\` to \`.claude/agent-lens.json\`, keeping what else is there, and stop.
+Otherwise find how it is brought up and tried, from what it has (compose files, scripts, a Procfile, the README):
+- up: one command that brings it up and returns once it answers, waiting for its health; a server left in the foreground never returns, so use the tool's detach or wait flag, or a script that starts it and waits.
+- smoke: one command that tries the main path end to end: an e2e test tagged smoke, a request to its health and one real endpoint, the CLI with \`--help\` and one real command.
+- down: what takes it down, where up leaves something running.
+Where there is no smoke test, propose to me the smallest one that proves the main path works, in the project's own test runner, and write it only on my yes.
+Put the commands to me with AskUserQuestion, write them under \`"run"\` in \`.claude/agent-lens.json\`, keeping what else is there, then run up, smoke and down once and tell me what each did.`,
+    permissions: (n, ctx) => `${leadEn(n, "what the agent may and may not run")}
+
+In \`.claude/settings.json\` (create it where there is none; keep all that is there), under \`"permissions"\`:
+- \`"deny"\`: always these, which cannot be taken back: ${ctx.deny.map((r) => `\`${r}\``).join(", ")}. Then propose to me what else of this project should be off limits: files with real secrets (keys, certificates, an env file with real values; read a file before naming it, as one with local values only is no secret), commands that publish, deploy or reach production.
+- \`"allow"\`: the commands of \`.claude/agent-lens.json\` (checks and run) as Bash rules by their prefix (\`Bash(npm run lint:*)\`), git that only reads (status, diff, log, show), the project's test runners.
+Put what else to deny and what to allow to me with AskUserQuestion with multiSelect, and write the rules above and what I pick.`,
+    workflow: (n, ctx) => {
+      const has = (skill) => ctx.skills.includes(skill);
+      const steps = [
+        has("grilling") ? "An idea is grilled with the `grilling` skill before it is proposed." : "An idea is talked through with me before it is written down.",
+        `${ctx.hasOpenspec ? "`openspec propose` writes it as a change, in the glossary's terms" : "It is written down as a plan in the issue, in the glossary's terms"}; ${has("domain-modeling") ? "while designing, the `domain-modeling` skill: " : "while designing, "}a new term to GLOSSARY.md as it settles, a decision that qualifies to docs/adr/.`,
+        `${has("tdd") ? "The tasks are done with the `tdd` skill at the seams the design names" : "The tasks are done test first where the project has tests, at the seams the design names"}${has("diagnosing-bugs") ? "; a bug with `diagnosing-bugs`" : ""}.`,
+        `agent-lens checks each edit against CLAUDE.md and CODING_STANDARDS.md, runs the fast checks at each turn's end and reviews each turn's diff${has("code-review") ? "; the whole change with `code-review`" : ""}.`,
+        `${ctx.hasOpenspec ? "On archive" : "Once done"}, the change's terms go to GLOSSARY.md and its decisions to docs/adr/${has("retro") ? "; then `/mattpocock-skills:retro`" : ""}.`
+      ];
+      return `${leadEn(n, "how work goes, and CLAUDE.md")}
+
+Write \`docs/agents/workflow.md\` (adding to it where it is there), 120 lines at most, the way work goes in this project, saying at each step where I decide:
+${steps.map((t, i) => `${i + 1}. ${t}`).join(`
+`)}
+Then, in the same file:
+- When a task is done here: the full tier of \`.claude/agent-lens.json\` green, and the smoke test where it has one; a line each for what else the project has (stories, accessibility checks).
+- How the work is shared: the main agent orchestrates (takes the task apart, plans, hands the parts to subagents, keeps their order, decides the architecture, puts the results together and answers me) and does by hand only what is cheaper than explaining it; reading code, implementing, running checks, the browser and reviews go to subagents, started in parallel in one message where the parts are independent, each with its own files (a shared contract first where they depend on each other; \`isolation: "worktree"\` where their files may meet), each prompt self-contained (the goal, the files and what not to touch, these rules, when it is done, what to answer), the answers short; what they report is checked (the full tier) before it is told to me.
+
+Then \`CLAUDE.md\` (create it where there is none), 120 lines at most:
+- the language I am spoken to in, as its first rule, where it is not English;
+- a short section of pointers to ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on when to read it; GLOSSARY.md imported with a line \`@GLOSSARY.md\` where it is under 80 lines, so its terms hold on every turn, else pointed to;
+- the rules every turn needs, read from the project's scripts and config: how to install and run (the \`run\` of \`.claude/agent-lens.json\` where it has one); the checks in a line: the fast tier runs by itself at each turn's end, the full tier before a commit, push or merge, sending only on green; their commands are in \`.claude/agent-lens.json\`, not copied here;
+- how to commit.
+Anything else in it that one of those files holds moves there.`;
+    },
+    config: (n, _) => `${leadEn(n, "OpenSpec reads the files")}
+
+In \`openspec/config.yaml\`, add to \`context\`, keeping what is there, a pointer to each of GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on what it holds, never a copy of its text. Add to \`rules\`: the proposal and the specs use the glossary's terms and none of the words it lists under _Avoid_; the design names the ADRs it touches, and a new decision hard to reverse goes to docs/adr/; each task names the test seam it is built at. Then run \`openspec validate --all --strict\` and say what it found.`,
+    ci: (n, ctx) => `${leadEn(n, "the checks in CI")}
+
+The project's CI is in ${ctx.ci.map((f) => `\`${f}\``).join(", ")}. Add a job that runs on each merge or pull request and on each push to the main branch, so what the gate holds for my agent holds for everyone:
+- the check of the docs: \`npx -y github:Darvl-52/agent-lens check\`;
+- the full tier: \`npx -y github:Darvl-52/agent-lens checks full\`, in the image the project's own jobs build and test in.
+Both read \`.claude/agent-lens.json\` and need Node 20 or later in the job's image. Where the project's image has no Node, give the docs check a job of its own on a Node image, and leave the full tier to the project's jobs that run the same commands; do not copy the commands into the CI. Write the job the way the jobs there are written (stages, images, caches, rules), and show it to me with AskUserQuestion before writing it, saying what it costs: the Node it needs in the image, a job of its own where the image has none. Write it on my yes.`,
+    fix: (step, issues) => `The check of the files of /setup-project's step "${step}" found these. Fix each in its file and change nothing else:
+${issues.map((i) => `- ${EN.issue(i)}`).join(`
+`)}`
+  },
+  openspecFailed: (why) => `openspec init did not run: ${why}. Run \`openspec init --tools claude\` yourself, then send the step again.`
+};
+var RU = {
+  description: "Подготовить проект к работе с агентом: глоссарий и карта, стандарты кода, проверки и гейт на них, как идёт работа; check: проверка этих файлов; baseline: что красное сейчас, запомнить как красное до агента",
+  title: "Подготовка",
+  ready: (found) => [
+    found.missing.length === 0 ? "✓ Скиллы Мэтта установлены" : `○ Рекомендуем скиллы Мэтта (нет: ${found.missing.join(", ")}): /plugin install mattpocock-skills`,
+    found.openspec === null ? "○ Рекомендуем OpenSpec: npm install -g @fission-ai/openspec" : `✓ OpenSpec ${found.openspec}${found.isInitialised ? ", openspec/ уже есть" : ", openspec/ создаст один из шагов"}`,
+    found.ci.length > 0 ? `✓ CI: ${found.ci.join(", ")}` : "○ CI нет: его шаг пропущен"
+  ].join(" · ") + (found.missing.length > 0 || found.openspec === null ? `
+Шаги, которым нужно недостающее, пропущены; поставишь позже — /setup-project после конца прогона их добавит.` : ""),
+  needsMatt: "пропущен: не установлены скиллы Мэтта (/plugin install mattpocock-skills)",
+  needsOpenspec: "пропущен: не установлен OpenSpec CLI (npm install -g @fission-ai/openspec)",
+  needsCi: "пропущен: в проекте нет CI, куда добавить задачу",
+  opened: "Открыл подготовку: шаги уходят Claude по одному.",
+  steps: {
+    matt: "Скиллы Мэтта: трекер, метки, раскладка домена",
+    openspec: "OpenSpec в проекте",
+    existing: "Что уже написано",
+    map: "Карта: глоссарий, архитектура, ADR",
+    standards: "Стандарты кода",
+    checks: "Проверки и гейт в конце каждого хода",
+    run: "Как поднять проект, и его смоук-тест",
+    permissions: "Что агенту можно и нельзя запускать",
+    workflow: "Как идёт работа, и CLAUDE.md",
+    config: "OpenSpec читает эти файлы",
+    ci: "Проверки в CI"
+  },
+  status: { waiting: "ждёт", sent: "у Claude", done: "готово", skipped: "пропущен", failed: "проверка не прошла" },
+  fixSent: "что не прошло, ушло Claude",
+  next: "отправить следующий шаг",
+  skip: "пропустить",
+  again: "отправить снова",
+  fix: "отправить, что не прошло",
+  allDone: "Все шаги готовы. Файлы проверяются при каждом запуске сессии и в конце каждого хода, который их правит; быстрые проверки — в конце каждого хода, который меняет проект.",
+  commit: "закоммитить подготовку",
+  commitHint: "Закоммить то, что написали шаги: карта сверяется на устаревание с её последним коммитом.",
+  commitPrompt: "Закоммить файлы, которые написал /setup-project (CLAUDE.md, GLOSSARY.md, ARCHITECTURE.md, CODING_STANDARDS.md, docs/, openspec/, .claude/agent-lens.json, .claude/settings.json, задачу CI, смоук-тест и то, что openspec init положил в .claude/). Сначала покажи мне git status; закоммить только их, сообщением в стиле коммитов проекта.",
+  checkTitle: "Проверка файлов",
+  checkClean: "Файлы проходят проверку.",
+  notSetUp: "Проект ещё не подготовлен: /setup-project.",
+  band: (n) => `docs: ${n} ${plural(n, "проблема", "проблемы", "проблем")}`,
+  checked: (issues) => issues.length === 0 ? "Файлы проходят проверку." : `Проверка нашла ${issues.length}:
+${issues.map((i) => `  ${RU.issue(i)}`).join(`
+`)}`,
+  issue: (i) => {
+    const at = `${i.file}${i.line ? `:${i.line}` : ""}`;
+    const what = {
+      size: `больше своего размера (${i.detail} строк): перенеси то, что место другому файлу`,
+      path: `называет \`${i.detail}\`, которого нет`,
+      "glossary-shape": "не запись термина: **Термин**:, определение, _Avoid_:",
+      "glossary-name": `глоссарий под старым именем, которое скиллы Мэтта больше не читают: git mv в ${i.detail} и ${i.detail} в docs/agents/domain.md`,
+      "glossary-long": "определение длиннее двух предложений",
+      "glossary-path": "путь в глоссарии: в нём термины, а не код",
+      "glossary-code": "код в глоссарии",
+      "adr-name": "ADR назван не как NNNN-slug.md",
+      "adr-numbers": `номера ADR пропущены или повторяются (на ${i.detail})`,
+      "adr-title": "ADR без заголовка #",
+      duplicate: `та же строка, что в ${i.detail}: держи её в одном файле`,
+      "stale-map": `возможно, устарело: ${i.detail} коммитов в это место с последней правки карты`,
+      "stale-term": `термин «${i.detail}» не встречается нигде, кроме глоссариев: он ещё в ходу?`,
+      "checks-shape": `не по форме: ${i.detail}`,
+      "checks-start": `быстрая проверка \`${i.detail}\` не запускается: не найдена или не исполняется из своей папки`,
+      "checks-slow": `быстрая проверка ${i.detail} слишком медленная для конца каждого хода: перенеси её в full или дай ей {files}`,
+      "permissions-shape": `не по форме: ${i.detail}`,
+      "permissions-deny": `в permissions.deny нет того, что нельзя отменить: ${i.detail}`
+    };
+    return `${at}: ${what[i.kind]}`;
+  },
+  gateTitle: "Гейт: быстрые проверки в конце хода",
+  gateStatus: (g, max) => g.status === "green" ? "✓ зелёные в конце последнего хода" : g.status === "base" ? "○ красные так же, как на этом коммите до агента: назад не отправлены (/setup-project baseline, когда починишь)" : g.status === "released" ? `✗ красные после ${g.rounds} ${plural(g.rounds, "круга", "кругов", "кругов")}: отпущены, посмотри сам` : g.status === "answered" ? "○ красные, но Claude считает, что не из-за его правок: отпущены (/setup-project baseline запомнит)" : `✗ красные: отправлены Claude (круг ${g.rounds} из ${max})`,
+  gateBand: (n) => `проверки: ${n} ${plural(n, "красная", "красные", "красных")}`,
+  gateBase: "Быстрые проверки красные так же, как на этом коммите до агента: гейт отпускает ход. Сначала почини базу, потом /setup-project baseline, иначе гейт не держит ход по этим проверкам.",
+  gateReleased: (rounds) => `Быстрые проверки красные и после ${rounds} ${plural(rounds, "круга", "кругов", "кругов")}: гейт отпустил ход. Что именно — в /setup-project.`,
+  gateAnswered: "Ход вернули, а Claude ничего не поменял: он считает, что красное не из-за его правок. Гейт отпустил ход; /setup-project baseline запомнит это как красное до агента.",
+  gateBlock: (failures, round, max, known) => `Быстрые проверки проекта (.claude/agent-lens.json) красные после этого хода (круг ${round} из ${max}). Почини то, что сломали твои правки, запусти команду снова и убедись, что она зелёная, потом закончи ход. Если падение не из-за твоих правок, скажи об этом одной строкой и закончи ход, ничего не меняя; не ослабляй проверку или тест, чтобы пройти.${known === "other" ? " Что было красным до тебя, известно только для другого коммита, так что это красное может быть старше твоих правок." : known === "none" ? " Что было красным до тебя, никто не запомнил, так что это красное может быть старше твоих правок." : ""} Отвечай по-русски.
+
+${failures.map((f) => `$ ${f.folder === "." ? "" : `(в ${f.folder}) `}${f.command}   → exit ${f.exitCode}
+${f.output}`).join(`
+
+`)}`,
+  noChecks: "В .claude/agent-lens.json нет быстрых проверок: их пишет /setup-project.",
+  baselineKept: (failures) => failures.length === 0 ? "Быстрые проверки на этом коммите зелёные: красного до агента не запомнено." : `Запомнено как красное до агента на этом коммите: ${failures.map((f) => f.command).join(", ")}. Гейт не отправляет их назад, пока коммит не сменится.`,
+  judgeTask: "Документы в этом ходе",
+  judgePrompt: (root, edits) => `Прочитай, что этот ход поменял в файлах, по которым работают агент и человек в проекте ${root}, и сообщи, чему там не место. Файлы и что в каждом:
+${ROLES}
+
+Каждое изменение сверь с кодом (прочитай его): верно ли оно для кода сейчас; в том ли файле, где ему место; меняет ли оно то, что делает агент, или ничего не меняет (пустая фраза, пожелание, очевидность); не повторяет ли то, что уже сказано в другом из этих файлов; не выходит ли за то, что может держать его файл. Блокер: неверно, не в том файле или повтор. Мелочь: пустая фраза или многословнее, чем нужно. CLAUDE.md читается в каждый ход каждого агента, поэтому ему нельзя разрастаться: каждая добавленная в него строка — указатель или правило, нужное каждому ходу; всё остальное — блокер, и его fix называет файл, где ему место (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, ADR, скилл проекта). Сообщай только о том, что изменение добавило или поменяло, а не о том, что было раньше; если ничего нет, так и ответь. Файлы не меняй. Пиши по-русски.
+
+${edits}
+
+Закончи ответ только JSON: [{"file": "файл", "problem": "что не так, одним предложением", "fix": "что сделать, одним предложением", "severity": "blocker" или "minor"}], или [], если ничего нет.`,
+  judgeTitle: "Что агент нашёл в последних правках документов",
+  judgeRunning: "Агент сверяет последние правки документов с кодом…",
+  judgeFailed: "Агент не вернул список.",
+  judgeNone: "Агент не нашёл, что убрать.",
+  judgeSend: (n) => `отправить Claude (${n})`,
+  judgeSent: "ушло Claude",
+  judgeFix: (findings) => `Агент нашёл это в том, что только что записано в документы проекта. Исправь каждое в его файле или скажи, почему оно остаётся; больше ничего не меняй:
+${findings.map((f) => `- ${f.file}: ${f.text}${f.fix ? ` Как: ${f.fix}` : ""}`).join(`
+`)}`,
+  minor: "мелочь",
+  retroOffer: (change) => `«${change}» в архиве: ретро по работе?`,
+  retroArgs: (change) => `работа в этой сессии над изменением OpenSpec «${change}», до его архива. Говори со мной по-русски: вопросы, варианты и итоги`,
+  speak: "Говори со мной по-русски: вопросы, варианты ответов, черновики на подтверждение и итоги.",
+  prompts: {
+    existing: (n) => `${leadRu(n, "что уже написано")}
+
+Найди все документы, по которым работают агенты и люди этого проекта: CLAUDE.md и файлы, которые он подключает через \`@\`, AGENTS.md, глоссарий под старым именем (CONTEXT.md, CONTEXT-MAP.md), записи об архитектуре и о решениях, где бы они ни лежали, правила других агентов (.cursor/rules, .cursorrules, .github/copilot-instructions.md), скиллы проекта (.claude/skills, .agents/skills) и части README.md для тех, кто меняет код.
+
+Разрежь каждый на куски (раздел, правило, факт) и дай каждому куску один дом:
+${ROLES}
+- правило, которое может проверить инструмент: линтер, на шаге стандартов кода; до него остаётся, где есть.
+- где есть: скилл проекта, README для людей, docs/agents/ Мэтта.
+- вон: неверно для кода сейчас, вторая копия или то, что агент и так делает.
+
+Предложи план мне через AskUserQuestion, по файлу, по нескольку кусков в вопросе с multiSelect, у каждого — его дом, и переноси только выбранное. Кусок переезжает слово в слово и уходит со старого места, чтобы каждый факт жил в одном файле. Глоссарий под старым именем переезжает через \`git mv\` (CONTEXT.md в GLOSSARY.md, CONTEXT-MAP.md в GLOSSARY-MAP.md, вместе с глоссариями, на которые он ссылается), и docs/agents/domain.md потом называет новое имя. ADR, что лежат в другом месте, переезжают в docs/adr/ с номерами по порядку. Чего не хватает, допишут следующие шаги, поэтому этот нового не пишет.
+
+Готово, когда у каждого куска каждого найденного файла есть мой ответ. В конце — таблица: кусок, где был, куда ушёл.`,
+    map: (n) => `${leadRu(n, "карта")}
+
+Прочитай код: точки входа, модули и чем владеет каждый, данные, кто кого вызывает. Потом напиши, дополняя файл, если он уже есть:
+- \`GLOSSARY.md\` в корне: только термины предметной области проекта. Вид: \`# {Контекст}\` и одно-два предложения, что это; \`## Language\`; для каждого термина \`**Термин**:\` на строке, определение в одно-два предложения на следующей (что это, а не что делает) и \`_Avoid_: другие слова\`, где код или люди называют это иначе. Без путей, кода, решений и общих понятий программирования.
+- \`ARCHITECTURE.md\` в корне, не больше 150 строк: модули и чем владеет каждый, их границы, кто кого вызывает, где живут данные, с чего начинать читать. Каждый модуль назови его путём в обратных кавычках. Не пиши то, что лучше скажет код.
+- \`docs/adr/NNNN-slug.md\` с номерами дальше последнего в docs/adr/ (0001, если там пусто): по одному на каждое решение, которое видно в коде, трудно отменить, удивит читателя, принято из реального выбора и ещё не записано ни в одном ADR. \`# заголовок\` и одно-три предложения: контекст, решение, почему. Ни одного, если таких нет.
+Если у проекта есть части со своим доменом (репозитории или пакеты), напиши GLOSSARY.md в папке каждой части и GLOSSARY-MAP.md в корне со ссылками на них. Где термин или решение по коду не ясны, спроси меня, а не угадывай. В конце скажи, что написал, по файлам.`,
+    standards: (n) => `${leadRu(n, "стандарты кода")}
+
+Прочитай код и найди правила, которые он соблюдает: как бросаются и возвращаются ошибки, как называются и раскладываются файлы и модули, как слои вызывают друг друга, как проверяется ввод, как пишутся тесты и где лежат. Бери только правила, по которым ревьюер может проверить одну правку; общие советы не бери. Правила, что уже есть в CODING_STANDARDS.md и в конфиге линтера, считаются найденными: предложи мне только те, которых там нет, и перенос в линтер тех правил из CODING_STANDARDS.md, которые он может проверить.
+
+Раздели правила:
+- механическое (запрещённый API или приём, форма импорта, где лежит файл, фиксированная синтаксическая форма): его проверяет инструмент, а не текст. Если в проекте есть линтер (eslint, stylelint, ruff, …), правило идёт в его конфиг — готовым правилом или небольшим своим, со своим тестом, — и его запускает скрипт линта. Правило, которое линтер уже проверяет, не бери.
+- на суждение (согласованность между файлами, верный слой, имя, которое говорит, что это): идёт в \`CODING_STANDARDS.md\`.
+Каждое правило в одну-две строки: что, почему (какую ошибку предотвращает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\`, \`stylelint: <правило>\` или \`ревью\`).
+
+Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, у каждого скажи, идёт оно в линтер или в файл, и запиши только выбранные: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. Потом запусти скрипт линта и скажи, что нашли новые правила.`,
+    checks: (n) => `${leadRu(n, "проверки")}
+
+Прочитай, чем проверяется этот проект, на чём бы он ни был написан: манифесты и скрипты (package.json, pyproject.toml, Cargo.toml, go.mod, Makefile или justfile, файлы сборки), линтеры и проверка типов, тест-раннеры, что запускает его CI. Разложи найденное на две ступени:
+- fast: идёт в конце каждого хода моего агента, который поменял проект, поэтому секунды, минута-две самое большее: линт и проверка типов, и тесты изменённых файлов, если раннер умеет брать файлы. Где команда берёт файлы, поставь \`{files}\` на их место (\`eslint {files}\`, \`vitest related --run {files}\`, \`ruff check {files}\`): тогда она идёт по файлам, изменённым относительно коммита, и не идёт вовсе, если их нет. Инструменту, который падает на чужих файлах, дай только его файлы, по расширению: \`{files:py,pyi}\`. Команда без \`{files}\` идёт по всей своей папке.
+- full: перед коммитом, пушем или мержем: всё (линт, типы, все тесты, e2e, сборка).
+Если у проекта есть части со своими инструментами (монорепо, пакеты, репозитории в папках), дай команды каждой части по её папке.
+Предложи мне обе ступени через AskUserQuestion, потом запиши их в \`.claude/agent-lens.json\`, сохранив, что там есть: \`{"checks": {"fast": ["…"], "full": ["…"]}}\` или по папкам, \`{"checks": {"fast": {"api": ["…"], "web": ["…"]}, "full": {…}}}\`. Каждая команда — строка для шелла, которая запускается из своей папки так, как её набрал бы человек; где у проекта есть свои скрипты — они. Сам их не запускай: agent-lens прогонит быструю ступень, как только файл записан, запомнит красное сейчас как красное до тебя и скажет, что не запускается или слишком медленно.`,
+    run: (n) => `${leadRu(n, "как поднять проект, и его смоук-тест")}
+
+Выясни, что это за проект: сервис или веб-приложение, которое поднимают, утилита командной строки, библиотека. Библиотеку поднимать не нужно: запиши \`{"run": null}\` в \`.claude/agent-lens.json\`, сохранив, что там есть, и остановись.
+Иначе найди, как его поднимают и пробуют, по тому, что в нём есть (compose-файлы, скрипты, Procfile, README):
+- up: одна команда, которая поднимает проект и возвращается, когда он отвечает, дождавшись здоровья; сервер на переднем плане не вернётся никогда, поэтому нужен флаг detach или wait у инструмента или скрипт, который запускает и ждёт.
+- smoke: одна команда, которая пробует главный путь насквозь: e2e-тест с тегом smoke, запрос к здоровью и к одной настоящей ручке, утилита с \`--help\` и одной настоящей командой.
+- down: что его останавливает, если up оставляет что-то запущенным.
+Если смоук-теста нет, предложи мне самый маленький, который доказывает, что главный путь работает, в тест-раннере проекта, и пиши его только после моего «да».
+Предложи команды мне через AskUserQuestion, запиши их в \`"run"\` в \`.claude/agent-lens.json\`, сохранив, что там есть, потом один раз запусти up, smoke и down и скажи, что сделала каждая.`,
+    permissions: (n, ctx) => `${leadRu(n, "что агенту можно и нельзя запускать")}
+
+В \`.claude/settings.json\` (создай, если нет; всё, что там есть, сохрани) в \`"permissions"\`:
+- \`"deny"\`: всегда эти, их не отменить: ${ctx.deny.map((r) => `\`${r}\``).join(", ")}. Потом предложи мне, что ещё в этом проекте должно быть под запретом: файлы с настоящими секретами (ключи, сертификаты, env-файл с настоящими значениями; прочитай файл, прежде чем его назвать: файл только с локальными значениями — не секрет), команды, которые публикуют, деплоят или ходят в прод.
+- \`"allow"\`: команды из \`.claude/agent-lens.json\` (проверки и run) правилами Bash по префиксу (\`Bash(npm run lint:*)\`), git только на чтение (status, diff, log, show), тест-раннеры проекта.
+Что ещё запретить и что разрешить, предложи мне через AskUserQuestion с multiSelect, и запиши правила выше и то, что я выберу.`,
+    workflow: (n, ctx) => {
+      const has = (skill) => ctx.skills.includes(skill);
+      const steps = [
+        has("grilling") ? "Идею прожимают скиллом `grilling` до того, как её предложить." : "Идею обсуждают со мной до того, как её записать.",
+        `${ctx.hasOpenspec ? "`openspec propose` пишет её как изменение, терминами глоссария" : "Её записывают планом в issue, терминами глоссария"}; ${has("domain-modeling") ? "при проектировании — скилл `domain-modeling`: " : "при проектировании "}новый термин в GLOSSARY.md, как только он устоялся, подходящее решение в docs/adr/.`,
+        `${has("tdd") ? "Задачи делаются скиллом `tdd` на швах, которые называет design" : "Задачи делаются через тест сначала, где в проекте есть тесты, на швах, которые называет design"}${has("diagnosing-bugs") ? "; баг — `diagnosing-bugs`" : ""}.`,
+        `agent-lens проверяет каждую правку по CLAUDE.md и CODING_STANDARDS.md, гоняет быстрые проверки в конце каждого хода и ревьюит diff каждого хода${has("code-review") ? "; всё изменение — `code-review`" : ""}.`,
+        `${ctx.hasOpenspec ? "При архиве" : "Когда готово,"} термины изменения уходят в GLOSSARY.md, решения в docs/adr/${has("retro") ? "; потом `/mattpocock-skills:retro`" : ""}.`
+      ];
+      return `${leadRu(n, "как идёт работа, и CLAUDE.md")}
+
+Напиши \`docs/agents/workflow.md\` (дополни, если он уже есть), не больше 120 строк, как идёт работа в этом проекте, и на каждом шаге скажи, где решаю я:
+${steps.map((t, i) => `${i + 1}. ${t}`).join(`
+`)}
+Потом в том же файле:
+- Когда задача здесь готова: полная ступень из \`.claude/agent-lens.json\` зелёная и смоук-тест, где он есть; по строке на то, что ещё есть в проекте (сторис, проверки доступности).
+- Как делится работа: основной агент — оркестратор (разбирает задачу, планирует, отдаёт части саб-агентам, следит за их порядком, решает архитектуру, сводит результаты и отвечает мне) и руками делает только то, что дешевле, чем объяснить; чтение кода, реализация, прогон проверок, браузер и ревью уходят саб-агентам, независимые части — параллельно одним сообщением, у каждого свои файлы (где части зависят друг от друга — сначала общий контракт; \`isolation: "worktree"\`, если их файлы могут пересечься), промпт самодостаточный (цель, файлы и чего не трогать, эти правила, когда готово, что ответить), ответы короткие; что они доложили, проверяется (полная ступень), прежде чем сказать мне.
+
+Потом \`CLAUDE.md\` (создай, если нет), не больше 120 строк:
+- первым правилом — язык, на котором со мной говорят: «Отвечай и задавай вопросы по-русски»;
+- короткий раздел указателей на ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, когда его читать; GLOSSARY.md подключи строкой \`@GLOSSARY.md\`, если в нём меньше 80 строк, чтобы термины действовали в каждом ходе, иначе дай указатель;
+- правила, нужные каждому ходу, из скриптов и конфигов проекта: как поставить и запустить (\`run\` из \`.claude/agent-lens.json\`, где он есть); проверки одной строкой: быстрая ступень идёт сама в конце каждого хода, полная — перед коммитом, пушем или мержем, и заливать только при зелёном; их команды — в \`.claude/agent-lens.json\`, сюда не копируются;
+- как коммитить.
+Всё остальное в нём, чему место в одном из этих файлов, переезжает туда.`;
+    },
+    config: (n) => `${leadRu(n, "OpenSpec читает эти файлы")}
+
+В \`openspec/config.yaml\` добавь в \`context\`, сохранив, что там есть, указатель на каждый из GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, что в нём, без копии его текста. Добавь в \`rules\`: proposal и спеки пишутся терминами глоссария, без слов из его _Avoid_; design называет ADR, которые задевает, а новое трудно отменимое решение идёт в docs/adr/; каждая задача называет тестовый шов, на котором её строят. Потом запусти \`openspec validate --all --strict\` и скажи, что он нашёл.`,
+    ci: (n, ctx) => `${leadRu(n, "проверки в CI")}
+
+CI проекта — в ${ctx.ci.map((f) => `\`${f}\``).join(", ")}. Добавь задачу, которая идёт на каждом merge или pull request и на каждом пуше в основную ветку, чтобы то, что гейт держит для моего агента, держалось для всех:
+- проверка документов: \`npx -y github:Darvl-52/agent-lens check\`;
+- полная ступень: \`npx -y github:Darvl-52/agent-lens checks full\`, в том образе, где собирают и тестируют свои задачи проекта.
+Обе читают \`.claude/agent-lens.json\` и требуют Node 20 или новее в образе задачи. Если в образе проекта Node нет, дай проверке документов свою задачу на образе с Node, а полную ступень оставь задачам проекта, которые гоняют те же команды; команды в CI не копируй. Пиши задачу так, как написаны задачи там (стадии, образы, кэши, правила), и покажи её мне через AskUserQuestion до записи, сказав, чего она стоит: Node, нужный в образе, своя задача, где его нет. Запиши после моего «да».`,
+    fix: (step, issues) => `Проверка файлов шага «${step}» из /setup-project нашла это. Исправь каждое в его файле и больше ничего не меняй:
+${issues.map((i) => `- ${RU.issue(i)}`).join(`
+`)}`
+  },
+  openspecFailed: (why) => `openspec init не запустился: ${why}. Запусти \`openspec init --tools claude\` сам и отправь шаг снова.`
+};
+var WORDS = { en: EN, ru: RU };
+
+// bin/cli.mjs
+var root = process.cwd();
+var w = WORDS.en;
+var disk = {
+  read: (rel) => readFile(join(root, rel), "utf8").catch(() => {
+    return;
+  }),
+  exists: (rel) => stat(join(root, rel)).then(() => true, () => false),
+  list: (rel) => readdir(join(root, rel), { withFileTypes: true }).then((entries) => entries.filter((e) => e.isFile() || e.isDirectory()).map((e) => ({ name: e.name, kind: e.isFile() ? "file" : "dir" })), () => [])
+};
+var live = new Set;
+for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]])
+  process.once(signal, () => {
+    for (const pid of live)
+      try {
+        process.kill(-pid, signal);
+      } catch {}
+    process.exit(code);
+  });
+var exec = (argv, cwd, timeoutMs) => new Promise((resolve, reject) => {
+  const isShown = argv[0] !== "git" && !(argv[0] === "sh" && argv[2] === "exit 0");
+  const isGroup = process.platform !== "win32";
+  const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ["ignore", "pipe", "pipe"], detached: isGroup });
+  if (isGroup && child.pid)
+    live.add(child.pid);
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => (stdout += d, isShown && process.stdout.write(d)));
+  child.stderr.on("data", (d) => (stderr += d, isShown && process.stderr.write(d)));
+  const timer = setTimeout(() => {
+    try {
+      if (isGroup)
+        process.kill(-child.pid, "SIGKILL");
+      else
+        child.kill("SIGKILL");
+    } catch {}
+  }, timeoutMs);
+  const done = () => (clearTimeout(timer), live.delete(child.pid));
+  child.on("error", (err) => (done(), reject(err)));
+  child.on("close", (code) => (done(), resolve({ exitCode: code ?? -1, stdout, stderr })));
+});
+async function check() {
+  const issues = await issuesIn(disk);
+  console.log(w.checked(issues));
+  return issues.length === 0 ? 0 : 1;
+}
+async function checks(tierName) {
+  if (tierName !== "fast" && tierName !== "full")
+    return usage();
+  const text = await disk.read(CONFIG);
+  if (text === undefined) {
+    console.error(`${CONFIG} is not here: /setup-project writes it.`);
+    return 1;
+  }
+  const { config, issues } = parseConfig(text);
+  if (issues.length > 0) {
+    console.error(issues.map((i) => w.issue(i)).join(`
+`));
+    return 1;
+  }
+  const tier = config.checks?.[tierName] ?? {};
+  if (Object.values(tier).every((list) => list.length === 0)) {
+    console.log(`No ${tierName} checks in ${CONFIG}.`);
+    return 0;
+  }
+  const { failures, timings, skipped } = await runTier(exec, root, tier, { isFast: tierName === "fast", now: () => Date.now() });
+  const lines = [...timings.map((t) => `${t.exitCode === 0 ? "✓" : "✗"} ${whereOf(t)} (${Math.round(t.ms / 1000)}s)`), ...skipped.map((t) => `– ${whereOf(t)} (no changed files for it)`)];
+  console.log(`
+${lines.join(`
+`)}`);
+  return failures.length === 0 ? 0 : 1;
+}
+function usage() {
+  console.error(`agent-lens check          the check of the docs /setup-project writes
+agent-lens checks fast    the fast tier of .claude/agent-lens.json
+agent-lens checks full    the full tier`);
+  return 2;
+}
+var [verb, arg] = process.argv.slice(2);
+var code = verb === "check" ? await check() : verb === "checks" ? await checks(arg) : usage();
+process.exit(code);

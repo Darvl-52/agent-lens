@@ -271,6 +271,11 @@ export type SetupDocIssueKind =
   | 'duplicate'
   | 'stale-map'
   | 'stale-term'
+  | 'checks-shape'
+  | 'checks-start'
+  | 'checks-slow'
+  | 'permissions-shape'
+  | 'permissions-deny'
 
 // One issue, in the file at its path from the root and the line where there is one; `detail` what
 // the kind wants named (the path, the size, the other file).
@@ -285,14 +290,33 @@ export type SetupFinding = { file: string; text: string; fix: string; isMinor?: 
 export type SetupJudge = { status: 'running' | 'done' | 'failed'; at: number; agentId?: string; findings: SetupFinding[]; isSent?: true }
 
 // The steps of /setup-project, in order.
-export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards' | 'workflow' | 'config'
+export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards' | 'checks' | 'run' | 'permissions' | 'workflow' | 'config' | 'ci'
 
 // Where a step stands: not reached, sent to Claude (or run), done, skipped by the person, or done
-// with its files failing the check, `isFixSent` once what failed went back to Claude.
-export type SetupStepState = { status: 'waiting' | 'sent' | 'done' | 'skipped' | 'failed'; isFixSent?: true; error?: string }
+// with its files failing the check, `isFixSent` once what failed went back to Claude; `needs` what
+// a step left out for want of a tool says to install.
+export type SetupStepState = { status: 'waiting' | 'sent' | 'done' | 'skipped' | 'failed'; isFixSent?: true; error?: string; needs?: string }
 
 // A run of /setup-project in a project: each step's state, the one under way.
 export type SetupRun = { root: string; steps: Record<SetupStepId, SetupStepState>; current: SetupStepId | null }
+
+// The checks of the project as `.claude/agent-lens.json` keeps them: the commands of each tier, for
+// the whole project or by the folder each runs in; and how the project is brought up and tried,
+// null where there is nothing to run (a library).
+export type SetupChecks = { fast: Record<string, string[]>; full: Record<string, string[]> }
+export type SetupRunCommands = { up?: string; smoke?: string; down?: string } | null
+
+// One command of a tier that went red: the folder it ran in, what it was, how it ended.
+export type SetupGateFailure = { folder: string; command: string; exitCode: number; output: string }
+
+// The gate at the end of the main loop's turn: the fast checks green, red (and how many times the
+// turn went back for it), red but as they were on this commit before the agent, let go once the
+// turn went back as often as it may, or let go as the turn sent back changed nothing: Claude holds
+// the red is not of its changes.
+export type SetupGate = { status: 'green' | 'red' | 'base' | 'released' | 'answered'; rounds: number; failures: SetupGateFailure[] }
+
+// The fast checks as they were on a commit: what was red there before the agent touched it.
+export type SetupBaseline = { sha: string; red: string[] }
 
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
@@ -394,6 +418,7 @@ declare module 'claude-code' {
       'setup.run': SetupRun | null
       'setup.issues': SetupDocIssue[] | null
       'setup.judge': SetupJudge | null
+      'setup.gate': SetupGate | null
       // A change archived, offered a retro of the work by Matt's command of that name.
       'setup.retro': { change: string; command: string } | null
 

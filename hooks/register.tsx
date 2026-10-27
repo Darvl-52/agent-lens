@@ -36,7 +36,7 @@ import {
   startRouter,
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
-import { afterSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { afterSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, gateStop, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -117,7 +117,7 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       startSpecTurn()
-      startSetupTurn($)
+      startSetupTurn($, e.text)
     }
     await startGuardTurn($, e.agentId).catch(() => {})
     return turnStart($, e, next)
@@ -173,7 +173,8 @@ export const register: Register = (on, options) => {
     return guardAfter($, e, held, checked).catch(() => checked)
   }).catch(($, e, next) => next(e))
 
-  on('classic.Stop', ($, e, next) => classicStop($, e, next)).catch(($, e, next) => next(e))
+  // The review's notes wait while the gate keeps the turn going: red code is fixed before it is read.
+  on('classic.Stop', ($, e, next) => classicStop($, e, ev => gateStop($, ev, next))).catch(($, e, next) => next(e))
   on('classic.SubagentStop', ($, e, next) => classicSubagentStop($, e, next)).catch(($, e, next) => next(e))
 
   // `lang` after any of them switches every part.

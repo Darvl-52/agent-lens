@@ -4,15 +4,23 @@ Prepares any project for working with the agent, and keeps what it writes from r
 is work the agent and the person can both follow: one set of instructions both read, every change
 to them made by a known way and checked like code.
 
-## What it needs
+## What it works with
+
+Any project, whatever its stack: nothing here reads a manifest. Where the steps need to know how the
+project is built, checked or run, Claude reads the project and puts what it found to the person.
+
+Recommended, never required:
 
 - The skills of `mattpocock-skills`: `setup-matt-pocock-skills`, `domain-modeling`,
-  `writing-for-agents`, `grilling`, `tdd`, `retro`. Missing, `/setup-project` stops and says how to
-  install them.
-- The `openspec` CLI. Missing, it stops the same way. A project with no `openspec/` folder is not an
-  error: initialising it is one of the steps.
+  `writing-for-agents`, `grilling`, `tdd`, `retro`. Missing, the step of Matt's setup is left out,
+  and the way of working names none of his skills.
+- The `openspec` CLI. Missing, its two steps are left out, and changes are planned in the issue.
+- A CI. Missing, the step that adds a job to it is left out.
 
-Found, it says so in one line (`✓ mattpocock-skills · ✓ OpenSpec 1.14.1, openspec/ here`) and goes on.
+`/setup-project` says in one line what it found and what it recommends
+(`✓ Matt’s skills installed · ○ OpenSpec recommended: npm install -g @fission-ai/openspec · ✓ CI: .gitlab-ci.yml`),
+and goes on. A step left out says why in the pane; installed later, the next `/setup-project` once
+the run is done brings it in.
 
 ## The files and what each holds
 
@@ -27,6 +35,8 @@ One fact lives in one file. Each file has one job and a size it may not pass.
 | `CODING_STANDARDS.md`  | Rules for code, each one an edit can be checked against                   | Style a linter enforces; wishes           | 300 lines   |
 | `docs/agents/workflow.md` | How work goes, step by step, which skill at each, where the person decides | Project facts                           | 120 lines   |
 | `openspec/config.yaml` | `context`: pointers to the files above; `rules`: per artifact             | Copies of their text                      |             |
+| `.claude/agent-lens.json` | The checks in two tiers, by folder where the project has parts; how it is brought up and tried | The commands copied as text into `CLAUDE.md` or CI | |
+| `.claude/settings.json` | What the agent may run, and what it may not: what cannot be taken back, the project's secrets | | |
 
 `CLAUDE.md` is read into every agent's context, so it stays small and points. The standards are
 read at review: agent-lens checks each edit against `CODING_STANDARDS.md` beside `CLAUDE.md`.
@@ -68,6 +78,32 @@ Like `openspec validate --strict`: a file that fails is an error, not a suggesti
 
 The row above the prompt says `docs: N` while a check fails; pressed, it opens what failed.
 
+## The gate
+
+A rule in `CLAUDE.md` that says "send only on green" is a wish: late in a long context the model
+forgets it, and "done" comes back over red tests. The gate makes it a check.
+
+- **The tiers.** `.claude/agent-lens.json` holds `checks.fast` (seconds, a minute or two: lint, types,
+  the tests of the changed files) and `checks.full` (everything, before a commit, push or merge),
+  as lines for the shell. `{files}` in a fast command takes the files changed against the commit;
+  with none, that command does not run. By folder, each part of a monorepo runs its own.
+- **At each turn's end.** A main turn that changed the project, through a tool or, in a git
+  repository, the shell (an untracked file by its content, up to 200 of them), has the fast tier run
+  before it ends. Red goes back to Claude with the tail of the output, and the same turn goes on;
+  three rounds at most, then the turn is let go and the row says `checks: N red`. A turn sent back
+  that changes nothing has said the red is not of its changes, as the gate asks it to: it is let go
+  then. Where no classic Stop hook runs, it goes as the next prompt instead, and the turn that prompt
+  starts goes on with its rounds; a prompt of the person's starts them again. The review's notes
+  wait while the gate keeps the turn going: red code is fixed before it is read.
+- **Red before the agent.** What is red on a commit before the agent touched it is not sent back: the
+  step of the checks keeps what is red when it first runs them, and `/setup-project baseline` keeps
+  it again on the person's word. It is not taken again by itself when the commit moves, as it would
+  take in the agent's own red: on another commit, or with none kept, Claude is told the red may be
+  older than its changes, and says so if it is.
+- **In CI.** `npx -y github:Darvl-52/agent-lens check` runs the check of the docs, and
+  `… checks full` the full tier, from the same file: what holds for the agent holds for everyone,
+  the colleague with no mod included.
+
 ## How work goes
 
 OpenSpec holds the changes: proposal, design, specs, tasks. It is the one place for them, so Matt's
@@ -90,15 +126,26 @@ and any can be skipped. A step is done once the checks of its files pass; where 
 shows what failed and sends it back to Claude.
 
 1. `/mattpocock-skills:setup-matt-pocock-skills`: the tracker, the labels, the domain layout. Done
-   already where `docs/agents/` holds its files.
+   already where `docs/agents/` holds its files; left out without Matt's skills.
 2. `openspec init --tools claude`, run by the mod itself. Done already where `openspec/` is there.
 3. What is already written: the project's own docs cut into pieces, each put to the person with its
    home among the files above, moved word for word on a yes. Done already where the project has none:
    no `AGENTS.md`, no `CONTEXT.md`, no other agent's rules, and no `CLAUDE.md` but one the steps wrote.
 4. The map: `GLOSSARY.md`, `ARCHITECTURE.md`, ADRs for the decisions the code shows, from the code.
 5. `CODING_STANDARDS.md`: read from the code, each rule put to the person before it is written.
-6. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run, check, commit.
-7. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts.
+6. The checks: the two tiers, read from the project and put to the person, in `.claude/agent-lens.json`.
+   The mod runs the fast tier once: a command that does not start or takes past two minutes goes back;
+   what is red is kept as red before the agent.
+7. Bringing it up: `run.up`, `run.smoke`, `run.down`, or `"run": null` for a library; a smoke test
+   proposed where there is none, written on the person's yes.
+8. Permissions in `.claude/settings.json`: the rules every project gets (`git push --force`,
+   `git reset --hard`, `git clean -f`, `rm -rf`; by prefix, so a rail against the slip, not a
+   sandbox), the project's secrets and deploys on the person's
+   word, the commands of the checks allowed.
+9. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run and commit;
+   the checks in a line that points to `.claude/agent-lens.json`.
+10. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts.
+11. A CI job running the check of the docs and the full tier through the CLI.
 
 Run again, it adds to what is there, never writes over it.
 
@@ -116,3 +163,5 @@ under the name they used before, `CONTEXT.md`, is renamed, as the check flags it
 2. Done: the docs agent on edits; `CODING_STANDARDS.md` among the review's rules; drift.
 3. Done: with `/spec`, `tdd` named in the tasks it sends, the archive's move of terms and decisions,
    `retro` offered once the change is archived.
+4. Done: any project: what is installed recommended, not required; the checks, the gate on them,
+   bringing it up, permissions, CI.
