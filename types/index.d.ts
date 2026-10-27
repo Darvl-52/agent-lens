@@ -318,6 +318,27 @@ export type SetupGate = { status: 'green' | 'red' | 'base' | 'released' | 'answe
 // The fast checks as they were on a commit: what was red there before the agent touched it.
 export type SetupBaseline = { sha: string; red: string[] }
 
+// What the review by lenses found under one lens: what was wrong where and what it risks, or that
+// it was clean and what was checked, with numbers, or that it does not apply and why.
+export type LensFinding = { file: string; line?: number; problem: string; risk: string }
+export type LensResult = { lens: string; status: 'findings' | 'clean' | 'na'; checked: string; findings: LensFinding[] }
+
+// The last review of the branch by lenses: running (its agent), done with what each lens found,
+// what the branch got wrong outside them and what is wrong in code it does not touch, or failed;
+// the base it was read against, and the one asked for ('' where it was the fork point), which a run
+// again works out anew; `isSent` once the findings went to Claude.
+export type LensReview = {
+  status: 'running' | 'done' | 'failed'
+  at: number
+  base: string
+  asked: string
+  agentId?: string
+  results: LensResult[]
+  outside: string[]
+  untouched: string[]
+  isSent?: true
+}
+
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
 
@@ -419,6 +440,12 @@ declare module 'claude-code' {
       'setup.issues': SetupDocIssue[] | null
       'setup.judge': SetupJudge | null
       'setup.gate': SetupGate | null
+
+      // The last review of the branch by lenses.
+      'lenses.review': LensReview | null
+      // An OpenSpec change with every task ticked, offered a review of the branch by lenses before
+      // its archive.
+      'lenses.offer': { change: string } | null
       // A change archived, offered a retro of the work by Matt's command of that name.
       'setup.retro': { change: string; command: string } | null
 

@@ -33,6 +33,7 @@ One fact lives in one file. Each file has one job and a size it may not pass.
 | `ARCHITECTURE.md`      | The map: modules, their bounds, who calls whom, where the data lives      | Detail the code says better               | 150 lines   |
 | `docs/adr/NNNN-*.md`   | A decision hard to reverse, surprising, the result of a trade-off; why    | Decisions that are none of the three      | short       |
 | `CODING_STANDARDS.md`  | Rules for code, each one an edit can be checked against                   | Style a linter enforces; wishes           | 300 lines   |
+| `LENSES.md`            | Kinds of mistake this project's reviews catch, beyond the mod's own lenses, each with where to look | A rule of one edit: that is a standard | 150 lines |
 | `docs/agents/workflow.md` | How work goes, step by step, which skill at each, where the person decides | Project facts                           | 120 lines   |
 | `openspec/config.yaml` | `context`: pointers to the files above; `rules`: per artifact             | Copies of their text                      |             |
 | `.claude/agent-lens.json` | The checks in two tiers, by folder where the project has parts; how it is brought up and tried | The commands copied as text into `CLAUDE.md` or CI | |
@@ -115,7 +116,8 @@ each step:
 2. `openspec propose`: written in the glossary's terms; `domain-modeling` while designing, new terms
    to the glossary as they settle.
 3. Tasks: `tdd` at the seams the design names; `diagnosing-bugs` for a bug.
-4. Review: agent-lens on each turn, `code-review` on the whole.
+4. Review: agent-lens on each edit and each turn; once every task is ticked, the branch through the
+   lenses (offered on the row); `code-review` on the whole.
 5. Archive: terms and decisions moved to `GLOSSARY.md` and the ADRs, checked; then `retro`.
 
 `docs/agents/workflow.md` says this for the project, and the person decides where it says so.
@@ -145,7 +147,9 @@ shows what failed and sends it back to Claude.
    word, the commands of the checks allowed.
 9. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run and commit;
    the checks in a line that points to `.claude/agent-lens.json`.
-10. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts.
+10. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts, each task
+    naming the rules and the lenses it touches, as OpenSpec hands the agent that builds a change no
+    rules of its own.
 11. A CI job running the check of the docs and the full tier through the CLI.
 
 Run again, it adds to what is there, never writes over it.
@@ -166,8 +170,10 @@ lesson is that mistake kept: shown to an agent that did not make it, put to the 
 the project's knowledge of its code lives, and then looked for in the rest of the code. A rule of the
 fix is tried on the few cases first, then on all of them.
 
-What a lesson teaches is a rule, and a rule has a home already: a judgement goes to
-`CODING_STANDARDS.md`, a mechanical one to the linter, a term to `GLOSSARY.md`. The cases it came
+What a lesson teaches has a home already: a rule one edit can be checked against goes to
+`CODING_STANDARDS.md`, a mechanical one to the linter, a term to `GLOSSARY.md`, and a kind of
+mistake no single rule can catch (a fix made in one flow and not its pair, code in another layer's
+place) to `LENSES.md`, as a lens the review of the branch looks through. The cases it came
 from are kept apart, in `.claude/lessons.json`, committed with the project: the team sees what the
 agent got wrong and what it was taught, and a colleague's agent does not learn it again. The file
 holds cases and nothing a rule says. It is checked as the other files are, held to its form and
@@ -178,7 +184,8 @@ keeps only its name.
    - the gate: a check red at a turn's end, green by the end of its rounds, with the diff between;
    - the review: a finding Claude fixed, with the hunk that fixed it;
    - the check of each edit: a rule of `CODING_STANDARDS.md` broken again, with what broke it. This
-     teaches no new rule; it says the rule is unclear, or belongs to the linter.
+     teaches no new rule; it says the rule is unclear, or belongs to the linter;
+   - the review by lenses: a finding Claude fixed, its lens named.
    A red that was not of the agent's changes, one let go, and a fix that weakened a check or a test
    are not cases. A subagent's mistakes count as the main loop's: the gate and the review see them
    alike. The person's own corrections in a prompt are not taken, as they cannot be told from a new
@@ -189,6 +196,7 @@ keeps only its name.
    - whether the fixes were right, not merely green: a fix that bent a test teaches the wrong rule;
    - the rule, in the form of `CODING_STANDARDS.md` (what, why, where it shows, what checks it), and
      its home: the linter with the rule's config and a test of its own where a tool can check it;
+     `LENSES.md`, as a kind and where to look, where no rule of one edit can catch it;
    - whether the rule is already written, in its file or the linter's config, and then which.
    What it cannot settle from the code it says, and the candidate waits.
 3. **Put to the person.** A tab of the pane shows each candidate: the cases, the fixes, how often,

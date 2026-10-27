@@ -13,6 +13,7 @@ const ROLES = `- CLAUDE.md: pointers to the files below, and the few rules every
 - ARCHITECTURE.md: the map: modules, their bounds, who calls whom, where the data lives. 150 lines at most.
 - docs/adr/NNNN-slug.md: one decision each that is hard to reverse, surprising, and the result of a trade-off, and why.
 - CODING_STANDARDS.md: rules for code a reviewer can check an edit against. 300 lines at most.
+- LENSES.md: the kinds of mistake this project's reviews catch, beyond the mod's own lenses, each with where to look for it; not rules of one edit, which go to CODING_STANDARDS.md. 150 lines at most.
 - docs/agents/workflow.md: how work goes, step by step, and where the person decides.`
 
 // Russian plural: 1 проблема, 2 проблемы, 5 проблем.
@@ -208,7 +209,7 @@ Put what else to deny and what to allow to me with AskUserQuestion with multiSel
         has('grilling') ? 'An idea is grilled with the `grilling` skill before it is proposed.' : 'An idea is talked through with me before it is written down.',
         `${ctx.hasOpenspec ? '`openspec propose` writes it as a change, in the glossary\'s terms' : 'It is written down as a plan in the issue, in the glossary\'s terms'}; ${has('domain-modeling') ? 'while designing, the `domain-modeling` skill: ' : 'while designing, '}a new term to GLOSSARY.md as it settles, a decision that qualifies to docs/adr/.`,
         `${has('tdd') ? 'The tasks are done with the `tdd` skill at the seams the design names' : 'The tasks are done test first where the project has tests, at the seams the design names'}${has('diagnosing-bugs') ? '; a bug with `diagnosing-bugs`' : ''}.`,
-        `agent-lens checks each edit against CLAUDE.md and CODING_STANDARDS.md, runs the fast checks at each turn's end and reviews each turn's diff${has('code-review') ? '; the whole change with `code-review`' : ''}.`,
+        `agent-lens checks each edit against CLAUDE.md and CODING_STANDARDS.md, runs the fast checks at each turn's end and reviews each turn's diff; before a commit or a merge request, the branch through lenses with \`/changes lenses\`${has('code-review') ? ', and the whole change with `code-review`' : ''}.`,
         `${ctx.hasOpenspec ? 'On archive' : 'Once done'}, the change's terms go to GLOSSARY.md and its decisions to docs/adr/${has('retro') ? '; then `/mattpocock-skills:retro`' : ''}.`,
       ]
       return `${leadEn(n, 'how work goes, and CLAUDE.md')}
@@ -229,7 +230,7 @@ Anything else in it that one of those files holds moves there.`
     config: (n: number, _: Ctx): string =>
       `${leadEn(n, 'OpenSpec reads the files')}
 
-In \`openspec/config.yaml\`, add to \`context\`, keeping what is there, a pointer to each of GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on what it holds, never a copy of its text. Add to \`rules\`: the proposal and the specs use the glossary's terms and none of the words it lists under _Avoid_; the design names the ADRs it touches, and a new decision hard to reverse goes to docs/adr/; each task names the test seam it is built at. Then run \`openspec validate --all --strict\` and say what it found.`,
+In \`openspec/config.yaml\`, add to \`context\`, keeping what is there, a pointer to each of GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md, LENSES.md where it is there, and docs/agents/workflow.md, a line each on what it holds, never a copy of its text. Add to \`rules\`: the proposal and the specs use the glossary's terms and none of the words it lists under _Avoid_; the design names the ADRs it touches, and a new decision hard to reverse goes to docs/adr/; each task names the test seam it is built at, and the rules of CODING_STANDARDS.md and the lenses it touches, by their names, so they are before the agent that builds it, not found once it broke them (OpenSpec gives the agent the rules of the artifacts only while it writes them, and tasks.md is what it reads as it builds). Then run \`openspec validate --all --strict\` and say what it found.`,
     ci: (n: number, ctx: Ctx): string =>
       `${leadEn(n, 'the checks in CI')}
 
@@ -414,7 +415,7 @@ ${ROLES}
         has('grilling') ? 'Идею прожимают скиллом `grilling` до того, как её предложить.' : 'Идею обсуждают со мной до того, как её записать.',
         `${ctx.hasOpenspec ? '`openspec propose` пишет её как изменение, терминами глоссария' : 'Её записывают планом в issue, терминами глоссария'}; ${has('domain-modeling') ? 'при проектировании — скилл `domain-modeling`: ' : 'при проектировании '}новый термин в GLOSSARY.md, как только он устоялся, подходящее решение в docs/adr/.`,
         `${has('tdd') ? 'Задачи делаются скиллом `tdd` на швах, которые называет design' : 'Задачи делаются через тест сначала, где в проекте есть тесты, на швах, которые называет design'}${has('diagnosing-bugs') ? '; баг — `diagnosing-bugs`' : ''}.`,
-        `agent-lens проверяет каждую правку по CLAUDE.md и CODING_STANDARDS.md, гоняет быстрые проверки в конце каждого хода и ревьюит diff каждого хода${has('code-review') ? '; всё изменение — `code-review`' : ''}.`,
+        `agent-lens проверяет каждую правку по CLAUDE.md и CODING_STANDARDS.md, гоняет быстрые проверки в конце каждого хода и ревьюит diff каждого хода; перед коммитом или merge request — ветка через линзы, \`/changes lenses\`${has('code-review') ? ', и всё изменение — `code-review`' : ''}.`,
         `${ctx.hasOpenspec ? 'При архиве' : 'Когда готово,'} термины изменения уходят в GLOSSARY.md, решения в docs/adr/${has('retro') ? '; потом `/mattpocock-skills:retro`' : ''}.`,
       ]
       return `${leadRu(n, 'как идёт работа, и CLAUDE.md')}
@@ -435,7 +436,7 @@ ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
     config: n =>
       `${leadRu(n, 'OpenSpec читает эти файлы')}
 
-В \`openspec/config.yaml\` добавь в \`context\`, сохранив, что там есть, указатель на каждый из GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, что в нём, без копии его текста. Добавь в \`rules\`: proposal и спеки пишутся терминами глоссария, без слов из его _Avoid_; design называет ADR, которые задевает, а новое трудно отменимое решение идёт в docs/adr/; каждая задача называет тестовый шов, на котором её строят. Потом запусти \`openspec validate --all --strict\` и скажи, что он нашёл.`,
+В \`openspec/config.yaml\` добавь в \`context\`, сохранив, что там есть, указатель на каждый из GLOSSARY.md, ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md, LENSES.md, где он есть, и docs/agents/workflow.md, по строке, что в нём, без копии его текста. Добавь в \`rules\`: proposal и спеки пишутся терминами глоссария, без слов из его _Avoid_; design называет ADR, которые задевает, а новое трудно отменимое решение идёт в docs/adr/; каждая задача называет тестовый шов, на котором её строят, и правила CODING_STANDARDS.md и линзы, которые она задевает, по именам, чтобы они были перед агентом, который её строит, а не нашлись, когда он их нарушил (правила артефактов OpenSpec даёт агенту только пока он их пишет, а tasks.md — то, что он читает, пока строит). Потом запусти \`openspec validate --all --strict\` и скажи, что он нашёл.`,
     ci: (n, ctx) =>
       `${leadRu(n, 'проверки в CI')}
 

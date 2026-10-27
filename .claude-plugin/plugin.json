@@ -1,7 +1,7 @@
 {
   "name": "agent-lens",
   "version": "0.11.0",
-  "description": "Work with the agent in one place: each edit checked against your CLAUDE.md as it is made and each turn's diff reviewed (/changes); the OpenSpec change read for you (/spec); the skill each prompt needs loaded for it (/router).",
+  "description": "Work with the agent in one place: each edit checked against your CLAUDE.md as it is made and each turn's diff reviewed, the branch through lenses (/changes); the OpenSpec change read for you (/spec); the skill each prompt needs loaded for it (/router).",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Darvl-52"
@@ -40,6 +40,12 @@
       "type": "boolean",
       "title": "Include ~/.claude/CLAUDE.md",
       "description": "Also check edits and reviews against your personal CLAUDE.md",
+      "default": false
+    },
+    "includeUserLenses": {
+      "type": "boolean",
+      "title": "Include ~/.claude/review-lenses.md",
+      "description": "Also review the branch through your personal lenses, beside the mod's own and the project's LENSES.md",
       "default": false
     },
     "specCritic": {

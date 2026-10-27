@@ -37,6 +37,7 @@ import {
 } from './router/router'
 import { PANE as ROUTER_PANE } from './router/state'
 import { afterSetupEdit, dismissRetro, endSetupAgent, endSetupTurn, gateStop, judgeReport, retroLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { configureLenses, dismissOffer, endLensAgent, lensesCommand, lensesLine, lensReport, offerLine, openPane as openLenses, PANE as LENSES_PANE, pane as lensesPane, runOffered } from './lenses/lenses'
 import { langCommand } from './switch'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
@@ -61,8 +62,8 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
 
 // What the person is told such a report went to, or undefined for any other text.
 async function agentReport($: Parameters<Hook<'prompt.submit'>>[0], text: string) {
-  // The docs agent first: the critic's check knows every agent this mod started.
-  return (await judgeReport($, text).catch(() => undefined)) ?? (await criticReport($, text).catch(() => undefined))
+  // The docs agent and the lenses first: the critic's check knows every agent this mod started.
+  return (await judgeReport($, text).catch(() => undefined)) ?? (await lensReport($, text).catch(() => undefined)) ?? (await criticReport($, text).catch(() => undefined))
 }
 
 export const register: Register = (on, options) => {
@@ -71,6 +72,7 @@ export const register: Register = (on, options) => {
   configureSpec(options)
   configureRouter(options)
   configureGuard(options)
+  configureLenses(options)
 
   on('session.start', async ($, e, next) => {
     await restoreLang($).catch(() => {})
@@ -136,6 +138,7 @@ export const register: Register = (on, options) => {
     } else {
       endSpecAgent($, e.agentId, e.answer)
       void endSetupAgent($, e.agentId, e.answer).catch(() => {})
+      void endLensAgent($, e.agentId, e.answer).catch(() => {})
     }
     await endGuardTurn($, e.agentId).catch(() => {})
     const result = await next(e)
@@ -178,7 +181,7 @@ export const register: Register = (on, options) => {
   on('classic.SubagentStop', ($, e, next) => classicSubagentStop($, e, next)).catch(($, e, next) => next(e))
 
   // `lang` after any of them switches every part.
-  on('command.run', { command: 'changes' }, async ($, e) => (await langCommand($, 'changes', e.args)) ?? (await guardCommand($, e.args)) ?? reviewCommand($, e))
+  on('command.run', { command: 'changes' }, async ($, e) => (await langCommand($, 'changes', e.args)) ?? (await guardCommand($, e.args)) ?? (await lensesCommand($, e.args)) ?? reviewCommand($, e))
   on('command.run', { command: 'spec' }, async ($, e) => (await langCommand($, 'spec', e.args)) ?? specCommand($, e))
   on('command.run', { command: 'setup-project' }, ($, e) => setupCommand($, e.args))
   on('command.run', { command: 'router' }, async ($, e) => (await langCommand($, 'router', e.args)) ?? routerCommand($, e))
@@ -227,6 +230,16 @@ export const register: Register = (on, options) => {
           <Button key="dismiss-retro" label="×" plain dimColor onPress={() => void dismissRetro($).catch(() => {})} />,
         ]),
       )
+    const offered = await offerLine($).catch(() => null)
+    if (offered)
+      rows.unshift(
+        row('lenses-offer-row', <Text color="warning">{offered}</Text>, [
+          <Button key="run-lenses" label="/changes lenses" plain onPress={() => void runOffered($).catch(() => {})} />,
+          <Button key="dismiss-lenses" label="×" plain dimColor onPress={() => void dismissOffer($).catch(() => {})} />,
+        ]),
+      )
+    const lenses = await lensesLine($).catch(() => null)
+    if (lenses) rows.unshift(row('lenses-row', <Text color="warning">{lenses}</Text>, <Button key="open-lenses" label="/changes lenses" plain dimColor onPress={() => void openLenses($).catch(() => {})} />))
     const docs = await setupLine($).catch(() => null)
     if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(() => {})} />))
     rows.unshift(...guarded)
@@ -243,4 +256,5 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: SPEC_PANE }, ($, e) => specPane($, e))
   on('ui.render', { component: 'Pane', requestId: ROUTER_PANE }, ($, e) => routerPane($, e))
   on('ui.render', { component: 'Pane', requestId: SETUP_PANE }, ($, e) => setupPane($, e))
+  on('ui.render', { component: 'Pane', requestId: LENSES_PANE }, ($, e) => lensesPane($, e))
 }

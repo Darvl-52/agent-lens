@@ -681,7 +681,8 @@ test('a change with every task ticked, a clean check and nothing to decide goes 
   expect(submitted).toHaveLength(1)
   expect(submitted[0]).toMatchObject({ asUser: true })
   expect(submitted[0]!.text).toMatch(/^Archive the OpenSpec change "door" \(\/proj\/openspec\/changes\/door\)\. Where the project has its own skill/)
-  expect(toasts).toEqual(['Sent to Claude to archive.'])
+  // Every task ticked, the branch was offered a look through the lenses first, once.
+  expect(toasts).toEqual(['"door" has every task ticked: read the branch through lenses before the archive?', 'Sent to Claude to archive.'])
   expect(await pane.find({ type: 'Text', text: /^Sent to Claude to archive\.$/ })).toBeDefined()
   // Still here after the turn: it goes again.
   await pane.press({ key: 'archive-again' })

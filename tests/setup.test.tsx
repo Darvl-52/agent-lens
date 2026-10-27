@@ -632,3 +632,17 @@ test('checks written with no command in them do not close the step: the gate wou
   await w.settle()
   expect(w.submitted).toHaveLength(1)
 })
+
+test('OpenSpec’s config has each task name the rules and the lenses it touches: they are before the agent that builds it', async ($, on) => {
+  const files = {
+    ...UP_TO_CHECKS,
+    'CLAUDE.md': 'Read `ARCHITECTURE.md`.\n',
+    'docs/agents/workflow.md': '# How work goes\n',
+    '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}, "run": null}',
+    '.claude/settings.json': SETTINGS,
+  }
+  const w = await world($, on, { files })
+  await w.setup()
+  await w.settle()
+  expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*LENSES\.md where it is there[\s\S]*each task names the test seam it is built at, and the rules of CODING_STANDARDS\.md and the lenses it touches/)
+})

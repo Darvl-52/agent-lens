@@ -110,7 +110,7 @@ const STALE_COMMITS = 15
 // How many of the map's paths and the glossary's terms are looked up, at most.
 const DRIFT_PATHS = 40
 const DRIFT_TERMS = 80
-const DOC_PATH = /(?:^|[\\/])(?:CLAUDE|AGENTS|GLOSSARY|GLOSSARY-MAP|CONTEXT|CONTEXT-MAP|ARCHITECTURE|CODING_STANDARDS|workflow)\.md$|[\\/]docs[\\/]adr[\\/][^\\/]+\.md$/
+const DOC_PATH = /(?:^|[\\/])(?:CLAUDE|AGENTS|GLOSSARY|GLOSSARY-MAP|CONTEXT|CONTEXT-MAP|ARCHITECTURE|CODING_STANDARDS|LENSES|workflow)\.md$|[\\/]docs[\\/]adr[\\/][^\\/]+\.md$/
 
 async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]

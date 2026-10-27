@@ -10,6 +10,7 @@ export const LIMITS: Record<string, number> = {
   'ARCHITECTURE.md': 150,
   'CODING_STANDARDS.md': 300,
   'docs/agents/workflow.md': 120,
+  'LENSES.md': 150,
 }
 
 // The glossary's old names, which Matt's skills no longer read, and the names they read now.
@@ -17,7 +18,7 @@ export const OLD_GLOSSARIES: Record<string, string> = { 'CONTEXT.md': 'GLOSSARY.
 
 // The files read, by their path from the project's root. The glossaries are the root's, and those
 // GLOSSARY-MAP.md names; the ADRs are those of docs/adr/. AGENTS.md counts where CLAUDE.md imports it.
-export const DOC_FILES = ['CLAUDE.md', 'AGENTS.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md', 'docs/agents/workflow.md', ...Object.keys(OLD_GLOSSARIES)]
+export const DOC_FILES = ['CLAUDE.md', 'AGENTS.md', 'GLOSSARY.md', 'GLOSSARY-MAP.md', 'ARCHITECTURE.md', 'CODING_STANDARDS.md', 'LENSES.md', 'docs/agents/workflow.md', ...Object.keys(OLD_GLOSSARIES)]
 export const ADR_DIR = 'docs/adr'
 
 const isGlossary = (file: string) => /(^|\/)GLOSSARY\.md$/.test(file)

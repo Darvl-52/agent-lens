@@ -4,6 +4,7 @@ import type { EngineInterface, Hook, MatchedHook, ModelEffort, ModelUsage, Plugi
 import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode, ShellRun, Spent, Tab } from '../../types/review'
 import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { userFilePath } from '../core/user'
 import { specInView } from '../spec/lens'
 import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
@@ -270,12 +271,9 @@ async function withBusy($: EngineInterface, kind: Busy, work: () => Promise<void
   }
 }
 
-// The personal CLAUDE.md, where Claude Code keeps it.
-async function userRulesPath($: EngineInterface) {
-  const config = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
-  if (config) return joinPath(config, 'CLAUDE.md')
-  const home = (await $.env.get('HOME').catch(() => undefined)) || (await $.env.get('USERPROFILE').catch(() => undefined))
-  return home ? joinPath(home, '.claude/CLAUDE.md') : undefined
+// The personal CLAUDE.md.
+function userRulesPath($: EngineInterface) {
+  return userFilePath($, 'CLAUDE.md')
 }
 
 // The rules in force for `paths`, nearest first, each once, as the engine reads them, its
@@ -1007,7 +1005,7 @@ async function earlierFindings($: EngineInterface, diff: Diff | null) {
 }
 
 export async function registerCommand($: EngineInterface) {
-  await $.command.register({ name: 'changes', description: (await wordsIn($)).description, argumentHint: '[rules|lang en|ru]' })
+  await $.command.register({ name: 'changes', description: (await wordsIn($)).description, argumentHint: '[rules|lenses [base]|lang en|ru]' })
 }
 
 export function configureReview(options: PluginOptions) {
