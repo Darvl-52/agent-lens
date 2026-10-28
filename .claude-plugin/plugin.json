@@ -1,6 +1,6 @@
 {
   "name": "agent-lens",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Work with the agent in one place: each edit checked against your CLAUDE.md as it is made and each turn's diff reviewed, the branch through lenses (/changes); the OpenSpec change read for you (/spec); the skill each prompt needs loaded for it (/router).",
   "types": "./types/index.d.ts",
   "author": {
