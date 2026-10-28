@@ -6,6 +6,7 @@ import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
+import { isOn as isPartOn } from '../parts/parts'
 import { specInView } from '../spec/lens'
 import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
@@ -1066,7 +1067,7 @@ type ToolCallEvent = Parameters<Hook<'tool.call'>>[1]
 type ToolCallDone = Awaited<ReturnType<Parameters<Hook<'tool.call'>>[2]>>
 
 const changeOf = (e: ToolCallEvent) =>
-  settings.live === 'off' ? undefined
+  settings.live === 'off' || !isPartOn('live') ? undefined
   : e.tool === 'Edit' ? describeEdit(e.file_path, e.old_string, e.new_string)
   : e.tool === 'Write' ? describeWrite(e.file_path, e.content)
   : undefined

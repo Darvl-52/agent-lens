@@ -491,6 +491,7 @@ and the list of skills, and picks the one that fits, or none. Claude is then tol
 - The project's own skills (its `.claude/skills` and `.claude/commands`) come first in what the model reads, marked `[project]`, and it picks one of them over a general skill for the same kind of work: in a project with OpenSpec's skills, "write a spec for these bugs" gets `openspec-propose`, not a general spec skill. Where none of them fits, the general skills are routed as before, in the same one call.
 - Your rules are checked first; a word matches at the start of a word in any case, so `test` finds `tests` but not `latest`, and `тест` finds `тесты`. A rule that fires skips the model, its skill loaded already or not.
 - Otherwise the model picks, for prompts that say more than a word or two. It sees your previous prompt and the end of Claude's last answer, so "now the tests" reads as part of the work under way, and the OpenSpec changes in progress with their tasks, so it can name the change. It reads at most the first 4,000 characters of a prompt and 400 of each skill's description.
+- The model says first what the prompt is: work, a question, an answer to Claude or a step of the work under way, or small talk. Only work gets a skill: "why is the discount taken before delivery?" asks about the cart and loads nothing, however much it is about code. The pane's history says which it was (`a question, not work: no skill`).
 - A skill already loaded in the conversation is not picked again until `/clear`, `/resume` or a compaction. After `/clear` or `/resume` the router also forgets your previous prompt and Claude's last answer, takes the last pick off the status line, and reads its mode and your rules again (off says so there).
 - A prompt that names a skill (`/tdd`, `mattpocock-skills:tdd`), a slash command, and prompts from other plugins or scheduled runs are left alone.
 - If the model fails or is slow (4 seconds; it answers in one or two), the prompt goes through as typed, and the status line says how: `skill: model failed: no answer in 4 s`, `overloaded (529)`, `rate-limited (429)`, `no connection`, `answer not read`. Once is a blip, and the next prompt asks again; after two failures in a row the model is not asked for five minutes, so the prompts after it are not kept waiting too, and the status line says when it is asked again (`skill: model failed (overloaded (529)), asked again in 4 min`). A prompt stopped with Esc is no failure.
@@ -558,6 +559,11 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | `/router auto\|suggest\|off` | How the router acts on a pick.                                      |
 | `/router add`, `when`, `ignore`, `rm`, `list` | Your routing rules, as under The skill for each prompt. |
 | `/changes lang ru`         | Every part in Russian, its model's answers too; `lang en` back. The same after `/spec` or `/router`. |
+| `/agent-lens`              | Turn each part on or off: the review, its check of each edit, the OpenSpec change, the router, the guard, the lenses, the setup. |
+
+## Turning parts off
+
+`/agent-lens` opens a menu of the parts, each with its key (`1`–`7`) to turn it on or off, kept for every session. A part turned off does none of its work: no hooks, no model calls, nothing on the row; its command still answers, with where to turn it on. An agent the part started before it was turned off finishes and reports as before. The check of each edit goes with the review: with the review off it is off too. A part's own switch (`/router off`, `/changes guard off`, the settings below) still holds while the part is on.
 
 ## Settings
 

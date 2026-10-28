@@ -7,6 +7,11 @@ export const NO_SETUP: Setup = { rules: [], hints: {}, ignored: [] }
 // How a model call failed, for the status line: the person reads why no skill was picked.
 export type Failure = { kind: 'timeout'; seconds: number } | { kind: 'api'; status: number | null; error: string } | { kind: 'unread' }
 
+// What a request is, as the model reads it: only work gets a skill. A question about the work, an
+// answer to Claude or a nod would load one for nothing, and Claude, told to, loads it.
+export type Kind = 'work' | 'question' | 'continue' | 'chat'
+const KINDS: readonly Kind[] = ['work', 'question', 'continue', 'chat']
+
 // At most this many skills for one prompt: two that both fit happen (a spec and a test-first build),
 // more is a guess.
 export const MAX_PICKS = 2
@@ -146,11 +151,17 @@ export function resolveSetup(setup: Setup, skills: readonly Skill[]): Setup {
 // What the model is told it does: one stable block, so its cache holds across prompts.
 export const SYSTEM = `You route a developer's request in Claude Code to the skills that fit it. A skill is a set of instructions Claude loads before doing a kind of work.
 
-Pick a skill only when it clearly fits the main thing the request asks for. Skills marked [project] are the project's own: where one fits, pick it over a general skill for the same kind of work (its spec skill over a general spec skill); where none fits, the general skills are there as before. Pick none for small talk, a question answered in a few lines, a yes or no, or a follow-up to the work already under way, unless the request starts a different kind of work. Never pick a skill listed as already loaded. Pick at most ${MAX_PICKS}.
+First say what kind of request it is, in "kind":
+- "work": it asks Claude to do a piece of work a skill could be for: build, change, fix, debug, test, review, plan, write a spec or a document.
+- "question": it asks to explain, clarify, check or tell something, however long and however much about code or the work under way ("почему так?", "а где это задаётся?", "можно ли…", "что будет, если…"). A question that also asks to change something is work.
+- "continue": it answers Claude or goes on with the same work already under way: a choice between options Claude gave, a correction, "да, делай", "и ещё кнопку туда же". A follow-up that starts a different kind of work ("now write a spec for this", "теперь отревьюй") is work.
+- "chat": small talk, thanks, a yes or no.
+
+Pick skills only for "work", and only when one clearly fits the main thing the request asks for; for any other kind, no picks. Skills marked [project] are the project's own: where one fits, pick it over a general skill for the same kind of work (its spec skill over a general spec skill); where none fits, the general skills are there as before. Never pick a skill listed as already loaded. Pick at most ${MAX_PICKS}.
 
 Where the project uses OpenSpec and the request is about one of its changes, name the change in "args" for a skill that works on a change.
 
-Reply with JSON alone: {"picks":[{"skill":"<exact name from the list>","why":"<under 12 words>","args":"<optional>"}]}. No picks: {"picks":[]}.`
+Reply with JSON alone: {"kind":"work","picks":[{"skill":"<exact name from the list>","why":"<under 12 words>","args":"<optional>"}]}. No picks: {"kind":"question","picks":[]}.`
 
 // What the model is sent, at most: a skill's description or hint, all the skills, the request. A
 // pasted log or file says what it is in its first lines.
@@ -193,19 +204,29 @@ export function promptOf(text: string, c: Context): { skills: string; rest: stri
   }
 }
 
-// The picks in a reply: the first JSON object in it, each pick naming a skill on the list, each once,
-// at most MAX_PICKS; undefined where the reply holds no such object.
-export function parseReply(reply: string, skills: readonly Skill[]): Pick[] | undefined {
+// The first JSON object in a reply; undefined where there is none.
+function jsonOf(reply: string): unknown {
   const start = reply.indexOf('{')
   const end = reply.lastIndexOf('}')
   if (start < 0 || end < start) return undefined
-  let value: unknown
   try {
-    value = JSON.parse(reply.slice(start, end + 1))
+    return JSON.parse(reply.slice(start, end + 1))
   } catch {
     return undefined
   }
-  const raw = (value as { picks?: unknown })?.picks
+}
+
+// What the model took the request for; undefined where the reply does not say, and its picks stand.
+export function kindOf(reply: string): Kind | undefined {
+  const kind = (jsonOf(reply) as { kind?: unknown } | undefined)?.kind
+
+  return KINDS.find(k => k === kind)
+}
+
+// The picks in a reply: the first JSON object in it, each pick naming a skill on the list, each once,
+// at most MAX_PICKS; undefined where the reply holds no such object.
+export function parseReply(reply: string, skills: readonly Skill[]): Pick[] | undefined {
+  const raw = (jsonOf(reply) as { picks?: unknown } | undefined)?.picks
   if (!Array.isArray(raw)) return undefined
   const picks: Pick[] = []
   for (const p of raw) {

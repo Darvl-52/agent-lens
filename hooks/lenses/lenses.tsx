@@ -6,6 +6,7 @@ import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
+import { isOn } from '../parts/parts'
 import { below, joinPath } from '../review/diff'
 import { parseLensReport, sendsOut } from './report'
 import { type Catalog, type RepoChanges, WORDS } from './words'
@@ -266,7 +267,7 @@ async function sendFindings($: EngineInterface, after = '') {
 // through the lenses, once a change, the person's to run. OpenSpec hands the agent that builds a
 // change no rules of the code, so this is the look at the whole of it before it is done.
 export async function offerLenses($: EngineInterface, change: string) {
-  if (settings.mode === 'off') return
+  if (settings.mode === 'off' || !isOn('lenses')) return
   const root = await $.session.root()
   const offered = ((await $.store.get(offeredKey(root)).catch(() => undefined)) ?? []) as string[]
   if (offered.includes(change)) return

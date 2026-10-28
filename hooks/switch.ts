@@ -2,6 +2,7 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Lang } from '../types'
 import { langIn, langOf, setLang } from './core/lang'
+import { registerCommand as registerPartsCommand } from './parts/parts'
 import { registerCommand as registerReviewCommand } from './review/review'
 import { WORDS as REVIEW_WORDS } from './review/words'
 import { registerCommand as registerRouterCommand } from './router/state'
@@ -18,6 +19,7 @@ export async function switchLang($: EngineInterface, lang: Lang) {
   await registerSpecCommand($).catch(() => {})
   await registerRouterCommand($).catch(() => {})
   await registerSetup($).catch(() => {})
+  await registerPartsCommand($).catch(() => {})
   await forgetSaid($).catch(() => {})
 }
 

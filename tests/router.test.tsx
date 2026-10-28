@@ -120,6 +120,27 @@ test('with no rule, the model picks and Claude is told to load the skill', async
   expect(r.status.at(-1)).toBe('skill: tdd')
 })
 
+test('a question about the work gets no skill, whatever the model picked', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"question","picks":[{"skill":"tdd","why":"about the cart"}]}' })
+  await r.send('А почему скидка по промокоду считается до доставки, а не после?')
+  expect(r.asked).toHaveLength(1)
+  expect(r.entered[0]!.context).toEqual([])
+  expect(r.status.at(-1)).toBeUndefined()
+})
+
+test('an answer that names no work and carries no picks is read, not a failure', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"chat"}' })
+  await r.send('Спасибо, всё понятно с этой скидкой по промокоду')
+  expect(r.entered[0]!.context).toEqual([])
+  expect(r.status.at(-1)).toBeUndefined()
+})
+
+test('work the model names as such is routed', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","picks":[{"skill":"tdd","why":"a new feature"}]}' })
+  await r.send('Добавь в корзину скидку по промокоду')
+  expect(r.entered[0]!.context.at(-1)).toContain('`mattpocock-skills:tdd`')
+})
+
 test('a prompt through an SDK host (claude -p, the desktop app) is routed like a typed one', async ($, on) => {
   const r = await router($, on, { reply: '{"picks":[{"skill":"diagnosing-bugs","why":"flaky total"}]}' })
   await r.send('В корзине иногда итог считается неправильно, разберись', { kind: 'sdk' })
