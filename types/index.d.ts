@@ -146,6 +146,9 @@ export type SpecLens = {
   fingerprint: string
   // Whether this change was ever read here: until then there is nothing to compare with.
   isSeen: boolean
+  // When the change was last worked with: a file of it edited, or its pane opened. Absent from a
+  // value an older version kept.
+  usedAt?: number
   // Each test case and where it stands; absent from a value an older version kept.
   testCases?: SpecTestCase[]
   deltas: SpecDelta[]

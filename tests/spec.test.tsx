@@ -394,6 +394,16 @@ test('the row shows the latest change, its tasks and test cases; none where ther
   expect(await bandText($)).toBe('◆ door · tasks 1/2 · tests 1 auto, 1 manual')
 })
 
+test('a change neither edited nor opened for half a day leaves the row; /spec brings it back', async ($, on) => {
+  const { spec, settle, clock } = await project($, on, { door: DOOR })
+  expect(await bandText($)).toBe('◆ door · tasks 1/2 · tests 1 auto, 1 manual')
+  await clock.advance(12 * 60 * 60_000 + 1)
+  expect(await bandText($)).toBeUndefined()
+  await spec()
+  await settle()
+  expect(await bandText($)).toMatch(/^◆ door · /)
+})
+
 test('a test case marked neither way turns the row red and is named', async ($, on) => {
   await project($, on, { door: { ...DOOR, 'test-cases.md': `${TESTS}\n## TC-03: Expiry\n\nSteps only.\n` } })
   expect(await bandText($)).toBe('◆ door · TC-03 unmarked · tasks 1/2 · tests 1 auto, 1 manual')
