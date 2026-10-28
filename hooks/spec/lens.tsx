@@ -73,6 +73,7 @@ const CRITIC_STALE_MS = 20 * 60_000
 // Store keys, per project folder and change: the change picked in the pane, the text read last
 // time (what changes are counted from), and the brief in each language.
 const pickedKey = (root: string) => `picked:${keyOf(root)}`
+const openedKey = (root: string) => `opened:${keyOf(root)}`
 const seenKey = (root: string, change: string) => `seen:${keyOf(root)}:${change}`
 const briefKey = (root: string, lang: string, change: string) => `brief:${lang}:${keyOf(root)}:${change}`
 // The points of a change sent to Claude decided, or for it to decide, the latest last.
@@ -279,6 +280,7 @@ async function scanOnce($: EngineInterface, isTestsFresh: boolean) {
   const changes = active.sort((a, b) => b.at - a.at).map(c => c.name)
   const picked = (await $.store.get(pickedKey(root)).catch(() => undefined)) as string | undefined
   const current = picked !== undefined && changes.includes(picked) ? picked : changes[0]!
+  const opened = (await $.store.get(openedKey(root)).catch(() => undefined)) as number | undefined
   files = await readTree($, join(dir, current))
   const seen = (await $.store.get(seenKey(root, current)).catch(() => undefined)) as Files | undefined
   const fingerprint = fingerprintOf(files)
@@ -307,6 +309,7 @@ async function scanOnce($: EngineInterface, isTestsFresh: boolean) {
     fingerprint,
     isSeen: seen !== undefined,
     deltas: seen ? deltasHeldOf(seen, fingerprint) : [],
+    usedAt: Math.max(active.find(c => c.name === current)!.at, opened ?? 0),
   }
   const lang = await langIn($)
   const brief = (await $.store.get(briefKey(root, lang, current)).catch(() => undefined)) as Brief | undefined
@@ -1025,6 +1028,9 @@ export async function openPane($: EngineInterface, tab?: Tab) {
   const lens = await read($, lensAtom)
   if (!lens) return false
   if (tab) await update($, tabAtom, () => tab)
+  const now = await $.clock.now()
+  await $.store.set(openedKey(lens.root), now).catch(() => {})
+  await update($, lensAtom, l => (l ? { ...l, usedAt: now } : l))
   if (!lens.isSeen) await markRead($)
   await $.ui.open({ id: PANE, title: (await wordsIn($)).title(lens.current), focus: true, closeOnEscape: true })
   if ((await read($, briefAtom))?.fingerprint !== lens.fingerprint) void makeBrief($).catch(() => {})
@@ -1051,6 +1057,8 @@ type Tone = 'error' | 'warning' | 'success'
 const SEP = ' · '
 // Cells of the Tasks tab's progress bar.
 const BAR = 10
+// A change neither edited nor opened for this long is not the work at hand: the row leaves it out.
+const IDLE_MS = 12 * 60 * 60_000
 
 // What the row and the pane say of the change in view, and its colour as a whole: red while a test
 // case says neither how it is automated nor why it is manual or the spec has errors; yellow while
@@ -1167,10 +1175,10 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
 // The change in view as the row above the prompt says it, in `bodyColumns` less the `taken` the rest
 // of the row holds: what wants a look, red before yellow, then its tasks and test cases, each part
 // opening the pane on the tab that tells more of it. A narrow row drops progress before it drops a
-// problem, and says how many parts it dropped.
+// problem, and says how many parts it dropped. None while the change lies idle: /spec brings it back.
 export async function specLine($: EngineInterface, e: AbovePromptEvent, taken: number) {
   const lens = await read($, lensAtom)
-  if (!lens) return null
+  if (!lens || (lens.usedAt !== undefined && (await $.clock.now()) - lens.usedAt > IDLE_MS)) return null
   const { Text, Button } = $.ui.resolve(e)
   const w = await wordsIn($)
   const s = await statusOf($, lens)
