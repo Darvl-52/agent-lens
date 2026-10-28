@@ -1,14 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Hook, TurnCompleteReason } from 'claude-code'
 
-import type { Baseline, DocIssue, Finding, Gate, Judge, Run, StepId, StepState } from '../../types/setup'
+import type { Baseline, DocIssue, Finding, Gate, Judge, Run, StepId, StepState, Term, TermCheck, TermVerdict } from '../../types/setup'
 import type { PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { WORDS as LENS_WORDS } from '../lenses/words'
 import { below, joinPath, parentOf } from '../review/diff'
 import { diffLines } from '../spec/spec'
 import { baselineOf, CONFIG, DENY, type Exec, fingerprintOf, joinRel, newRed, parseConfig, permissionIssues, runTier, SETTINGS, timingIssues, whereOf } from './checks'
-import { ADR_DIR, type Disk, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
+import { ADR_DIR, type Disk, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, parseTermsInUse, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
 import { WORDS } from './words'
 
 // The mod's own lenses by their names in a language, as a rule of the tasks names them where the
@@ -25,6 +25,11 @@ const judgeAtom = atom({ plugin: 'agent-lens', key: 'setup.judge' } as const, nu
 const retroAtom = atom({ plugin: 'agent-lens', key: 'setup.retro' } as const, null)
 const gateAtom = atom({ plugin: 'agent-lens', key: 'setup.gate' } as const, null)
 const rulesOfferAtom = atom({ plugin: 'agent-lens', key: 'setup.rulesOffer' } as const, null)
+const termsAtom = atom({ plugin: 'agent-lens', key: 'setup.terms' } as const, null)
+const questionsAtom = atom({ plugin: 'agent-lens', key: 'setup.questions' } as const, null)
+// What is known of the terms git finds nowhere in a project, each by its glossary and the term.
+const termsKey = (root: string) => `setup:terms:${root}`
+const termKey = (t: Term) => `${t.file}\n${t.term}`
 const rulesDismissedKey = (root: string) => `setup:rules-dismissed:${root}`
 // The project whose rule went to Claude: not offered again there while Claude is at it; offered
 // again after a /clear where it is still missing.
@@ -110,9 +115,27 @@ const runBefore = new Map<string, string | undefined>()
 // What may have gone stale, as last looked for: at the session's start, on /setup-project check,
 // and after a turn while some is found.
 let drift: DocIssue[] = []
+// The glossary terms git found nowhere else, as last looked for with what may have gone stale: the
+// docs agent reads them before the person is asked.
+let unfound: Term[] = []
+// The terms the person put off, or sent to Claude to take out: not asked again in this session.
+const later = new Set<string>()
+// The person's last answer on a term, while it may be undone, and what was known of the term before.
+let lastAnswer: { term: Term; answer: 'kept' | 'later'; was?: TermVerdict } | null = null
+// The terms the docs agent gave no word on, as it did not start or gave no list: the person's
+// questions in this session, the agent's again in the next.
+const unjudged = new Set<string>()
+// The terms whose answer is being taken: a key pressed again meanwhile answers nothing more.
+const answering = new Set<string>()
+// Whether the docs agent is being started on the terms: not yet kept as running.
+let isSpawningTerms = false
 // The docs agents this module started, by id, as long as it runs.
 const judges = new Set<string>()
 const JUDGE_MODEL = 'sonnet'
+// Looking for a term in other forms and names is a search, not a reading of edits.
+const TERMS_MODEL = 'haiku'
+// How long the docs agent's word on a term holds before it looks again; the person's holds for good.
+const TERM_MS = 30 * 86_400_000
 const JUDGE_STALE_MS = 20 * 60_000
 // What each file the agent is shown keeps of each side of an edit.
 const EDIT_LIMIT = 12_000
@@ -213,13 +236,15 @@ export async function checkProject($: EngineInterface) {
 }
 
 // What may have gone stale: each part of the map git shows much changed since the map was last
-// edited, and each glossary term found nowhere else in its repository. Looked for beside the
-// session's start, as it runs git once per path and term.
-async function driftIn($: EngineInterface, root: string) {
+// edited, and each glossary term found nowhere else in its repository, which the docs agent reads
+// before it is the person's question. Looked for beside the session's start, as it runs git once
+// per path and term.
+async function driftIn($: EngineInterface, root: string): Promise<{ issues: DocIssue[]; terms: Term[] }> {
   const files = await readDocs($, root)
   // A UTF-8 locale: in C, `-i` matches no letter beyond ASCII, and a term in Cyrillic is found only as written.
   const git = (cwd: string, args: string[]) => $.process.run(['git', '-C', cwd, ...args], { cwd, env: { LC_ALL: 'C.UTF-8' }, timeoutMs: 15_000 }).catch(() => null)
   const found: DocIssue[] = []
+  const terms: Term[] = []
   if (files['ARCHITECTURE.md']) {
     const since = (await git(root, ['log', '-1', '--format=%H', '--', 'ARCHITECTURE.md']))?.stdout.trim()
     if (since) {
@@ -236,18 +261,115 @@ async function driftIn($: EngineInterface, root: string) {
   for (const [file, text] of Object.entries(files).filter(([f]) => /(^|\/)GLOSSARY\.md$/.test(f)))
     for (const term of termsOf(text).slice(0, DRIFT_TERMS)) {
       const at = parentOf(joinPath(root, file))
-      const r = await git(at, ['grep', '-I', '-q', '-i', '-F', '-e', term, '--', '.', ':(exclude,glob)**/GLOSSARY*.md'])
+      // The whole repository, not the glossary's folder alone; with the files not committed yet, as
+      // what the agent just wrote often is.
+      const r = await git(at, ['grep', '--untracked', '-I', '-q', '-i', '-F', '-e', term, '--', ':/', ':(top,exclude,glob)**/GLOSSARY*.md'])
       // 1: none found; anything else (no repository, an error) says nothing.
-      if (r?.exitCode === 1) found.push({ file, kind: 'stale-term', detail: term })
+      if (r?.exitCode === 1) terms.push({ file, term })
     }
-  return found
+  return { issues: found, terms }
 }
 
 async function lookForDrift($: EngineInterface) {
   const root = await $.session.root()
   if (!(await read($, runAtom)) && !(await exists($, root, MARK))) return
-  drift = await driftIn($, root)
+  await keepDrift($, await driftIn($, root))
   await checkProject($)
+}
+
+async function keepDrift($: EngineInterface, found: { issues: DocIssue[]; terms: Term[] }) {
+  drift = found.issues
+  unfound = found.terms
+  await checkTerms($)
+}
+
+// What is known of the terms, as long as it holds.
+async function verdictsIn($: EngineInterface, root: string) {
+  const kept = ((await $.store.get(termsKey(root)).catch(() => undefined)) ?? {}) as Record<string, TermVerdict>
+  const now = await $.clock.now()
+  return Object.fromEntries(Object.entries(kept).filter(([, v]) => v.verdict === 'kept' || now - v.at < TERM_MS))
+}
+
+async function keepVerdicts($: EngineInterface, root: string, verdicts: Record<string, TermVerdict>) {
+  await $.store.set(termsKey(root), { ...(await verdictsIn($, root)), ...verdicts })
+}
+
+// The terms git finds nowhere go to the docs agent, one look at a time: in another form of the word
+// or by the code's name for it, a term is in use, and the person is not asked. Its word holds for a
+// while; what it did not find either is the person's question.
+async function checkTerms($: EngineInterface) {
+  const root = await $.session.root()
+  const known = await verdictsIn($, root)
+  const was = await read($, termsAtom)
+  const at = await $.clock.now()
+  const unread = unfound.filter(t => !known[termKey(t)] && !unjudged.has(termKey(t)))
+  if (unread.length > 0 && !isSpawningTerms && !(was?.status === 'running' && at - was.at < JUDGE_STALE_MS)) {
+    // The session's start and a check may both get here before the agent is kept as running.
+    isSpawningTerms = true
+    try {
+      const w = await wordsIn($)
+      const agentId = await spawnAgent($, w.termsPrompt(root, unread), w.termsTask, TERMS_MODEL)
+      await update($, termsAtom, (): TermCheck => ({ status: agentId ? 'running' : 'failed', at, terms: unread, ...(agentId ? { agentId } : {}) }))
+      if (!agentId) for (const t of unread) unjudged.add(termKey(t))
+    } finally {
+      isSpawningTerms = false
+    }
+  }
+  await askTerms($)
+}
+
+// The terms neither git nor the docs agent found, put to the person.
+async function askTerms($: EngineInterface) {
+  const known = await verdictsIn($, await $.session.root())
+  // Not found by the agent, or not looked at by it, and not answered in use or put off.
+  const isAsked = (t: Term) => {
+    const verdict = known[termKey(t)]?.verdict
+    return (verdict === 'unused' || (verdict === undefined && unjudged.has(termKey(t)))) && !later.has(termKey(t))
+  }
+  const questions = unfound.filter(isAsked)
+  await update($, questionsAtom, () => (questions.length > 0 ? questions : null))
+}
+
+// The person's word on the term asked: in use, kept for good; out, which Claude takes out of the
+// glossary; or later, asked again at the next session's start or after /clear.
+async function answerTerm($: EngineInterface, term: Term, answer: 'kept' | 'drop' | 'later') {
+  const key = termKey(term)
+  if (answering.has(key) || later.has(key)) return
+  answering.add(key)
+  try {
+    await answerOnce($, term, answer)
+  } finally {
+    answering.delete(key)
+  }
+}
+
+async function answerOnce($: EngineInterface, term: Term, answer: 'kept' | 'drop' | 'later') {
+  const root = await $.session.root()
+  const key = termKey(term)
+  const was = (await verdictsIn($, root))[key]
+  if (was?.verdict === 'kept') return
+  if (answer === 'kept') await keepVerdicts($, root, { [key]: { verdict: 'kept', at: await $.clock.now() } })
+  else if (answer === 'later') later.add(key)
+  else {
+    const r = await $.prompt.submit({ text: (await wordsIn($)).termDropPrompt(term), asUser: true }).catch(() => undefined)
+    if (!r || r.drop !== undefined) return
+    later.add(key)
+  }
+  // What went to Claude is not taken back here.
+  lastAnswer = answer === 'drop' ? null : { term, answer, ...(was ? { was } : {}) }
+  await askTerms($)
+}
+
+async function undoTerm($: EngineInterface) {
+  if (!lastAnswer) return
+  const { term, answer, was } = lastAnswer
+  lastAnswer = null
+  const root = await $.session.root()
+  if (answer === 'later') later.delete(termKey(term))
+  else if (was) await keepVerdicts($, root, { [termKey(term)]: was })
+  // Held in use where the agent gave no word on it: nothing was known before.
+  else await $.store.set(termsKey(root), Object.fromEntries(Object.entries(await verdictsIn($, root)).filter(([k]) => k !== termKey(term))))
+  await askTerms($)
 }
 
 async function keepRun($: EngineInterface, run: Run) {
@@ -363,7 +485,10 @@ async function advance($: EngineInterface) {
 async function afterTurn($: EngineInterface) {
   await lookForTaskRules($).catch(() => {})
   // What was found stale, looked for again: the turn may have settled it.
-  if (drift.length > 0) drift = await driftIn($, await $.session.root()).catch(() => drift)
+  if (drift.length > 0 || unfound.length > 0) {
+    const found = await driftIn($, await $.session.root()).catch(() => undefined)
+    if (found) await keepDrift($, found)
+  }
   const issues = await checkProject($)
   await settleStep($, issues)
   await startJudge($).catch(() => {})
@@ -388,11 +513,9 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
 
 // What fails of a step: the check of its files, and its own. The step of permissions checks the
 // settings whole: the check of the files holds them only once they have one of the rules. What may
-// have gone stale is a question for the person, not a failure: a term the code names in another
-// language is found nowhere, and no edit of the step settles it.
+// have gone stale is a question for the person, not a failure: no edit of the step settles it.
 async function failingOf($: EngineInterface, root: string, step: StepId, issues: DocIssue[] | null) {
-  const isDrift = (i: DocIssue) => i.kind === 'stale-map' || i.kind === 'stale-term'
-  return [...(issues ?? []).filter(i => CHECKED[step](i.file) && !isDrift(i) && step !== 'permissions'), ...(await stepIssues($, root, step))]
+  return [...(issues ?? []).filter(i => CHECKED[step](i.file) && i.kind !== 'stale-map' && step !== 'permissions'), ...(await stepIssues($, root, step))]
 }
 
 async function sendFix($: EngineInterface, run: Run, step: StepId, failing: DocIssue[]) {
@@ -575,16 +698,23 @@ async function startJudge($: EngineInterface) {
       return [head, ...(plus.length > 0 ? ['Added:', clipped(plus.join('\n'))] : []), ...(minus.length > 0 ? ['Removed:', clipped(minus.join('\n'))] : [])].join('\n')
     })
     .join('\n\n')
-  const task = w.judgeTask
-  const spawned = await $.agent.spawn({ prompt: w.judgePrompt(root, edits), description: task, subagentType: 'Explore', model: JUDGE_MODEL }).catch(() => undefined)
-  const agentId =
-    spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
-  if (agentId) judges.add(agentId)
+  const agentId = await spawnAgent($, w.judgePrompt(root, edits), w.judgeTask, JUDGE_MODEL)
   await update($, judgeAtom, (): Judge => ({ status: agentId ? 'running' : 'failed', at, findings: [], ...(agentId ? { agentId } : {}) }))
 }
 
-// A subagent's run ended: the docs agent's, its findings are read.
+// The docs agent, started on a task: its id, or none where it did not start.
+async function spawnAgent($: EngineInterface, prompt: string, task: string, model: string) {
+  const spawned = await $.agent.spawn({ prompt, description: task, subagentType: 'Explore', model }).catch(() => undefined)
+  const agentId =
+    spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
+  if (agentId) judges.add(agentId)
+  return agentId
+}
+
+// A subagent's run ended: the docs agent's, its findings are read, or its word on the terms kept.
 export async function endSetupAgent($: EngineInterface, agentId: string, answer: string) {
+  const check = await read($, termsAtom)
+  if (check?.status === 'running' && check.agentId === agentId) return endTermCheck($, check, answer)
   const judge = await read($, judgeAtom)
   if (judge?.status !== 'running' || judge.agentId !== agentId) return
   const findings = parseFindings(answer)
@@ -592,8 +722,26 @@ export async function endSetupAgent($: EngineInterface, agentId: string, answer:
   if (findings && findings.some(f => !f.isMinor)) await $.ui.toast((await wordsIn($)).band(findings.filter(f => !f.isMinor).length))
 }
 
+// The docs agent's word on the terms, matched whatever its spelling of them: a term it left out of
+// its list it did not find; with no list, the terms are unjudged.
+async function endTermCheck($: EngineInterface, check: TermCheck, answer: string) {
+  const inUse = parseTermsInUse(answer)
+  if (inUse) {
+    const used = new Set(inUse)
+    const at = await $.clock.now()
+    await keepVerdicts($, await $.session.root(), Object.fromEntries(check.terms.map(t => [termKey(t), { verdict: used.has(t.term.toLowerCase()) ? 'used' : 'unused', at }])))
+  } else for (const t of check.terms) unjudged.add(termKey(t))
+  await update($, termsAtom, (): TermCheck => ({ ...check, status: inUse ? 'done' : 'failed' }))
+  // Terms git found while it read go to it next.
+  await checkTerms($)
+  const n = (await read($, questionsAtom))?.length ?? 0
+  if (n > 0) await $.ui.toast((await wordsIn($)).termsBand(n))
+}
+
 // The docs agent's report the engine hands back as it ends is the pane's, not Claude's to read.
 export async function judgeReport($: EngineInterface, text: string) {
+  const terms = (await read($, termsAtom))?.agentId
+  if (terms && text.includes(terms)) return (await wordsIn($)).termsTitle
   const kept = (await read($, judgeAtom))?.agentId
   return [...judges, ...(kept ? [kept] : [])].some(id => text.includes(id)) ? (await wordsIn($)).judgeTitle : undefined
 }
@@ -619,6 +767,10 @@ export async function startSetup($: EngineInterface) {
   const steps = kept && (Object.fromEntries(STEPS.map(s => [s, kept.steps[s] ?? { status: 'skipped' }])) as Run['steps'])
   await update($, runAtom, () => (kept && steps ? { ...kept, steps } : null))
   await checkProject($).catch(() => {})
+  unfound = []
+  later.clear()
+  unjudged.clear()
+  lastAnswer = null
   void lookForDrift($).catch(() => {})
   rulesSentIn = null
   void lookForTaskRules($).catch(() => {})
@@ -673,9 +825,11 @@ export async function setupCommand($: EngineInterface, args: string) {
   const w = await wordsIn($)
   const root = await $.session.root()
   if (args.trim().toLowerCase() === 'check') {
-    drift = await driftIn($, root).catch(() => [])
+    await keepDrift($, await driftIn($, root).catch(() => ({ issues: [], terms: [] })))
     const issues = (await checkProject($)) ?? [...(await issuesIn($, root)), ...drift]
-    return { text: w.checked(issues) }
+    const asked = ((await read($, questionsAtom)) ?? []).map((t): DocIssue => ({ file: t.file, kind: 'stale-term', detail: t.term }))
+    const check = await read($, termsAtom)
+    return { text: [w.checked([...issues, ...asked]), ...(check?.status === 'running' ? [w.termsRunning(check.terms.length)] : [])].join('\n') }
   }
   // What is red now on each folder's commit, kept as the baseline: the person's word that it was
   // red before the agent.
@@ -736,7 +890,8 @@ export async function retroLine($: EngineInterface) {
   return retro ? (await wordsIn($)).retroOffer(retro.change) : null
 }
 
-// The row above the prompt: the files' issues and the docs agent's blockers not sent, while there are some.
+// The row above the prompt: the files' issues and the docs agent's blockers not sent, the terms that
+// wait for the person, and the gate's red, while there are some.
 export async function setupLine($: EngineInterface) {
   const issues = (await read($, issuesAtom)) ?? []
   const judge = await read($, judgeAtom)
@@ -744,7 +899,8 @@ export async function setupLine($: EngineInterface) {
   const n = issues.length + blockers
   const w = await wordsIn($)
   const gate = await read($, gateAtom)
-  const parts = [...(n > 0 ? [w.band(n)] : []), ...(gate && (gate.status === 'red' || gate.status === 'released' || gate.status === 'answered') ? [w.gateBand(gate.failures.length)] : [])]
+  const asked = (await read($, questionsAtom))?.length ?? 0
+  const parts = [...(n > 0 ? [w.band(n)] : []), ...(asked > 0 ? [w.termsBand(asked)] : []), ...(gate && (gate.status === 'red' || gate.status === 'released' || gate.status === 'answered') ? [w.gateBand(gate.failures.length)] : [])]
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
@@ -755,6 +911,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const issues = (await read($, issuesAtom)) ?? []
   const judge = await read($, judgeAtom)
   const gate = await read($, gateAtom)
+  const termCheck = await read($, termsAtom)
+  const questions = (await read($, questionsAtom)) ?? []
   const act = (fn: () => Promise<unknown>) => () => void fn().catch(() => {})
   const keyed = (key: string, text: string, hotkey: string, onPress: () => void, isPrimary = false) => (
     <Button key={key} label={text} hotkey={hotkey} {...(isPrimary ? { variant: 'primary' as const } : { dimColor: true as const })} onPress={onPress}>
@@ -859,6 +1017,31 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               </Box>
             ))
           )}
+        </Box>
+      ) : null}
+      {questions.length > 0 || termCheck?.status === 'running' || lastAnswer ? (
+        <Box flexDirection="column">
+          <Text bold>{w.termsTitle}</Text>
+          {termCheck?.status === 'running' ? <Text color="warning">{`◌ ${w.termsRunning(termCheck.terms.length)}`}</Text> : null}
+          {questions[0] ? (
+            <Box flexDirection="column">
+              <Text color="warning" wrap="wrap">
+                {w.termQuestion(questions[0], unjudged.has(termKey(questions[0])))}
+              </Text>
+              <Box flexDirection="row" gap={1}>
+                {keyed('setup-term-kept', w.termKept, 'u', act(() => answerTerm($, questions[0]!, 'kept')), true)}
+                {keyed('setup-term-drop', w.termDrop, 'r', act(() => answerTerm($, questions[0]!, 'drop')))}
+                {keyed('setup-term-later', w.termLater, 'l', act(() => answerTerm($, questions[0]!, 'later')))}
+                {questions.length > 1 ? <Text dimColor>{w.termsMore(questions.length - 1)}</Text> : null}
+              </Box>
+            </Box>
+          ) : null}
+          {lastAnswer ? (
+            <Box flexDirection="row" gap={1}>
+              <Text dimColor>{`→ ${w.termAnswered(lastAnswer.term, lastAnswer.answer)}`}</Text>
+              {keyed('setup-term-undo', w.termUndo, 'z', act(() => undoTerm($)))}
+            </Box>
+          ) : null}
         </Box>
       ) : null}
       {gate ? (

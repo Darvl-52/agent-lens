@@ -199,9 +199,8 @@ export function checkDocs(files: Record<string, string>, missing: ReadonlySet<st
 export const termsOf = (glossary: string) =>
   [...glossary.matchAll(/^\*\*(.+?)\*\*:/gm)].map(m => m[1]!.replace(/\s*[([].*$/, '').trim()).filter(t => t.length >= 3)
 
-// What the docs agent found in an edit to the files, from the JSON array its answer ends with: what
-// is wrong, where, how to fix it, and whether it blocks; undefined where it holds no such array.
-export const parseFindings = (answer: string): Finding[] | undefined => {
+// The objects of the JSON array an agent's answer ends with; undefined where it holds no such array.
+const entriesOf = (answer: string) => {
   const end = answer.lastIndexOf(']')
   for (let at = answer.indexOf('['); at >= 0 && at < end; at = answer.indexOf('[', at + 1)) {
     let list: unknown
@@ -210,17 +209,29 @@ export const parseFindings = (answer: string): Finding[] | undefined => {
     } catch {
       continue
     }
-    if (!Array.isArray(list)) continue
-    const said = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
-    return list
-      .filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
-      .map(f => ({ file: said(f.file), text: said(f.problem), fix: said(f.fix), ...(said(f.severity).toLowerCase() === 'minor' ? { isMinor: true as const } : {}) }))
-      .filter(f => f.text !== '')
-      .sort((a, b) => Number(a.isMinor ?? false) - Number(b.isMinor ?? false))
-      .slice(0, 8)
+    if (Array.isArray(list)) return list.filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null)
   }
   return undefined
 }
+
+const said = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+
+// What the docs agent found in an edit to the files: what is wrong, where, how to fix it, and
+// whether it blocks.
+export const parseFindings = (answer: string): Finding[] | undefined =>
+  entriesOf(answer)
+    ?.map(f => ({ file: said(f.file), text: said(f.problem), fix: said(f.fix), ...(said(f.severity).toLowerCase() === 'minor' ? { isMinor: true as const } : {}) }))
+    .filter(f => f.text !== '')
+    .sort((a, b) => Number(a.isMinor ?? false) - Number(b.isMinor ?? false))
+    .slice(0, 8)
+
+// The terms the docs agent found in use, in any form or by any name, in lower case: it may spell
+// them its own way.
+export const parseTermsInUse = (answer: string): string[] | undefined =>
+  entriesOf(answer)
+    ?.filter(t => t.inUse === true)
+    .map(t => said(t.term).toLowerCase())
+    .filter(t => t !== '')
 
 // The project's files as the check reads them, by their path from the root: the engine's in the
 // mod, the disk's in the CLI.

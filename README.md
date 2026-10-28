@@ -107,6 +107,9 @@ turn (an edit made through the shell included), as `openspec validate
 out of its form or naming code, a glossary by the old name Matt's skills no longer read, an ADR misnamed or misnumbered, a line kept in two files. Beside
 the session's start it also looks, with git, for what may have gone stale: a part of the map with
 15 commits or more since the map was edited, a glossary term found nowhere else in its repository.
+Git finds a term only as the glossary writes it, so a term it misses goes to the docs agent first
+(on `haiku`), which looks for it in other forms of the word and by the code's name for it; only a
+term it misses too is a question in the pane: `u` in use, `r` out of the glossary, `l` later.
 
 A turn that edits these files, by any tool, the shell too, has an agent (Explore, on `sonnet`) read
 the edits against the code: is it true of the code, in the file it belongs in, does it change what

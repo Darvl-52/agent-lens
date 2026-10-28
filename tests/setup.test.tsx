@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import { DENY, expand, newRed, parseConfig, permissionIssues, timingIssues } from '../hooks/setup/checks'
-import { checkDocs, hasTaskRules, parseFindings, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
+import { checkDocs, hasTaskRules, parseFindings, parseTermsInUse, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const MATT = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro', 'diagnosing-bugs', 'code-review']
@@ -99,8 +99,10 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   // The review of a turn's diff asks a model: it finds nothing here.
   on('model.complete', () => ({ value: { isAnswered: true as const, text: '{"findings":[]}', usage: USAGE } }))
   const spawned: string[] = []
-  on('agent.spawn', ($, e) => (spawned.push(e.prompt), { model: 'sonnet' }))
-  on('agent.list', () => ({ value: spawned.map((_, i) => ({ id: `judge-${i + 1}`, description: 'The docs in this turn', type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })) }))
+  const tasks: string[] = []
+  const models: (string | undefined)[] = []
+  on('agent.spawn', ($, e) => (spawned.push(e.prompt), tasks.push(e.description), models.push(e.model), { model: e.model ?? 'sonnet' }))
+  on('agent.list', () => ({ value: tasks.map((description, i) => ({ id: `judge-${i + 1}`, description, type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })) }))
   on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
@@ -129,7 +131,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   const agentDone = (agentId: string, answer: string) =>
     $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
   const shells = () => runs.filter(r => r[0] === 'sh' && r[2] !== 'exit 0').map(r => r[2]!)
-  return { clock, disk, store, submitted, commands, runs, shells, opened, spawned, setup, turn, settle, agentDone }
+  return { clock, disk, store, submitted, commands, runs, shells, opened, spawned, models, setup, turn, settle, agentDone }
 }
 
 test('missing Matt’s skills, /setup-project recommends them and goes on, the step that needs them left out', async ($, on) => {
@@ -267,6 +269,9 @@ test('the terms of a glossary and the docs agent’s findings are read, the bloc
     { file: 'CLAUDE.md', text: 'A wish', fix: 'Drop it', isMinor: true },
   ])
   expect(parseFindings('No list.')).toBeUndefined()
+  // The terms in use, by the agent's own spelling: what is not a plain yes is no.
+  expect(parseTermsInUse('[{"term": "Смена", "inUse": true}, {"term": "Invoice", "inUse": "yes"}, {"term": "", "inUse": true}, {"term": "Order", "inUse": false}]')).toEqual(['смена'])
+  expect(parseTermsInUse('None found.')).toBeUndefined()
 })
 
 test('what may have gone stale: a part of the map much changed since the map, a term found nowhere else', async ($, on) => {
@@ -280,9 +285,12 @@ test('what may have gone stale: a part of the map much changed since the map, a 
     git,
     files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': 'Orders: `src/orders/`. Billing: `src/billing/`.\n', 'src/orders/a.ts': '', 'src/billing/b.ts': '' },
   })
-  expect((await w.setup('check')).text).toBe(
-    'The check found 2:\n  ARCHITECTURE.md: may be stale: src/orders (20) commits to it since the map was last edited\n  GLOSSARY.md: the term "Invoice" is found nowhere outside the glossaries: still in use?',
-  )
+  await w.settle()
+  const map = 'ARCHITECTURE.md: may be stale: src/orders (20) commits to it since the map was last edited'
+  expect((await w.setup('check')).text).toBe(`The check found 1:\n  ${map}\nThe docs agent is looking for 1 term in other forms and names…`)
+  // The term is the person's question once the docs agent did not find it either.
+  await w.agentDone('judge-1', '[{"file": "GLOSSARY.md", "term": "Invoice", "inUse": false, "where": ""}]')
+  expect((await w.setup('check')).text).toBe(`The check found 2:\n  ${map}\n  GLOSSARY.md: the docs agent found the term "Invoice" nowhere outside the glossaries, in any form or name: still in use?`)
 })
 
 test('what may have gone stale holds no step back, is looked for again after a turn while some is found, and the terms are matched in UTF-8', async ($, on) => {
@@ -299,7 +307,9 @@ test('what may have gone stale holds no step back, is looked for again after a t
   await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n', 'GLOSSARY.md': GLOSSARY })
   await w.settle()
   expect(w.submitted[0]).toMatch(/^Step 4 of/)
-  expect((await w.setup('check')).text).toBe('The check found 1:\n  GLOSSARY.md: the term "Invoice" is found nowhere outside the glossaries: still in use?')
+  expect((await w.setup('check')).text).toBe('The files pass the check.\nThe docs agent is looking for 1 term in other forms and names…')
+  await w.agentDone(`judge-${w.spawned.length}`, '[{"file": "GLOSSARY.md", "term": "Invoice", "inUse": false, "where": ""}]')
+  expect((await w.setup('check')).text).toBe('The check found 1:\n  GLOSSARY.md: the docs agent found the term "Invoice" nowhere outside the glossaries, in any form or name: still in use?')
   // A question for the person, not a failure of the step: the map passes, and the standards go.
   await w.turn({ 'ARCHITECTURE.md': '# Map\n' })
   await w.settle()
@@ -315,10 +325,129 @@ test('what may have gone stale holds no step back, is looked for again after a t
     component: 'AbovePrompt' as const,
     props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 140, scroll: { offset: 0, bodyRows: 10 }, view: {} },
   })
-  expect(await band.find({ type: 'Text', text: /^docs: / })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /^(docs|glossary): / })).toBeUndefined()
   await band.unmount()
   // A term in Cyrillic matches whatever its case only in a UTF-8 locale.
   expect(envs.every(e => e?.LC_ALL === 'C.UTF-8')).toBe(true)
+})
+
+test('a term is looked for in the whole repository of its glossary, files not yet committed too', async ($, on) => {
+  const greps: string[][] = []
+  const git: Git = args => (args[0] === 'grep' ? (greps.push(args), { exitCode: 0, stdout: '' }) : undefined)
+  const w = await world($, on, { git, files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY-MAP.md': '- [Ordering](apps/shop/GLOSSARY.md)\n', 'apps/shop/GLOSSARY.md': GLOSSARY } })
+  await w.setup('check')
+  expect(greps.length).toBeGreaterThan(0)
+  // From the glossary's folder, `.` would be docs/ alone; the files the agent just wrote are untracked.
+  expect(greps.every(a => a.includes('--untracked') && a.includes(':/') && a.includes(':(top,exclude,glob)**/GLOSSARY*.md') && !a.includes('.'))).toBe(true)
+})
+
+test('a term git finds nowhere goes to the docs agent first: one it finds in another form or by another name is not asked of the person, and its word holds', async ($, on) => {
+  const git: Git = args => (args[0] === 'grep' ? { exitCode: 1, stdout: '' } : undefined)
+  const w = await world($, on, { git, files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY.md': GLOSSARY } })
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+  expect(w.spawned[0]).toMatch(/- "Order" \(GLOSSARY\.md\)\n- "Invoice" \(GLOSSARY\.md\)/)
+  // A search, not a reading of edits: the small model does it.
+  expect(w.models).toEqual(['haiku'])
+  // While it reads, the person is asked nothing, and a check starts no second agent.
+  expect((await w.setup('check')).text).toBe('The files pass the check.\nThe docs agent is looking for 2 terms in other forms and names…')
+  expect(w.spawned).toHaveLength(1)
+  // The agent names a term in its own spelling and the glossary by its own path: the term is matched still.
+  await w.agentDone('judge-1', 'Order is `class Order` in src/orders.ts.\n[{"file": "/proj/GLOSSARY.md", "term": "order", "inUse": true, "where": "src/orders.ts: class Order"}, {"file": "GLOSSARY.md", "term": "Invoice", "inUse": false, "where": ""}]')
+  await w.settle()
+  expect((await w.setup('check')).text).toBe('The check found 1:\n  GLOSSARY.md: the docs agent found the term "Invoice" nowhere outside the glossaries, in any form or name: still in use?')
+  const band = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 140, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await band.find({ type: 'Text', text: 'glossary: 1 question' })).toBeDefined()
+  await band.unmount()
+  // Its report stays off Claude, as the docs agent's does.
+  expect(await $.prompt.submit({ text: 'Another Claude session sent a message:\n<agent-message from="judge-1">\n[Subagent hand-back] ...\n</agent-message>', origin: { kind: 'peer' }, isMeta: true, wait: false } as never)).toMatchObject({ drop: 'Glossary terms found nowhere' })
+  // The next session's start finds the same terms by git, and the agent's word on them stands.
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  expect(w.spawned).toHaveLength(1)
+})
+
+test('a docs agent that gives no list leaves the terms the person’s questions for this session only: the next session has the agent look again', async ($, on) => {
+  const git: Git = args => (args[0] === 'grep' ? { exitCode: args.includes('Invoice') ? 1 : 0, stdout: '' } : undefined)
+  const w = await world($, on, { git, files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY.md': GLOSSARY } })
+  await w.settle()
+  await w.agentDone('judge-1', 'I could not finish.')
+  await w.settle()
+  expect((await w.setup('check')).text).toMatch(/the term "Invoice"/)
+  expect(w.spawned).toHaveLength(1)
+  // The question says the agent did not look; held in use and undone, nothing is kept of it.
+  const mount = () => $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  let pane = await mount()
+  expect(await pane.find({ type: 'Text', text: /^"Invoice" \(GLOSSARY\.md\): git found it nowhere outside the glossaries, and the docs agent could not look/ })).toBeDefined()
+  await pane.press({ key: 'setup-term-kept' })
+  await w.settle()
+  await pane.unmount()
+  pane = await mount()
+  expect(await pane.find({ type: 'Text', text: /^"Invoice" \(GLOSSARY\.md\): / })).toBeUndefined()
+  await pane.press({ key: 'setup-term-undo' })
+  await w.settle()
+  await pane.unmount()
+  expect(w.store.get('setup:terms:/proj')).toEqual({})
+  expect((await w.setup('check')).text).toMatch(/the term "Invoice"/)
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  expect(w.spawned).toHaveLength(2)
+})
+
+test('the terms the docs agent did not find are asked one at a time: in use is kept for good and may be undone, later asks again next session, out goes to Claude', async ($, on) => {
+  const git: Git = args => (args[0] === 'grep' ? { exitCode: 1, stdout: '' } : undefined)
+  const w = await world($, on, { git, files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY.md': GLOSSARY } })
+  await w.settle()
+  await w.agentDone('judge-1', '[{"file": "GLOSSARY.md", "term": "Order", "inUse": false}, {"file": "GLOSSARY.md", "term": "Invoice", "inUse": false}]')
+  await w.settle()
+  const mount = () => $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  const asked = async () => {
+    const pane = await mount()
+    const q = (await pane.find({ type: 'Text', text: /^"\w+" \(GLOSSARY\.md\): / }))?.text
+    await pane.unmount()
+    return q?.match(/^"(\w+)"/)?.[1]
+  }
+  let pane = await mount()
+  expect(await pane.find({ type: 'Text', text: '"Order" (GLOSSARY.md): neither git nor the docs agent found it outside the glossaries, in any form or name. Still in use?' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '1 more' })).toBeDefined()
+  // In use: the next is asked, and the answer may be undone.
+  await pane.press({ key: 'setup-term-kept' })
+  await w.settle()
+  await pane.unmount()
+  expect(await asked()).toBe('Invoice')
+  pane = await mount()
+  expect(await pane.find({ type: 'Text', text: '→ "Order": in use, not asked again' })).toBeDefined()
+  await pane.press({ key: 'setup-term-undo' })
+  await w.settle()
+  await pane.unmount()
+  expect(await asked()).toBe('Order')
+  pane = await mount()
+  await pane.press({ key: 'setup-term-kept' })
+  await w.settle()
+  await pane.unmount()
+  // Later: nothing is asked in this session.
+  pane = await mount()
+  await pane.press({ key: 'setup-term-later' })
+  await w.settle()
+  await pane.unmount()
+  expect(await asked()).toBeUndefined()
+  expect((await w.setup('check')).text).toBe('The files pass the check.')
+  // The next session asks it again, and not the one held in use.
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  expect(await asked()).toBe('Invoice')
+  // Out of the glossary: Claude takes it out, and it is not asked while it does.
+  pane = await mount()
+  await pane.press({ key: 'setup-term-drop' })
+  await w.settle()
+  await pane.unmount()
+  expect(w.submitted.at(-1)).toMatch(/^The glossary term "Invoice" in GLOSSARY\.md is found nowhere/)
+  expect(await asked()).toBeUndefined()
 })
 
 test('a turn that edits the docs has an agent read the edits against the code; its blockers show, go on j, and its report stays off Claude', async ($, on) => {

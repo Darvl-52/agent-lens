@@ -292,6 +292,17 @@ export type SetupFinding = { file: string; text: string; fix: string; isMinor?: 
 // they went to Claude.
 export type SetupJudge = { status: 'running' | 'done' | 'failed'; at: number; agentId?: string; findings: SetupFinding[]; isSent?: true }
 
+// A glossary's term, by the glossary that defines it.
+export type SetupTerm = { file: string; term: string }
+
+// The docs agent's look at the terms git found nowhere outside the glossaries: running (its id),
+// done, or failed, and the terms it was given.
+export type SetupTermCheck = { status: 'running' | 'done' | 'failed'; at: number; agentId?: string; terms: SetupTerm[] }
+
+// What is known of a term git finds nowhere, and since when: in use as the docs agent found it, not
+// found by it, or held in use by the person.
+export type SetupTermVerdict = { verdict: 'used' | 'unused' | 'kept'; at: number }
+
 // The steps of /setup-project, in order.
 export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards' | 'checks' | 'run' | 'permissions' | 'workflow' | 'config' | 'ci'
 
@@ -449,6 +460,10 @@ declare module 'claude-code' {
       'setup.issues': SetupDocIssue[] | null
       'setup.judge': SetupJudge | null
       'setup.gate': SetupGate | null
+      // The docs agent's look at the terms git finds nowhere, and the terms it did not find either,
+      // put to the person one at a time.
+      'setup.terms': SetupTermCheck | null
+      'setup.questions': SetupTerm[] | null
       // OpenSpec's config with no rule for each task to name the rules and lenses it touches, offered
       // to have it added.
       'setup.rulesOffer': Record<string, never> | null

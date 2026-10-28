@@ -76,9 +76,17 @@ Like `openspec validate --strict`: a file that fails is an error, not a suggesti
   `CLAUDE.md` alone, on a turn that grows it. It is given the lines changed, not the files whole,
   and during `/setup-project` it reads once, at the run's end.
 - **Drift**, beside each session's start: a part of the map with 15 commits or more since the map
-  was last edited; a glossary term `git grep` finds nowhere else in its repository.
+  was last edited; a glossary term `git grep` finds nowhere else in its repository, files not yet
+  committed included. Git matches the term only as written, so such a term goes to the docs agent
+  first (on `haiku`: a search), which looks for it in other forms of the word, by a synonym and by
+  the name the code gives it. Its word holds 30 days. What it did not find either is put to the
+  person in the pane, one term at a time: in use (kept for good, and may be undone), out of the
+  glossary (sent to Claude), or later (asked again at the next session's start or after
+  `/clear`). A term the agent gave no word on, as it did not start or gave no list, is asked as
+  such, and the agent looks again next session.
 
-The row above the prompt says `docs: N` while a check fails; pressed, it opens what failed.
+The row above the prompt says `docs: N` while a check fails, `glossary: N` while a term waits for
+the person; pressed, it opens them.
 
 ## The gate
 

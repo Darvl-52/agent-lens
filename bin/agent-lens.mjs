@@ -427,7 +427,7 @@ ${issues.map((i) => `  ${EN.issue(i)}`).join(`
       "adr-title": "an ADR with no # title",
       duplicate: `the same line as in ${i.detail}: keep it in one file`,
       "stale-map": `may be stale: ${i.detail} commits to it since the map was last edited`,
-      "stale-term": `the term "${i.detail}" is found nowhere outside the glossaries: still in use?`,
+      "stale-term": `the docs agent found the term "${i.detail}" nowhere outside the glossaries, in any form or name: still in use?`,
       "checks-shape": `out of its form: ${i.detail}`,
       "checks-start": `the fast check \`${i.detail}\` does not start: not found or not executable from its folder`,
       "checks-slow": `the fast check ${i.detail} is too slow for every turn’s end: move it to full, or give it {files}`,
@@ -472,6 +472,24 @@ End your answer with JSON alone: [{"file": "the file", "problem": "what is wrong
   judgeFix: (findings) => `The docs agent found these in what was just written to the project's docs. Fix each in its file, or say why it stands; change nothing else:
 ${findings.map((f) => `- ${f.file}: ${f.text}${f.fix ? ` Fix: ${f.fix}` : ""}`).join(`
 `)}`,
+  termsTask: "The glossary terms found nowhere",
+  termsPrompt: (root, terms) => `In the project at ${root}, git grep found these glossary terms, as the glossary writes them, nowhere outside the glossaries. Find out whether each is still in use. Read its definition in its glossary first, then search the code, the docs and the specs, files not yet committed too, for the thing it names: in any form of the word (another case, number or gender, as Russian inflects it), by a synonym, or by the name the code gives it (often English, or a word its _Avoid_ line lists). It is in use where you find the thing under any of these; it is not where you find it nowhere. Do not change any file.
+
+${terms.map((t) => `- "${t.term}" (${t.file})`).join(`
+`)}
+
+End your answer with JSON alone, an entry for each term: [{"file": "its glossary", "term": "the term", "inUse": true or false, "where": "file: the word you found it by, or empty"}]`,
+  termsBand: (n) => `glossary: ${n} ${n === 1 ? "question" : "questions"}`,
+  termsTitle: "Glossary terms found nowhere",
+  termsRunning: (n) => `The docs agent is looking for ${n} ${n === 1 ? "term" : "terms"} in other forms and names…`,
+  termQuestion: (t, isUnjudged) => isUnjudged ? `"${t.term}" (${t.file}): git found it nowhere outside the glossaries, and the docs agent could not look for its other forms and names. Still in use?` : `"${t.term}" (${t.file}): neither git nor the docs agent found it outside the glossaries, in any form or name. Still in use?`,
+  termsMore: (n) => `${n} more`,
+  termKept: "in use",
+  termDrop: "take it out of the glossary",
+  termLater: "later",
+  termUndo: "undo",
+  termAnswered: (t, answer) => `"${t.term}": ${answer === "kept" ? "in use, not asked again" : "asked again next session or after /clear"}`,
+  termDropPrompt: (t) => `The glossary term "${t.term}" in ${t.file} is found nowhere outside the glossaries, in any form or name, by git and the docs agent, and I hold it out of use. Take its entry out of ${t.file}, and where the other docs (ARCHITECTURE.md, the ADRs, CLAUDE.md) name it as a term, say what they mean without it; change nothing else, and show me what you took out.`,
   minor: "minor",
   retroOffer: (change) => `"${change}" is archived: a retro of the work?`,
   retroArgs: (change) => `the work in this session on the OpenSpec change "${change}", up to its archive`,
@@ -627,7 +645,7 @@ ${issues.map((i) => `  ${RU.issue(i)}`).join(`
       "adr-title": "ADR без заголовка #",
       duplicate: `та же строка, что в ${i.detail}: держи её в одном файле`,
       "stale-map": `возможно, устарело: ${i.detail} коммитов в это место с последней правки карты`,
-      "stale-term": `термин «${i.detail}» не встречается нигде, кроме глоссариев: он ещё в ходу?`,
+      "stale-term": `агент документов не нашёл термин «${i.detail}» нигде, кроме глоссариев, ни в какой форме и ни под каким именем: он ещё в ходу?`,
       "checks-shape": `не по форме: ${i.detail}`,
       "checks-start": `быстрая проверка \`${i.detail}\` не запускается: не найдена или не исполняется из своей папки`,
       "checks-slow": `быстрая проверка ${i.detail} слишком медленная для конца каждого хода: перенеси её в full или дай ей {files}`,
@@ -672,6 +690,24 @@ ${edits}
   judgeFix: (findings) => `Агент нашёл это в том, что только что записано в документы проекта. Исправь каждое в его файле или скажи, почему оно остаётся; больше ничего не меняй:
 ${findings.map((f) => `- ${f.file}: ${f.text}${f.fix ? ` Как: ${f.fix}` : ""}`).join(`
 `)}`,
+  termsTask: "Термины глоссария, которых нигде нет",
+  termsPrompt: (root, terms) => `В проекте ${root} git grep не нашёл эти термины глоссария в том виде, как их пишет глоссарий, нигде, кроме глоссариев. Выясни, в ходу ли каждый. Сначала прочитай его определение в глоссарии, потом ищи в коде, документах и спеках, в том числе в файлах, которые ещё не закоммичены, то, что он называет: в любой форме слова (другой падеж, число, род), синонимом или под именем, которое ему дал код (часто английским или словом из его строки _Avoid_). Он в ходу, если нашёл это под любым из этих имён; не в ходу, если не нашёл нигде. Файлы не меняй. Пиши по-русски.
+
+${terms.map((t) => `- "${t.term}" (${t.file})`).join(`
+`)}
+
+Закончи ответ только JSON, по записи на каждый термин: [{"file": "его глоссарий", "term": "термин", "inUse": true или false, "where": "файл: слово, по которому нашёл, или пусто"}]`,
+  termsBand: (n) => `глоссарий: ${n} ${plural(n, "вопрос", "вопроса", "вопросов")}`,
+  termsTitle: "Термины глоссария, которых нигде нет",
+  termsRunning: (n) => `Агент документов ищет ${n} ${plural(n, "термин", "термина", "терминов")} в других формах и под другими именами…`,
+  termQuestion: (t, isUnjudged) => isUnjudged ? `«${t.term}» (${t.file}): git не нашёл его нигде, кроме глоссариев, а агент документов не смог поискать другие формы и имена. Он ещё в ходу?` : `«${t.term}» (${t.file}): ни git, ни агент документов не нашли его нигде, кроме глоссариев, ни в какой форме и ни под каким именем. Он ещё в ходу?`,
+  termsMore: (n) => `ещё ${n}`,
+  termKept: "в ходу",
+  termDrop: "убрать из глоссария",
+  termLater: "позже",
+  termUndo: "отменить",
+  termAnswered: (t, answer) => `«${t.term}»: ${answer === "kept" ? "в ходу, больше не спрошу" : "спрошу в следующей сессии или после /clear"}`,
+  termDropPrompt: (t) => `Термин «${t.term}» из ${t.file} ни git, ни агент документов не нашли нигде, кроме глоссариев, ни в какой форме и ни под каким именем, и я считаю, что он не в ходу. Убери его запись из ${t.file}, а где другие документы (ARCHITECTURE.md, ADR, CLAUDE.md) называют его как термин, скажи то, что они имеют в виду, без него; больше ничего не меняй и покажи мне, что убрал.`,
   minor: "мелочь",
   retroOffer: (change) => `«${change}» в архиве: ретро по работе?`,
   retroArgs: (change) => `работа в этой сессии над изменением OpenSpec «${change}», до его архива. Говори со мной по-русски: вопросы, варианты и итоги`,
