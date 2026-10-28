@@ -107,7 +107,8 @@ let turnBefore: Promise<Record<string, string>> | null = null
 // While /setup-project's steps go, the files as the run found them, each as it was before the first
 // turn that changed it (undefined: not there): the docs agent reads them once, at the run's end.
 const runBefore = new Map<string, string | undefined>()
-// What may have gone stale, as last looked for: at the session's start and on /setup-project check.
+// What may have gone stale, as last looked for: at the session's start, on /setup-project check,
+// and after a turn while some is found.
 let drift: DocIssue[] = []
 // The docs agents this module started, by id, as long as it runs.
 const judges = new Set<string>()
@@ -216,7 +217,8 @@ export async function checkProject($: EngineInterface) {
 // session's start, as it runs git once per path and term.
 async function driftIn($: EngineInterface, root: string) {
   const files = await readDocs($, root)
-  const git = (cwd: string, args: string[]) => $.process.run(['git', '-C', cwd, ...args], { cwd, timeoutMs: 15_000 }).catch(() => null)
+  // A UTF-8 locale: in C, `-i` matches no letter beyond ASCII, and a term in Cyrillic is found only as written.
+  const git = (cwd: string, args: string[]) => $.process.run(['git', '-C', cwd, ...args], { cwd, env: { LC_ALL: 'C.UTF-8' }, timeoutMs: 15_000 }).catch(() => null)
   const found: DocIssue[] = []
   if (files['ARCHITECTURE.md']) {
     const since = (await git(root, ['log', '-1', '--format=%H', '--', 'ARCHITECTURE.md']))?.stdout.trim()
@@ -360,6 +362,8 @@ async function advance($: EngineInterface) {
 // the check; where they fail, what failed goes back once, then it waits for the person.
 async function afterTurn($: EngineInterface) {
   await lookForTaskRules($).catch(() => {})
+  // What was found stale, looked for again: the turn may have settled it.
+  if (drift.length > 0) drift = await driftIn($, await $.session.root()).catch(() => drift)
   const issues = await checkProject($)
   await settleStep($, issues)
   await startJudge($).catch(() => {})
@@ -383,9 +387,12 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
 }
 
 // What fails of a step: the check of its files, and its own. The step of permissions checks the
-// settings whole: the check of the files holds them only once they have one of the rules.
+// settings whole: the check of the files holds them only once they have one of the rules. What may
+// have gone stale is a question for the person, not a failure: a term the code names in another
+// language is found nowhere, and no edit of the step settles it.
 async function failingOf($: EngineInterface, root: string, step: StepId, issues: DocIssue[] | null) {
-  return [...(issues ?? []).filter(i => CHECKED[step](i.file) && step !== 'permissions'), ...(await stepIssues($, root, step))]
+  const isDrift = (i: DocIssue) => i.kind === 'stale-map' || i.kind === 'stale-term'
+  return [...(issues ?? []).filter(i => CHECKED[step](i.file) && !isDrift(i) && step !== 'permissions'), ...(await stepIssues($, root, step))]
 }
 
 async function sendFix($: EngineInterface, run: Run, step: StepId, failing: DocIssue[]) {

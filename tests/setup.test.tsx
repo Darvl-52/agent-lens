@@ -49,7 +49,7 @@ test('the files are held to their size, the paths they name, and the forms of th
 // A project on a disk of `files`, with Matt's skills listed unless `noMatt`, and the OpenSpec CLI
 // unless `noOpenspec`; `openspec init` writes its folder. `sh` answers the commands the checks run
 // through the shell, each green where it says nothing.
-type Git = (args: string[]) => { exitCode: number; stdout: string } | undefined
+type Git = (args: string[], env?: Record<string, string>) => { exitCode: number; stdout: string } | undefined
 type Sh = (command: string, cwd: string) => { exitCode: number; stdout?: string } | undefined
 const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; noMatt?: boolean; noOpenspec?: boolean; git?: Git; sh?: Sh } = {}) => {
   const clock = mock.clock(on, { now: 1_000_000 })
@@ -83,7 +83,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('process.run', ($, e) => {
     runs.push([...e.argv])
     if (e.argv[0] === 'git') {
-      const r = opts.git?.(e.argv.slice(e.argv.indexOf('-C') + 2)) ?? { exitCode: 128, stdout: '' }
+      const r = opts.git?.(e.argv.slice(e.argv.indexOf('-C') + 2), e.init?.env) ?? { exitCode: 128, stdout: '' }
       return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'sh') {
@@ -283,6 +283,42 @@ test('what may have gone stale: a part of the map much changed since the map, a 
   expect((await w.setup('check')).text).toBe(
     'The check found 2:\n  ARCHITECTURE.md: may be stale: src/orders (20) commits to it since the map was last edited\n  GLOSSARY.md: the term "Invoice" is found nowhere outside the glossaries: still in use?',
   )
+})
+
+test('what may have gone stale holds no step back, is looked for again after a turn while some is found, and the terms are matched in UTF-8', async ($, on) => {
+  let isInvoiceUsed = false
+  const envs: (Record<string, string> | undefined)[] = []
+  const git: Git = (args, env) => {
+    if (args[0] !== 'grep') return undefined
+    envs.push(env)
+    return { exitCode: args.includes('Invoice') && !isInvoiceUsed ? 1 : 0, stdout: '' }
+  }
+  const w = await world($, on, { git })
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n', 'GLOSSARY.md': GLOSSARY })
+  await w.settle()
+  expect(w.submitted[0]).toMatch(/^Step 4 of/)
+  expect((await w.setup('check')).text).toBe('The check found 1:\n  GLOSSARY.md: the term "Invoice" is found nowhere outside the glossaries: still in use?')
+  // A question for the person, not a failure of the step: the map passes, and the standards go.
+  await w.turn({ 'ARCHITECTURE.md': '# Map\n' })
+  await w.settle()
+  expect(w.submitted).toHaveLength(2)
+  expect(w.submitted[1]).toMatch(/^Step 5 of/)
+  // The term in use now: the next turn's end finds it, not the start of the session.
+  isInvoiceUsed = true
+  await w.turn()
+  await w.settle()
+  const band = await $.ui.mount({
+    plugin: 'agent-lens',
+    surface: 'terminal',
+    component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 140, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect(await band.find({ type: 'Text', text: /^docs: / })).toBeUndefined()
+  await band.unmount()
+  // A term in Cyrillic matches whatever its case only in a UTF-8 locale.
+  expect(envs.every(e => e?.LC_ALL === 'C.UTF-8')).toBe(true)
 })
 
 test('a turn that edits the docs has an agent read the edits against the code; its blockers show, go on j, and its report stays off Claude', async ($, on) => {
