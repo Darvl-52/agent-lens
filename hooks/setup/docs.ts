@@ -55,47 +55,77 @@ const lines = (text: string) => text.replace(/\r\n/g, '\n').split('\n')
 const sentences = (text: string) => text.split(/(?<=[.!?])\s+/).filter(s => s.trim() !== '').length
 
 // A glossary is headings, a line or two saying what the context is, and its terms: `**Term**:`, a
-// definition of a sentence or two on the next line, and the words to avoid. No paths, no code.
+// definition of a sentence or two on the next line, and the words to avoid. No paths, no code. A
+// definition or the words to avoid may wrap onto the lines below; a blank line ends them.
 function glossaryIssues(file: string, text: string): DocIssue[] {
   const issues: DocIssue[] = []
   let isTerms = false
-  let after: 'term' | 'definition' | 'avoid' | null = null
+  let after: 'term' | 'definition' | 'avoid' | 'note' | null = null
   let isFenced = false
+  let definition: { line: number, text: string, term?: string } | null = null
+  const endDefinition = () => {
+    if (definition && sentences(definition.text) > 2)
+      issues.push({ file, line: definition.line, kind: 'glossary-long', ...(definition.term && { detail: definition.term }) })
+    definition = null
+  }
   lines(text).forEach((raw, i) => {
     const line = raw.trim()
     const at = { file, line: i + 1 }
     if (line.startsWith('```')) {
+      endDefinition()
       isFenced = !isFenced
       if (isFenced) issues.push({ ...at, kind: 'glossary-code' })
       return
     }
-    if (isFenced || line === '') return
+    if (isFenced) return
+    if (line === '') {
+      endDefinition()
+      if (after !== 'term') after = null
+      return
+    }
     if (/`[^`]+`/.test(line) && pathsIn(line).length > 0) issues.push({ ...at, kind: 'glossary-path' })
     if (line.startsWith('#')) {
+      endDefinition()
       if (/^##\s/.test(line)) isTerms = true
       after = null
       return
     }
     const term = line.match(/^\*\*(.+?)\*\*:\s*(.*)$/)
     if (term) {
+      endDefinition()
       isTerms = true
       after = term[2] ? 'definition' : 'term'
-      if (term[2] && sentences(term[2]) > 2) issues.push({ ...at, kind: 'glossary-long', detail: term[1] })
+      if (term[2]) definition = { line: at.line, text: term[2], term: term[1] }
       return
     }
     if (/^_Avoid_:/i.test(line)) {
+      endDefinition()
       if (after !== 'definition') issues.push({ ...at, kind: 'glossary-shape' })
       after = 'avoid'
       return
     }
+    // A note of another label (`_In code_:`) is no part of the format: it is told once, not by each
+    // line it wraps onto.
+    if (/^_[^_]+_:/.test(line)) {
+      endDefinition()
+      if (isTerms) issues.push({ ...at, kind: 'glossary-shape' })
+      after = 'note'
+      return
+    }
     if (after === 'term') {
-      if (sentences(line) > 2) issues.push({ ...at, kind: 'glossary-long' })
+      definition = { line: at.line, text: line }
       after = 'definition'
       return
     }
+    if (after === 'definition' && definition) {
+      definition.text += ` ${line}`
+      return
+    }
+    if (after === 'avoid' || after === 'note') return
     // Before the first term, a line or two on the context; after, every line is a term's.
     if (isTerms) issues.push({ ...at, kind: 'glossary-shape' })
   })
+  endDefinition()
   return issues
 }
 

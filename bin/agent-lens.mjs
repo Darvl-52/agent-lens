@@ -185,20 +185,34 @@ function glossaryIssues(file, text) {
   let isTerms = false;
   let after = null;
   let isFenced = false;
+  let definition = null;
+  const endDefinition = () => {
+    if (definition && sentences(definition.text) > 2)
+      issues.push({ file, line: definition.line, kind: "glossary-long", ...definition.term && { detail: definition.term } });
+    definition = null;
+  };
   lines(text).forEach((raw, i) => {
     const line = raw.trim();
     const at = { file, line: i + 1 };
     if (line.startsWith("```")) {
+      endDefinition();
       isFenced = !isFenced;
       if (isFenced)
         issues.push({ ...at, kind: "glossary-code" });
       return;
     }
-    if (isFenced || line === "")
+    if (isFenced)
       return;
+    if (line === "") {
+      endDefinition();
+      if (after !== "term")
+        after = null;
+      return;
+    }
     if (/`[^`]+`/.test(line) && pathsIn(line).length > 0)
       issues.push({ ...at, kind: "glossary-path" });
     if (line.startsWith("#")) {
+      endDefinition();
       if (/^##\s/.test(line))
         isTerms = true;
       after = null;
@@ -206,27 +220,42 @@ function glossaryIssues(file, text) {
     }
     const term = line.match(/^\*\*(.+?)\*\*:\s*(.*)$/);
     if (term) {
+      endDefinition();
       isTerms = true;
       after = term[2] ? "definition" : "term";
-      if (term[2] && sentences(term[2]) > 2)
-        issues.push({ ...at, kind: "glossary-long", detail: term[1] });
+      if (term[2])
+        definition = { line: at.line, text: term[2], term: term[1] };
       return;
     }
     if (/^_Avoid_:/i.test(line)) {
+      endDefinition();
       if (after !== "definition")
         issues.push({ ...at, kind: "glossary-shape" });
       after = "avoid";
       return;
     }
+    if (/^_[^_]+_:/.test(line)) {
+      endDefinition();
+      if (isTerms)
+        issues.push({ ...at, kind: "glossary-shape" });
+      after = "note";
+      return;
+    }
     if (after === "term") {
-      if (sentences(line) > 2)
-        issues.push({ ...at, kind: "glossary-long" });
+      definition = { line: at.line, text: line };
       after = "definition";
       return;
     }
+    if (after === "definition" && definition) {
+      definition.text += ` ${line}`;
+      return;
+    }
+    if (after === "avoid" || after === "note")
+      return;
     if (isTerms)
       issues.push({ ...at, kind: "glossary-shape" });
   });
+  endDefinition();
   return issues;
 }
 function adrIssues(adrs) {

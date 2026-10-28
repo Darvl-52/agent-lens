@@ -22,6 +22,11 @@ test('the files are held to their size, the paths they name, and the forms of th
   // The glossary holds terms, a sentence or two each, and no code.
   expect(issuesOf({ 'GLOSSARY.md': `${GLOSSARY}\nSome loose note after the terms.\n` })).toEqual([['GLOSSARY.md', 'glossary-shape', null]])
   expect(issuesOf({ 'GLOSSARY.md': '## Language\n\n**Order**:\nOne. Two. Three.\n' })).toEqual([['GLOSSARY.md', 'glossary-long', null]])
+  // A definition and the words to avoid may wrap: the lines below are theirs, and the length is the whole one's.
+  expect(issuesOf({ 'GLOSSARY.md': '## Language\n\n**Order**:\nA request to buy goods,\nplaced by a customer.\n_Avoid_: Purchase,\ntransaction\n' })).toEqual([])
+  expect(checkDocs({ 'GLOSSARY.md': '## Language\n\n**Order**:\nOne. Two.\nThree.\n' }, new Set()).map(i => [i.kind, i.line])).toEqual([['glossary-long', 4]])
+  // A note of another label is told once, not by each line it wraps onto, and is no part of the definition.
+  expect(checkDocs({ 'GLOSSARY.md': '## Language\n\n**Order**:\nOne. Two.\n_In code_: a note\nthat wraps.\n' }, new Set()).map(i => [i.kind, i.line])).toEqual([['glossary-shape', 5]])
   expect(issuesOf({ 'GLOSSARY.md': '## Language\n\n**Order**:\nKept in `src/orders/order.ts`.\n' }).map(i => i[1])).toContain('glossary-path')
   expect(issuesOf({ 'GLOSSARY.md': '## Language\n\n```ts\ntype Order = {}\n```\n' }).map(i => i[1])).toContain('glossary-code')
   // ADRs: NNNN-slug.md, from 0001 with none skipped, each with a title, frontmatter allowed.
