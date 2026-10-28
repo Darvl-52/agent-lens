@@ -344,6 +344,10 @@ export type LensReview = {
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
 
+// The parts of the mod a person turns on and off in /agent-lens; `live` is the review's check of
+// each edit, and goes with the review.
+export type Part = 'review' | 'live' | 'spec' | 'router' | 'guard' | 'lenses' | 'setup'
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-lens': {
@@ -470,6 +474,9 @@ declare module 'claude-code' {
       'router.flash': string | null
       // Whether the line under the router's pane says a thing done, or one refused.
       'router.flashTone': 'success' | 'warning'
+
+      // The parts turned off in /agent-lens, for its pane; null until read.
+      'parts.off': Part[] | null
     }
   }
 }

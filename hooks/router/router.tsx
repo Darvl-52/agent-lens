@@ -4,7 +4,7 @@ import type { Change, Decision, Pick, Setup, Skill } from '../../types/router'
 import type { PaneHook } from '../core/hooks'
 import { catalogNow, changesIn, isLoaded, KEPT_DECISIONS, lookAround, manualNow, oneLine } from './catalog'
 import { drawPane } from './pane'
-import { SYSTEM, directiveOf, isTerse, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf } from './route'
+import { SYSTEM, directiveOf, isTerse, kindOf, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf } from './route'
 import type { Failure } from './route'
 import {
   COMMAND,
@@ -88,10 +88,13 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
     return failed($, { kind: 'unread' }, true)
   }
   restUntil = 0
-  const picks = parseReply(reply.text, skills)
+  // Not work, the answer is read whatever its picks say, or whether it has any.
+  const kind = kindOf(reply.text)
+  const picks = kind === undefined || kind === 'work' ? parseReply(reply.text, skills) : []
   // An answer not read is the model's slip, not an outage: it is asked again on the next prompt.
   if (picks === undefined) return failed($, { kind: 'unread' }, false)
   failsInRow = 0
+  if (kind !== undefined && kind !== 'work') return { picks, note: kind }
 
   return { picks: fresh(picks) }
 }

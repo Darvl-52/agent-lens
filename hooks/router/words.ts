@@ -150,6 +150,12 @@ export const WORDS: Record<Lang, Words> = {
             ? 'no skills installed'
             : note === 'loaded'
               ? 'the skill its rule names is loaded already'
+            : note === 'question'
+              ? 'a question, not work: no skill'
+            : note === 'continue'
+              ? 'goes on with the work under way: no skill'
+            : note === 'chat'
+              ? 'small talk: no skill'
               : 'nothing fit',
     sessionStats: (n, withSkill, byRule, byModel) =>
       `This session: ${n} prompts, ${withSkill} with a skill (${byRule} by rule, ${byModel} by model)`,
@@ -253,6 +259,12 @@ export const WORDS: Record<Lang, Words> = {
             ? 'скиллов нет'
             : note === 'loaded'
               ? 'скилл из правила уже загружен'
+            : note === 'question'
+              ? 'вопрос, а не работа — без скилла'
+            : note === 'continue'
+              ? 'продолжение текущей работы — без скилла'
+            : note === 'chat'
+              ? 'реплика без работы — без скилла'
               : 'ничего не подошло',
     sessionStats: (n, withSkill, byRule, byModel) =>
       `За сессию: промптов ${n}, со скиллом ${withSkill} (правилом ${byRule}, моделью ${byModel})`,

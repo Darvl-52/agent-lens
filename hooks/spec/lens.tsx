@@ -6,6 +6,7 @@ import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { sentWithSkill, specSkill, tddSkill } from '../router/catalog'
 import { offerLenses } from '../lenses/lenses'
+import { isOn } from '../parts/parts'
 import { isSetUp, offerRetro } from '../setup/setup'
 import {
   annotateRequirements,
@@ -979,7 +980,7 @@ async function afterTurn($: EngineInterface, isAnswered: boolean) {
 // The change in view as the review reads it beside a diff: its name, the tasks not ticked yet,
 // and what its specs require, each requirement with its scenarios.
 export async function specInView($: EngineInterface) {
-  const lens = await read($, lensAtom)
+  const lens = isOn('spec') ? await read($, lensAtom) : null
   if (!lens) return undefined
   return {
     change: lens.current,

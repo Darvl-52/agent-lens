@@ -6,6 +6,7 @@ import {
   directiveOf,
   isTerse,
   join,
+  kindOf,
   merge,
   namesSkill,
   parseReply,
@@ -91,6 +92,14 @@ test('a reply is read for picks on the list, each once, two at most', () => {
   expect(parseReply('no idea', SKILLS)).toBeUndefined()
   expect(parseReply('{"picks": 3}', SKILLS)).toBeUndefined()
   expect(parseReply('{broken', SKILLS)).toBeUndefined()
+})
+
+test('a reply says what the request is; one that does not leaves its picks standing', () => {
+  expect(kindOf('{"kind":"question","picks":[]}')).toBe('question')
+  expect(kindOf('Sure: {"kind":"work","picks":[{"skill":"tdd"}]}')).toBe('work')
+  expect(kindOf('{"picks":[{"skill":"tdd"}]}')).toBeUndefined()
+  expect(kindOf('{"kind":"maybe","picks":[]}')).toBeUndefined()
+  expect(kindOf('{broken')).toBeUndefined()
 })
 
 test('auto tells Claude to load the skill, suggest leaves it the call', () => {
