@@ -108,7 +108,8 @@ A step is done once its files are there and pass the check; where they fail, wha
 to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). A step
 skipped, left out, or failed once the run went past it has `run again` on its row: it waits its
 turn among the others, and one left out for what is missing is checked for it first. Run again, it
-adds to what is there.
+adds to what is there. Once every step is done, `c` has Claude commit what they wrote and `s`
+lets that go: either way it is not offered again until a step goes again.
 
 From then on the files are checked at each session's start, on each edit and at the end of each
 turn (an edit made through the shell included), as `openspec validate

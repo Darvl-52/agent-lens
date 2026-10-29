@@ -476,7 +476,8 @@ async function advance($: EngineInterface) {
   const run = await changeRun($, now => {
     if (now.current && now.steps[now.current].status === 'sent') return undefined
     const next = STEPS.find(s => now.steps[s].status === 'waiting')
-    return next ? { ...setStep(now, next, { status: 'sent' }), current: next } : { ...now, current: null }
+    // A step that goes writes more: its commit is offered again once the run is done.
+    return next ? { ...setStep(now, next, { status: 'sent' }), current: next, isCommitDone: undefined } : { ...now, current: null }
   })
   const step = run?.current
   if (!run || !step) return
@@ -878,7 +879,9 @@ export async function setupCommand($: EngineInterface, args: string) {
       const needs = needsOf(s, found, w)
       steps[s] = needs ? { status: 'skipped', needs } : { status: (await isWritten($, root, s)) ? 'done' : 'waiting' }
     }
-    run = { root, steps, current: null }
+    // A run again with nothing to send has written nothing new to commit since the last.
+    const isCommitDone = run?.isCommitDone === true && STEPS.every(s => steps[s].status !== 'waiting')
+    run = { root, steps, current: null, ...(isCommitDone ? { isCommitDone } : {}) }
     await keepRun($, run)
   }
   await openSetup($)
@@ -1000,6 +1003,14 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
       rerunning.delete(step)
     }
   })
+  // The commit of what the steps wrote, sent or let go: not offered again until a step goes again.
+  // Kept before it is sent, so a key pressed twice sends it once; back where it did not go.
+  const commitDone = () => changeRun($, now => (now.isCommitDone ? undefined : { ...now, isCommitDone: true }))
+  const commit = act(async () => {
+    if (!(await commitDone())) return
+    const r = await $.prompt.submit({ text: w.commitPrompt, asUser: true })
+    if (r.drop !== undefined) await changeRun($, ({ isCommitDone: _, ...now }) => now)
+  })
   const fix = (step: StepId) => act(async () => {
     const now = await read($, runAtom)
     if (!now) return
@@ -1048,10 +1059,13 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
       {run && STEPS.every(s => ['done', 'skipped'].includes(run.steps[s].status)) ? (
         <Box flexDirection="column">
           <Text color="success">{`✓ ${w.allDone}`}</Text>
-          <Box flexDirection="row" gap={1}>
-            {keyed('setup-commit', w.commit, 'c', act(async () => $.prompt.submit({ text: w.commitPrompt, asUser: true })))}
-            <Text dimColor>{w.commitHint}</Text>
-          </Box>
+          {run.isCommitDone ? null : (
+            <Box flexDirection="row" gap={1}>
+              {keyed('setup-commit', w.commit, 'c', commit, true)}
+              <Text dimColor>{w.commitHint}</Text>
+              {keyed('setup-commit-skip', w.skip, 's', act(commitDone))}
+            </Box>
+          )}
         </Box>
       ) : null}
       {judge ? (

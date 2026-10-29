@@ -311,8 +311,9 @@ export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards'
 // a step left out for want of a tool says to install.
 export type SetupStepState = { status: 'waiting' | 'sent' | 'done' | 'skipped' | 'failed'; isFixSent?: true; error?: string; needs?: string }
 
-// A run of /setup-project in a project: each step's state, the one under way.
-export type SetupRun = { root: string; steps: Record<SetupStepId, SetupStepState>; current: SetupStepId | null }
+// A run of /setup-project in a project: each step's state, the one under way; `isCommitDone` once
+// the commit of what the steps wrote went to Claude or was skipped, until a step goes again.
+export type SetupRun = { root: string; steps: Record<SetupStepId, SetupStepState>; current: SetupStepId | null; isCommitDone?: true }
 
 // The checks of the project as `.claude/agent-lens.json` keeps them: the commands of each tier, for
 // the whole project or by the folder each runs in; and how the project is brought up and tried,
