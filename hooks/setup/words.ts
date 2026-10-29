@@ -264,14 +264,14 @@ Write \`docs/agents/workflow.md\` (adding to it where it is there), 120 lines at
 ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 Then, in the same file:
 - When a task is done here: the full tier of \`.claude/agent-lens.json\` green, and the smoke test where it has one; a line each for what else the project has (stories, accessibility checks).
-- How the work is shared: the main agent orchestrates (takes the task apart, plans, hands the parts to subagents, keeps their order, decides the architecture, puts the results together and answers me) and does by hand only what is cheaper than explaining it; reading code, implementing, running checks, the browser and reviews go to subagents, started in parallel in one message where the parts are independent, each with its own files (a shared contract first where they depend on each other; \`isolation: "worktree"\` where their files may meet), each prompt self-contained (the goal, the files and what not to touch, these rules, when it is done, what to answer), the answers short; what they report is checked (the full tier) before it is told to me.
 
 Then \`CLAUDE.md\` (create it where there is none), 120 lines at most:
 - the language I am spoken to in, as its first rule, where it is not English;
 - a short section of pointers to ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on when to read it; GLOSSARY.md imported with a line \`@GLOSSARY.md\` where it is under 80 lines, so its terms hold on every turn, else pointed to;
 - the rules every turn needs, read from the project's scripts and config: how to install and run (the \`run\` of \`.claude/agent-lens.json\` where it has one); the checks in a line: the fast tier runs by itself at each turn's end, the full tier before a commit, push or merge, sending only on green; their commands are in \`.claude/agent-lens.json\`, not copied here;
-- how to commit.
-Anything else in it that one of those files holds moves there.`
+- how to commit;
+- a section that tells the agent it is the orchestrator, as every turn needs it: it takes the task apart, plans, decides the architecture, keeps the parts in order, puts the results together and answers me; the work itself goes to subagents: reading code, implementing, running checks, the browser, reviews. It delegates by default, a subagent for each part of the task: the independent ones in parallel in one message, each with its own files (a shared contract first where they depend on each other; \`isolation: "worktree"\` where their files may meet), each prompt self-contained (the goal, the files and what not to touch, these rules, when it is done, what to answer), the answers short. By hand, only what is cheaper than explaining it. What they report is checked (the full tier) before it is told to me.
+Anything else in it that one of those files holds moves there; how the work is shared, where docs/agents/workflow.md says it, moves here.`
     },
     config: (n: number, _: Ctx): string =>
       `${leadEn(n, 'OpenSpec reads the files')}
@@ -513,14 +513,14 @@ ${ROLES}
 ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 Потом в том же файле:
 - Когда задача здесь готова: полная ступень из \`.claude/agent-lens.json\` зелёная и смоук-тест, где он есть; по строке на то, что ещё есть в проекте (сторис, проверки доступности).
-- Как делится работа: основной агент — оркестратор (разбирает задачу, планирует, отдаёт части саб-агентам, следит за их порядком, решает архитектуру, сводит результаты и отвечает мне) и руками делает только то, что дешевле, чем объяснить; чтение кода, реализация, прогон проверок, браузер и ревью уходят саб-агентам, независимые части — параллельно одним сообщением, у каждого свои файлы (где части зависят друг от друга — сначала общий контракт; \`isolation: "worktree"\`, если их файлы могут пересечься), промпт самодостаточный (цель, файлы и чего не трогать, эти правила, когда готово, что ответить), ответы короткие; что они доложили, проверяется (полная ступень), прежде чем сказать мне.
 
 Потом \`CLAUDE.md\` (создай, если нет), не больше 120 строк:
 - первым правилом — язык, на котором со мной говорят: «Отвечай и задавай вопросы по-русски»;
 - короткий раздел указателей на ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, когда его читать; GLOSSARY.md подключи строкой \`@GLOSSARY.md\`, если в нём меньше 80 строк, чтобы термины действовали в каждом ходе, иначе дай указатель;
 - правила, нужные каждому ходу, из скриптов и конфигов проекта: как поставить и запустить (\`run\` из \`.claude/agent-lens.json\`, где он есть); проверки одной строкой: быстрая ступень идёт сама в конце каждого хода, полная — перед коммитом, пушем или мержем, и заливать только при зелёном; их команды — в \`.claude/agent-lens.json\`, сюда не копируются;
-- как коммитить.
-Всё остальное в нём, чему место в одном из этих файлов, переезжает туда.`
+- как коммитить;
+- раздел, который говорит агенту, что он оркестратор, — это нужно каждому ходу: он разбирает задачу, планирует, решает архитектуру, держит порядок частей, сводит результаты и отвечает мне; саму работу делают саб-агенты: чтение кода, реализация, прогон проверок, браузер, ревью. Он делегирует по умолчанию, по саб-агенту на каждую часть задачи: независимые — параллельно одним сообщением, у каждого свои файлы (где части зависят друг от друга — сначала общий контракт; \`isolation: "worktree"\`, если их файлы могут пересечься), промпт самодостаточный (цель, файлы и чего не трогать, эти правила, когда готово, что ответить), ответы короткие. Руками — только то, что дешевле, чем объяснить. Что они доложили, проверяется (полная ступень), прежде чем сказать мне.
+Всё остальное в нём, чему место в одном из этих файлов, переезжает туда; как делится работа, если это сказано в docs/agents/workflow.md, переезжает сюда.`
     },
     config: n =>
       `${leadRu(n, 'OpenSpec читает эти файлы')}

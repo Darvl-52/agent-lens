@@ -93,10 +93,11 @@ the turn before has ended, in a pane that shows where each stands:
    rail against the slip, not a sandbox), the project's secrets and
    deploys on your word, the commands of the checks allowed.
 10. `docs/agents/workflow.md`: how work goes (OpenSpec and Matt's skills where they are installed),
-    when a task is done here, and how the work is shared between the main agent and its subagents.
-    And `CLAUDE.md`: the language you are spoken to in first, pointers to the files (`GLOSSARY.md`
-    imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in a
-    line that points to `.claude/agent-lens.json`.
+    and when a task is done here. And `CLAUDE.md`: the language you are spoken to in first, pointers
+    to the files (`GLOSSARY.md` imported with `@GLOSSARY.md` while it is short, so its terms hold on
+    every turn), the checks in a line that points to `.claude/agent-lens.json`, and the agent as the
+    orchestrator: it plans and puts the results together, and hands the work to subagents by default,
+    the independent parts in parallel.
 11. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them,
     and each task names the rules of `CODING_STANDARDS.md` and the lenses it touches: OpenSpec gives
     the agent the rules of the artifacts only while it writes them, and `tasks.md` is what it reads

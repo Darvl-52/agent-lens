@@ -785,6 +785,8 @@ test('with Matt’s skills installed, how work goes names each of those it uses'
   await w.setup()
   await w.settle()
   expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*`grilling`[\s\S]*`domain-modeling`[\s\S]*`tdd`[\s\S]*`diagnosing-bugs`[\s\S]*`code-review`[\s\S]*retro/)
+  // The agent as the orchestrator goes to CLAUDE.md, which every turn reads, not to the workflow.
+  expect(w.submitted[0]).toMatch(/Then `CLAUDE\.md`[\s\S]*tells the agent it is the orchestrator[\s\S]*delegates by default/)
 })
 
 test('a baseline of another commit says nothing of this one: the red goes back, Claude told it may be older', async ($, on) => {

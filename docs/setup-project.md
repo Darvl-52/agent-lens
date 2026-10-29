@@ -160,7 +160,8 @@ shows what failed and sends it back to Claude.
    sandbox), the project's secrets and deploys on the person's
    word, the commands of the checks allowed.
 10. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run and commit;
-    the checks in a line that points to `.claude/agent-lens.json`.
+    the checks in a line that points to `.claude/agent-lens.json`; the agent as the orchestrator,
+    delegating to subagents by default, in `CLAUDE.md` as every turn needs it.
 11. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts, each task
     naming the rules and the lenses it touches, as OpenSpec hands the agent that builds a change no
     rules of its own. A project with OpenSpec and without that rule, set up or not, is offered it on
