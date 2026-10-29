@@ -145,22 +145,27 @@ shows what failed and sends it back to Claude.
    no `AGENTS.md`, no `CONTEXT.md`, no other agent's rules, and no `CLAUDE.md` but one the steps wrote.
 4. The map: `GLOSSARY.md`, `ARCHITECTURE.md`, ADRs for the decisions the code shows, from the code.
 5. `CODING_STANDARDS.md`: read from the code, each rule put to the person before it is written.
-6. The checks: the two tiers, read from the project and put to the person, in `.claude/agent-lens.json`.
+6. `LENSES.md`: the review comments of the project's last merge or pull requests (else its history
+   of fixes), each checked against the code: a wrong one goes to what to push back on, the rest to
+   lenses with their counts, the most frequent first, a kind the mod names taking only what the
+   project adds; the table and the file put to the person. Done with the turn that answers it: a
+   project with no review and no fix has none.
+7. The checks: the two tiers, read from the project and put to the person, in `.claude/agent-lens.json`.
    The mod runs the fast tier once: a command that does not start or takes past two minutes goes back;
    what is red is kept as red before the agent.
-7. Bringing it up: `run.up`, `run.smoke`, `run.down`, or `"run": null` for a library; a smoke test
+8. Bringing it up: `run.up`, `run.smoke`, `run.down`, or `"run": null` for a library; a smoke test
    proposed where there is none, written on the person's yes.
-8. Permissions in `.claude/settings.json`: the rules every project gets (`git push --force`,
+9. Permissions in `.claude/settings.json`: the rules every project gets (`git push --force`,
    `git reset --hard`, `git clean -f`, `rm -rf`; by prefix, so a rail against the slip, not a
    sandbox), the project's secrets and deploys on the person's
    word, the commands of the checks allowed.
-9. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run and commit;
-   the checks in a line that points to `.claude/agent-lens.json`.
-10. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts, each task
+10. `docs/agents/workflow.md` and `CLAUDE.md`'s pointers and general rules: how to run and commit;
+    the checks in a line that points to `.claude/agent-lens.json`.
+11. `openspec/config.yaml`: `context` pointing to the files, `rules` for the artifacts, each task
     naming the rules and the lenses it touches, as OpenSpec hands the agent that builds a change no
     rules of its own. A project with OpenSpec and without that rule, set up or not, is offered it on
     the row.
-11. A CI job running the check of the docs and the full tier through the CLI.
+12. A CI job running the check of the docs and the full tier through the CLI.
 
 Run again, it adds to what is there, never writes over it.
 

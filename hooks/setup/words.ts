@@ -4,8 +4,8 @@ import type { DocIssue, Finding, Gate, GateFailure, StepId, Term } from '../../t
 // What /setup-project found installed, as its first line says it.
 type Ready = { missing: string[]; openspec: string | null; isInitialised: boolean; ci: string[] }
 // What a step's prompt is told of the project: the skills of Matt's there are, whether OpenSpec runs,
-// where the CI is, the rules every project's settings get.
-type Ctx = { skills: string[]; hasOpenspec: boolean; ci: string[]; deny: string[] }
+// where the CI is, the rules every project's settings get, the mod's own lenses by their names.
+type Ctx = { skills: string[]; hasOpenspec: boolean; ci: string[]; deny: string[]; lenses: string[] }
 
 // The files and what each holds, as the docs agent is told them.
 const ROLES = `- CLAUDE.md: pointers to the files below, and the few rules every turn needs. 120 lines at most.
@@ -50,6 +50,7 @@ const EN = {
     existing: 'What is already written',
     map: 'The map: glossary, architecture, ADRs',
     standards: 'The coding standards',
+    lenses: 'The lenses: the kinds of mistake this project’s reviews catch',
     checks: 'The checks, and the gate at each turn’s end',
     run: 'Bringing the project up, and its smoke test',
     permissions: 'What the agent may and may not run',
@@ -208,6 +209,21 @@ Sort each rule:
 Each rule in a line or two: what, why (the mistake it prevents, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\`, \`stylelint: <rule>\`, or \`review\`).
 
 Put the rules to me with AskUserQuestion, a few at a time with multiSelect, saying for each whether it goes to the linter or to the file, and write only those I pick: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. Then run the lint script and say what the new rules found.`,
+    lenses: (n: number, ctx: Ctx): string =>
+      `${leadEn(n, 'the lenses')}
+
+A lens is a kind of mistake, as a habit to check, and where to look for it: one no rule of a single edit catches, as a fix made in create and not in edit, code in another layer's place. \`/changes lenses\` reads a branch through the mod's own lenses (${ctx.lenses.join('; ')}) and through \`LENSES.md\` at the root: this step writes the kinds this project's reviewers catch, from what they wrote.
+
+1. Gather the review comments on the project's last fifty or so merged merge or pull requests:
+   - GitLab: \`glab api "projects/<id>/merge_requests/<iid>/discussions?per_page=100"\`, one request at a time; on a 401 or an empty answer, again after a few seconds; on a failed connection, stop. The notes whose \`system\` is false, by no bot; the answers in a thread are context.
+   - GitHub: the comments lie in three places, \`gh api repos/<o>/<r>/pulls/<n>/comments\` (on lines of code), \`gh api repos/<o>/<r>/pulls/<n>/reviews\` (the review's text), \`gh api repos/<o>/<r>/issues/<n>/comments\` (general); those whose \`user.type\` is not \`Bot\`.
+   Over ten comments, hand the gathering and the sorting to a subagent on sonnet and take its table. Where neither CLI reads the project's requests, read its history instead (\`git log\`): commits that fix, revert or finish another, and what that one missed.
+2. Sort each comment. Whether it is fair: check it against the code; where the reviewer got a fact wrong, it goes to what to push back on, with why it is not so and its link, and to no lens. Else its lens: one of the mod's, one already in LENSES.md, or a new one. A rule one edit can be checked against is no lens: it goes to CODING_STANDARDS.md or the linter.
+3. \`LENSES.md\` at the root, 150 lines at most, added to where it is there:
+   - a line on where the lenses came from: how many comments, on how many requests, over what time;
+   - \`## Lenses\`: each \`N. **Its name** (how many comments). What goes wrong, as a habit to check. Look at: where, by this project's paths.\`, the most frequent first. A kind one of the mod's lenses names takes the mod's name and only what this project adds, its examples and where to look: the review reads the two as one lens.
+   - \`## What to push back on\`: what reviewers asked for that the code shows is not so, each with why and its link.
+Show me a table (the comment, its lens, the edit of the file) and the file as it would be, then put the lenses to me with AskUserQuestion, a few at a time with multiSelect, and write only those I pick. Where no comment and no fix is found, write nothing and say where you looked.`,
     checks: (n: number, _: Ctx): string =>
       `${leadEn(n, 'the checks')}
 
@@ -293,6 +309,7 @@ const RU: typeof EN = {
     existing: 'Что уже написано',
     map: 'Карта: глоссарий, архитектура, ADR',
     standards: 'Стандарты кода',
+    lenses: 'Линзы: какие ошибки ловят ревью этого проекта',
     checks: 'Проверки и гейт в конце каждого хода',
     run: 'Как поднять проект, и его смоук-тест',
     permissions: 'Что агенту можно и нельзя запускать',
@@ -441,6 +458,21 @@ ${ROLES}
 Каждое правило в одну-две строки: что, почему (какую ошибку предотвращает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\`, \`stylelint: <правило>\` или \`ревью\`).
 
 Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, у каждого скажи, идёт оно в линтер или в файл, и запиши только выбранные: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. Потом запусти скрипт линта и скажи, что нашли новые правила.`,
+    lenses: (n, ctx) =>
+      `${leadRu(n, 'линзы')}
+
+Линза — это класс ошибки как проверяемая привычка и где её искать: такой, какой не поймает ни одно правило одной правки, вроде правки в создании, но не в редактировании, или кода не на своём слое. \`/changes lenses\` читает ветку через линзы мода (${ctx.lenses.join('; ')}) и через \`LENSES.md\` в корне: этот шаг пишет туда классы ошибок, на которых ловят ревьюеры этого проекта, по тому, что они написали.
+
+1. Собери замечания ревью в последних штук пятидесяти влитых merge или pull request'ах проекта:
+   - GitLab: \`glab api "projects/<id>/merge_requests/<iid>/discussions?per_page=100"\`, по одному запросу; на \`401\` или пустой ответ — повтор через пару секунд; на ошибку соединения — стоп. Берутся заметки с \`system == false\`, автор не бот; ответы в треде нужны для контекста.
+   - GitHub: замечания лежат в трёх местах, \`gh api repos/<o>/<r>/pulls/<n>/comments\` (строки кода), \`gh api repos/<o>/<r>/pulls/<n>/reviews\` (текст ревью), \`gh api repos/<o>/<r>/issues/<n>/comments\` (общие); берутся те, где \`user.type\` не \`Bot\`.
+   Больше 10 замечаний — выгрузку и разбор отдай сабагенту на sonnet, себе возьми таблицу. Если ни один CLI не читает запросы проекта, читай вместо них историю (\`git log\`): коммиты, которые исправляют, откатывают или доделывают другой, и что тот упустил.
+2. Разбери каждое замечание. Справедливо ли — проверь по коду; если ревьюер ошибся фактом, оно идёт в «На что возражать» с сутью, почему это не так, и ссылкой, и ни в какую линзу. Иначе его линза: одна из линз мода, уже записанная в LENSES.md или новая. Правило, по которому проверяется одна правка, — не линза: ему место в CODING_STANDARDS.md или в линтере.
+3. \`LENSES.md\` в корне, не больше 150 строк, дополняя его, если он есть:
+   - строка о том, откуда линзы: сколько замечаний, в скольких запросах, за какой срок;
+   - \`## Линзы\`: каждая \`N. **Её имя** (сколько замечаний). Что идёт не так, как проверяемая привычка. Смотреть: где, путями этого проекта.\`, самые частые первыми. Класс, который называет линза мода, берёт её имя и только то, что добавляет этот проект, — его примеры и где смотреть: ревью читает их как одну линзу.
+   - \`## На что возражать\`: о чём просили ревьюеры, а код показывает, что это не так, — каждое с причиной и ссылкой.
+Покажи мне таблицу (замечание, линза, правка файла) и файл, каким он станет, потом предложи линзы через AskUserQuestion, по несколько с multiSelect, и запиши только выбранные. Если не нашлось ни замечаний, ни исправлений, ничего не пиши и скажи, где искал.`,
     checks: n =>
       `${leadRu(n, 'проверки')}
 

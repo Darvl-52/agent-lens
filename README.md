@@ -75,27 +75,33 @@ the turn before has ended, in a pane that shows where each stands:
    rule (a banned API, an import's shape, where a file lives) goes to the project's linter, as a
    tool checks it better than prose; a judgement goes to `CODING_STANDARDS.md`. Each says what, why
    (the mistake it prevents), where it shows, and what checks it (`eslint: <rule>` or `review`).
-6. The checks, read from the project's own scripts and put to you, in `.claude/agent-lens.json`:
+6. The lenses, from what the project's reviewers wrote on its last fifty or so merge or pull
+   requests (its history of fixes where no CLI reads them): each comment checked against the code,
+   a wrong one kept as what to push back on, the rest sorted into kinds of mistake, each with how
+   many comments it holds and where to look, by this project's paths; a kind the mod's lenses name
+   adds only what is this project's. A table and the file go to you, and what you pick is written to
+   `LENSES.md`; `/changes lenses` reads the branch through them. None found, nothing is written.
+7. The checks, read from the project's own scripts and put to you, in `.claude/agent-lens.json`:
    `fast` for the end of each turn (lint, types, the tests of the changed files, `{files}` where a
    command takes them) and `full` for before a commit, push or merge; by folder in a monorepo. The
    mod runs the fast tier once: a command that does not start or is too slow goes back, and what is
    red is kept as red before the agent.
-7. Bringing it up: the commands that bring the project up, try its main path and take it down, or
+8. Bringing it up: the commands that bring the project up, try its main path and take it down, or
    nothing for a library; a smoke test proposed where there is none.
-8. What the agent may run, in `.claude/settings.json`: denied always the usual forms of what cannot
+9. What the agent may run, in `.claude/settings.json`: denied always the usual forms of what cannot
    be taken back (`git push --force`, `git reset --hard`, `git clean -f`, `rm -rf`; by prefix, so a
    rail against the slip, not a sandbox), the project's secrets and
    deploys on your word, the commands of the checks allowed.
-9. `docs/agents/workflow.md`: how work goes (OpenSpec and Matt's skills where they are installed),
-   when a task is done here, and how the work is shared between the main agent and its subagents.
-   And `CLAUDE.md`: the language you are spoken to in first, pointers to the files (`GLOSSARY.md`
-   imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in a
-   line that points to `.claude/agent-lens.json`.
-10. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them,
+10. `docs/agents/workflow.md`: how work goes (OpenSpec and Matt's skills where they are installed),
+    when a task is done here, and how the work is shared between the main agent and its subagents.
+    And `CLAUDE.md`: the language you are spoken to in first, pointers to the files (`GLOSSARY.md`
+    imported with `@GLOSSARY.md` while it is short, so its terms hold on every turn), the checks in a
+    line that points to `.claude/agent-lens.json`.
+11. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them,
     and each task names the rules of `CODING_STANDARDS.md` and the lenses it touches: OpenSpec gives
     the agent the rules of the artifacts only while it writes them, and `tasks.md` is what it reads
     as it builds.
-11. A job in the project's CI that runs the check of the docs and the full tier, as under The gate.
+12. A job in the project's CI that runs the check of the docs and the full tier, as under The gate.
 
 A step is done once its files are there and pass the check; where they fail, what failed goes back
 to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). Run
@@ -287,8 +293,8 @@ why the rest does not; a bug it finds in code the branch does not touch is shown
 `r` reads again; `/changes lenses <commit>` reads only what changed since it.
 
 The lenses are the mod's own, thirteen kinds in any stack, so it works for anyone. A project adds
-its own in `LENSES.md` at its root, the kinds its reviews catch, 150 lines at most, checked with the
-other files of `/setup-project`. Your own `~/.claude/review-lenses.md` joins them only where the
+its own in `LENSES.md` at its root, the kinds its reviews catch, 150 lines at most: a step of
+`/setup-project` writes it, and it is checked with the other files of that. Your own `~/.claude/review-lenses.md` joins them only where the
 settings ask for it: its kinds are of your projects, not this one. Where two name the same kind,
 they are one lens with the examples of both. It reads the branch, not a turn: a look this wide is
 worth its cost before a commit or a merge request.

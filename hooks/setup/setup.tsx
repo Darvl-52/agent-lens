@@ -11,8 +11,8 @@ import { baselineOf, CONFIG, DENY, type Exec, fingerprintOf, joinRel, newRed, pa
 import { ADR_DIR, type Disk, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, parseTermsInUse, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
 import { WORDS } from './words'
 
-// The mod's own lenses by their names in a language, as a rule of the tasks names them where the
-// project has no LENSES.md, by the names /changes lenses gives them.
+// The mod's own lenses by their names in a language, by the names /changes lenses gives them: the
+// step of the lenses leaves them out of LENSES.md, a rule of the tasks names them.
 const lensTitles = (lang: keyof typeof LENS_WORDS) => [...LENS_WORDS[lang].lenses.matchAll(/^\d+\. ([^.]+)\./gm)].map(m => m[1]!)
 
 // /setup-project: prepares a project for work with the agent, one step at a time, each sent to the
@@ -39,9 +39,10 @@ const runKey = (root: string) => `setup:${root}`
 // What the fast checks were red on, by folder, on the commit they ran on before the agent.
 const baseKey = (root: string) => `setup:base:${root}`
 
-// The checks come once the linter has the standards' rules; how work goes once there are commands
-// to point to; CI last, as it runs what the steps before it wrote.
-const STEPS: StepId[] = ['matt', 'openspec', 'existing', 'map', 'standards', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci']
+// The lenses come once the standards hold what one edit can be checked against; the checks once the
+// linter has the standards' rules; how work goes once there are commands to point to; CI last, as
+// it runs what the steps before it wrote.
+const STEPS: StepId[] = ['matt', 'openspec', 'existing', 'map', 'standards', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci']
 // The skills of Matt's the way of working stands on; the first sets the project up for the rest.
 const MATT = 'mattpocock-skills'
 const MATT_SKILLS = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro']
@@ -55,13 +56,15 @@ const OWN_DOCS = ['AGENTS.md', ...Object.keys(OLD_GLOSSARIES), '.cursorrules', '
 
 // The files each step writes: the step is done once they are there and pass the check. Matt's
 // skill writes its own and keeps them to its own form. Sorting what is written writes none of its
-// own: it is done with the turn that answers it.
+// own, and the lenses none where the project's reviews show no kind beyond the mod's: each is done
+// with the turn that answers it.
 const WRITES: Record<StepId, string[]> = {
   matt: ['docs/agents/issue-tracker.md', 'docs/agents/domain.md'],
   openspec: ['openspec/config.yaml'],
   existing: [],
   map: ['GLOSSARY.md', 'ARCHITECTURE.md'],
   standards: ['CODING_STANDARDS.md'],
+  lenses: ['LENSES.md'],
   checks: [CONFIG],
   run: [CONFIG],
   permissions: [SETTINGS],
@@ -75,6 +78,7 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
   existing: f => f in OLD_GLOSSARIES,
   map: f => /(^|\/)GLOSSARY(-MAP)?\.md$/.test(f) || f === 'ARCHITECTURE.md' || f.startsWith(`${ADR_DIR}/`),
   standards: f => f === 'CODING_STANDARDS.md',
+  lenses: f => f === 'LENSES.md',
   checks: f => f === CONFIG,
   run: f => f === CONFIG,
   permissions: f => f === SETTINGS,
@@ -475,7 +479,7 @@ async function advance($: EngineInterface) {
     if (!ran) await keepRun($, setStep(run, step, { status: 'failed', error: `/${command}` }))
     return
   }
-  const text = w.prompts[step](STEPS.indexOf(step) + 1, { skills: found.skills, hasOpenspec: found.openspec !== null, ci: found.ci, deny: DENY })
+  const text = w.prompts[step](STEPS.indexOf(step) + 1, { skills: found.skills, hasOpenspec: found.openspec !== null, ci: found.ci, deny: DENY, lenses: lensTitles(await langIn($)) })
   const r = await $.prompt.submit({ text, asUser: true })
   if (r.drop !== undefined) await keepRun($, setStep(run, step, { status: 'failed', error: r.drop }))
 }
@@ -498,7 +502,7 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
   const run = await read($, runAtom)
   const step = run?.current
   if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
-  if (step !== 'existing' && !(await isWritten($, run.root, step))) return
+  if (step !== 'existing' && step !== 'lenses' && !(await isWritten($, run.root, step))) return
   const failing = await failingOf($, run.root, step, issues)
   if (failing.length === 0) {
     await keepRun($, setStep(run, step, { status: 'done' }))

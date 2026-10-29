@@ -304,7 +304,7 @@ export type SetupTermCheck = { status: 'running' | 'done' | 'failed'; at: number
 export type SetupTermVerdict = { verdict: 'used' | 'unused' | 'kept'; at: number }
 
 // The steps of /setup-project, in order.
-export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards' | 'checks' | 'run' | 'permissions' | 'workflow' | 'config' | 'ci'
+export type SetupStepId = 'matt' | 'openspec' | 'existing' | 'map' | 'standards' | 'lenses' | 'checks' | 'run' | 'permissions' | 'workflow' | 'config' | 'ci'
 
 // Where a step stands: not reached, sent to Claude (or run), done, skipped by the person, or done
 // with its files failing the check, `isFixSent` once what failed went back to Claude; `needs` what

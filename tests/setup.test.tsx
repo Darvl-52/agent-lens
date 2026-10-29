@@ -198,10 +198,14 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   await w.turn()
   await w.settle()
   expect(w.submitted[3]).toMatch(/^Step 5 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
-  // Skipped, the next goes.
+  // Skipped, the next goes: the lenses, the mod's own named to be left out.
   await pane.press({ key: 'setup-skip' })
   await w.settle()
-  expect(w.submitted[4]).toMatch(/^Step 6 of \/setup-project[\s\S]*\.claude\/agent-lens\.json/)
+  expect(w.submitted[4]).toMatch(/^Step 6 of \/setup-project[\s\S]*The neighbouring flows[\s\S]*system`[\s\S]*user\.type`[\s\S]*`LENSES\.md` at the root[\s\S]*What to push back on/)
+  // None found, it writes nothing: the turn that answers it is done, and the next goes.
+  await w.turn()
+  await w.settle()
+  expect(w.submitted[5]).toMatch(/^Step 7 of \/setup-project[\s\S]*\.claude\/agent-lens\.json/)
   await pane.unmount()
 })
 
@@ -528,12 +532,12 @@ test('while /setup-project’s steps go, the docs agent waits: it reads what the
   expect(w.submitted.at(-1)).toMatch(/^Step 5 of/)
   expect(w.spawned).toHaveLength(0)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
-  // The standards, the checks, the run, the permissions, the workflow and OpenSpec's config; CI is
-  // left out, as the project has none.
-  for (const step of [5, 6, 7, 8, 9, 10]) {
+  // The standards, the lenses, the checks, the run, the permissions, the workflow and OpenSpec's
+  // config; CI is left out, as the project has none.
+  for (const step of [5, 6, 7, 8, 9, 10, 11]) {
     await pane.press({ key: 'setup-skip' })
     await w.settle()
-    if (step < 10) expect(w.spawned).toHaveLength(0)
+    if (step < 11) expect(w.spawned).toHaveLength(0)
   }
   await pane.unmount()
   // The last step skipped ends the run: the next turn's end reads all it wrote, the map and the glossary among them.
@@ -551,6 +555,7 @@ const UP_TO_CHECKS = {
   'GLOSSARY.md': GLOSSARY,
   'ARCHITECTURE.md': '# Map\n',
   'CODING_STANDARDS.md': '# Standards\n',
+  'LENSES.md': '1. Paired screens. A fix on the list and not on the card. Look at: each list with a card of its own.\n',
 }
 const SETTINGS = JSON.stringify({ permissions: { deny: DENY } })
 // A repository on commit abc whose changed file is src/a.ts.
@@ -609,7 +614,7 @@ test('the step of the checks: the fast tier runs once written, what does not sta
   const w = await world($, on, { files: UP_TO_CHECKS, git: REPO, sh: c => (c === 'missing-tool' ? { exitCode: 127 } : c.startsWith('eslint') ? { exitCode: 1, stdout: 'error' } : undefined) })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 6 of \/setup-project[\s\S]*\{files\}[\s\S]*\.claude\/agent-lens\.json/)
+  expect(w.submitted[0]).toMatch(/^Step 7 of \/setup-project[\s\S]*\{files\}[\s\S]*\.claude\/agent-lens\.json/)
   await w.turn({ '.claude/agent-lens.json': JSON.stringify({ checks: { fast: ['eslint {files}', 'missing-tool'], full: ['npm test'] } }) })
   await w.settle()
   expect(w.shells()).toEqual(["eslint 'src/a.ts'", 'missing-tool'])
@@ -618,7 +623,7 @@ test('the step of the checks: the fast tier runs once written, what does not sta
   await w.turn({ '.claude/agent-lens.json': JSON.stringify({ checks: { fast: ['eslint {files}'], full: ['npm test'] } }) })
   await w.settle()
   expect(w.store.get('setup:base:/proj')).toEqual({ '.': { sha: 'abc', red: ['eslint {files}'] } })
-  expect(w.submitted[2]).toMatch(/^Step 7 of \/setup-project[\s\S]*smoke/)
+  expect(w.submitted[2]).toMatch(/^Step 8 of \/setup-project[\s\S]*smoke/)
 })
 
 test('the gate: a turn that changed the project and leaves the fast checks red is kept going, three rounds at most, then let go', async ($, on) => {
@@ -686,7 +691,7 @@ test('without Matt’s skills and OpenSpec, how work goes names none of them', a
   await w.setup()
   await w.settle()
   expect(w.submitted).toHaveLength(1)
-  expect(w.submitted[0]).toMatch(/^Step 9 of \/setup-project[\s\S]*talked through with me[\s\S]*written down as a plan in the issue/)
+  expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*talked through with me[\s\S]*written down as a plan in the issue/)
   expect(w.submitted[0]).not.toMatch(/grilling|`tdd`|retro|openspec propose/)
 })
 
@@ -703,7 +708,7 @@ test('a project with CI has a job added that runs the same checks; done once the
   const w = await world($, on, { files })
   expect((await w.setup()).text).toMatch(/✓ CI: \.gitlab-ci\.yml/)
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 11 of \/setup-project[\s\S]*`\.gitlab-ci\.yml`[\s\S]*npx -y github:Darvl-52\/agent-lens check/)
+  expect(w.submitted[0]).toMatch(/^Step 12 of \/setup-project[\s\S]*`\.gitlab-ci\.yml`[\s\S]*npx -y github:Darvl-52\/agent-lens check/)
   await w.turn({ '.gitlab-ci.yml': 'stages: [test]\ndocs:\n  script: npx -y github:Darvl-52/agent-lens check\n' })
   await w.settle()
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
@@ -758,7 +763,7 @@ test('while /setup-project’s steps go, the gate waits: they write the checks t
   const w = await world($, on, { files, git: REPO, sh: c => (c === 'lint' ? { exitCode: 1 } : undefined) })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 7 of/)
+  expect(w.submitted[0]).toMatch(/^Step 8 of/)
   await $.turn.start({ text: 'go', turnId: 't' })
   await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'x' })
   await w.settle()
@@ -779,7 +784,7 @@ test('with Matt’s skills installed, how work goes names each of those it uses'
   const w = await world($, on, { files })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 9 of \/setup-project[\s\S]*`grilling`[\s\S]*`domain-modeling`[\s\S]*`tdd`[\s\S]*`diagnosing-bugs`[\s\S]*`code-review`[\s\S]*retro/)
+  expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*`grilling`[\s\S]*`domain-modeling`[\s\S]*`tdd`[\s\S]*`diagnosing-bugs`[\s\S]*`code-review`[\s\S]*retro/)
 })
 
 test('a baseline of another commit says nothing of this one: the red goes back, Claude told it may be older', async ($, on) => {
@@ -814,7 +819,7 @@ test('OpenSpec’s config has each task name the rules and the lenses it touches
   const w = await world($, on, { files })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*LENSES\.md where it is there[\s\S]*each task names the test seam it is built at, and the rules of CODING_STANDARDS\.md and the lenses it touches/)
+  expect(w.submitted[0]).toMatch(/^Step 11 of \/setup-project[\s\S]*LENSES\.md where it is there[\s\S]*each task names the test seam it is built at, and the rules of CODING_STANDARDS\.md and the lenses it touches/)
 })
 
 test('in any project with OpenSpec, a config whose tasks name no rules or lenses is offered the rule, and let go for good on ×', async ($, on) => {
