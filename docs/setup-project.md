@@ -137,7 +137,8 @@ Sent one at a time, each once the turn before has ended; the pane shows each and
 and any can be skipped. A step is done once the checks of its files pass; where they fail, the pane
 shows what failed and sends it back to Claude. A step skipped, or failed once the run went past it,
 is run again from its row, in its turn among those waiting; the config's step brings back the
-init it stands on where that was left out and the CLI is there.
+init it stands on where that was left out and the CLI is there. A step skipped stays
+skipped when `/setup-project` runs again: only its row sends it.
 
 1. `/mattpocock-skills:setup-matt-pocock-skills`: the tracker, the labels, the domain layout. Done
    already where `docs/agents/` holds its files; left out without Matt's skills.

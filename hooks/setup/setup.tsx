@@ -877,7 +877,12 @@ export async function setupCommand($: EngineInterface, args: string) {
     const steps = {} as Record<StepId, StepState>
     for (const s of STEPS) {
       const needs = needsOf(s, found, w)
-      steps[s] = needs ? { status: 'skipped', needs } : { status: (await isWritten($, root, s)) ? 'done' : 'waiting' }
+      const isWrittenNow = !needs && (await isWritten($, root, s))
+      // One skipped, not for what was missing, stays skipped and is not sent again: its row's
+      // `run again` brings it back.
+      const was = run?.steps[s]
+      const isKeptSkipped = !needs && !isWrittenNow && was?.status === 'skipped' && was.needs === undefined
+      steps[s] = needs ? { status: 'skipped', needs } : isKeptSkipped ? { status: 'skipped' } : { status: isWrittenNow ? 'done' : 'waiting' }
     }
     // A run again with nothing to send has written nothing new to commit since the last.
     const isCommitDone = run?.isCommitDone === true && STEPS.every(s => steps[s].status !== 'waiting')

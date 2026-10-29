@@ -392,6 +392,33 @@ test('the commit of the setup is offered once every step is done, until it is se
   await pane.unmount()
 })
 
+test('a step skipped by hand stays skipped when /setup-project runs again: nothing is sent, the commit let go stays so', async ($, on) => {
+  const w = await world($, on)
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n' })
+  await w.settle()
+  await w.turn({ 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': '# Map\n' })
+  await w.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  for (let i = 0; i < 7; i++) {
+    await pane.press({ key: 'setup-skip' })
+    await w.settle()
+  }
+  await pane.press({ key: 'setup-commit-skip' })
+  await w.settle()
+  const sent = w.submitted.length
+  await w.setup()
+  await w.settle()
+  expect(w.submitted).toHaveLength(sent)
+  expect(await pane.find({ type: 'Button', key: 'setup-commit' })).toBeUndefined()
+  // Brought back from its row, it goes.
+  await pane.press({ key: 'setup-rerun-standards' })
+  await w.settle()
+  expect(w.submitted.at(-1)).toMatch(/^Step 5 of/)
+  await pane.unmount()
+})
+
 test('a project set up has its files checked at the start and on each edit, the row saying how many fail', async ($, on) => {
   const w = await world($, on, { files: { 'docs/agents/workflow.md': '# How work goes\n', 'CLAUDE.md': 'See `ARCHITECTURE.md`.\n' } })
   expect((await w.setup('check')).text).toBe('The check found 1:\n  CLAUDE.md:1: names `ARCHITECTURE.md`, which is not there')
