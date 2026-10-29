@@ -97,6 +97,10 @@ const GATE_ROUNDS = 3
 
 // Whether the main loop is in a turn: a step waits for its end.
 let isMainTurn = false
+// The docs agent's findings sent to Claude, and whether the turn under way is the one they went in:
+// once it ends, they are off the pane.
+let findingsPrompt: string | null = null
+let isFindingsTurn = false
 // The tree of each folder the fast checks run in, and its commit, by the folder.
 type Trees = Record<string, { head: string; tree: string }>
 // The rounds the gate sent the same work back, and the trees at its last run: a turn sent back that
@@ -558,6 +562,8 @@ async function sendFix($: EngineInterface, step: StepId, failing: DocIssue[]) {
 
 export function startSetupTurn($: EngineInterface, text: string) {
   isMainTurn = true
+  isFindingsTurn = findingsPrompt !== null && text.includes(findingsPrompt.slice(0, 200))
+  if (isFindingsTurn) findingsPrompt = null
   turnBefore = watched($).catch(() => ({}))
   generation += 1
   const chain = gatePrompt && text.includes(gatePrompt.text.slice(0, 200)) ? gatePrompt.chain : { rounds: 0, last: null }
@@ -568,6 +574,11 @@ export function startSetupTurn($: EngineInterface, text: string) {
 
 export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason) {
   isMainTurn = false
+  if (isFindingsTurn) {
+    isFindingsTurn = false
+    // A docs agent started again meanwhile keeps its own.
+    void update($, judgeAtom, now => (now?.isSent ? null : now)).catch(() => {})
+  }
   // Taken now: the next turn may start, and take its own, while this one's gate runs.
   const turn = gateTurn
   gateTurn = null
@@ -781,8 +792,13 @@ async function sendFindings($: EngineInterface) {
   const judge = await read($, judgeAtom)
   if (!judge || judge.status !== 'done' || judge.isSent || judge.findings.length === 0) return
   await update($, judgeAtom, () => ({ ...judge, isSent: true as const }))
-  const r = await $.prompt.submit({ text: (await wordsIn($)).judgeFix(judge.findings), asUser: true })
-  if (r.drop !== undefined) await update($, judgeAtom, () => judge)
+  const text = (await wordsIn($)).judgeFix(judge.findings)
+  findingsPrompt = text
+  const r = await $.prompt.submit({ text, asUser: true })
+  if (r.drop !== undefined) {
+    findingsPrompt = null
+    await update($, judgeAtom, () => judge)
+  }
 }
 
 export async function registerSetup($: EngineInterface) {
@@ -1086,7 +1102,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             <Text color="error">{`✗ ${w.judgeFailed}`}</Text>
           ) : judge.findings.length === 0 ? (
             <Text color="success">{`✓ ${w.judgeNone}`}</Text>
-          ) : (
+          ) : judge.isSent ? null : (
             judge.findings.map((f: Finding, i) => (
               <Box key={`finding-${i}`} flexDirection="column" paddingLeft={2}>
                 <Text color={f.isMinor ? undefined : 'warning'} wrap="wrap">{`• ${f.file}: ${f.text}${f.isMinor ? ` (${w.minor})` : ''}`}</Text>

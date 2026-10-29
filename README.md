@@ -127,7 +127,8 @@ the edits against the code: is it true of the code, in the file it belongs in, d
 an agent does, does it repeat another file. A line added to `CLAUDE.md` that is neither a pointer
 nor a rule every turn needs is a blocker, and its fix names the file it belongs in. This one runs in
 any project: a turn that grows its `CLAUDE.md` has it read so. What the agent finds, blockers and
-minor ones, is on the pane; `j` sends it to Claude to fix. Its report is kept from Claude as the
+minor ones, is on the pane; `j` sends it to Claude to fix, and it is off the pane once that turn
+ends. Its report is kept from Claude as the
 spec critic's is.
 
 It is told the lines each file gained and lost, not both sides whole, and reads the rest itself; while

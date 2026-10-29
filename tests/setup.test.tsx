@@ -659,6 +659,15 @@ test('a turn that edits the docs has an agent read the edits against the code; i
   expect(w.submitted).toHaveLength(before + 1)
   expect(w.submitted.at(-1)).toMatch(/^The docs agent found these[\s\S]*- CLAUDE\.md: A wish that changes nothing Fix: Take it out/)
   expect(await pane.find({ type: 'Text', text: '→ sent to Claude' })).toBeDefined()
+  // Sent, they are off the list; once the turn they went in ends, off the pane.
+  expect(await pane.find({ type: 'Text', text: '• CLAUDE.md: A wish that changes nothing' })).toBeUndefined()
+  await w.turn()
+  await w.settle()
+  expect(await pane.find({ type: 'Text', text: 'What the docs agent found in the last edits' })).toBeDefined()
+  await $.turn.start({ text: w.submitted.at(-1)!, turnId: 'fix' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 'fix', reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  await w.settle()
+  expect(await pane.find({ type: 'Text', text: 'What the docs agent found in the last edits' })).toBeUndefined()
   await pane.unmount()
 })
 
