@@ -271,6 +271,24 @@ test('a step failed once the run went past it is run again from its row, after t
   await pane.unmount()
 })
 
+test('the next step pressed twice at once goes to Claude once', async ($, on) => {
+  const w = await world($, on)
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n' })
+  await w.settle()
+  await w.turn({ 'GLOSSARY.md': `${GLOSSARY}\nA loose note.\n`, 'ARCHITECTURE.md': '# Map\n' })
+  await w.settle()
+  await w.turn()
+  await w.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  await Promise.all([pane.press({ key: 'setup-next' }), pane.press({ key: 'setup-next' })])
+  await w.settle()
+  expect(w.submitted.filter(t => /^Step 5 of/.test(t))).toHaveLength(1)
+  expect(w.submitted.filter(t => /^Step 6 of/.test(t))).toHaveLength(0)
+  await pane.unmount()
+})
+
 test('a project with docs of its own has them sorted first: each piece to its file, the glossary off its old name', async ($, on) => {
   const w = await world($, on, {
     files: {

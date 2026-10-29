@@ -448,27 +448,46 @@ async function takeBaseline($: EngineInterface, root: string) {
   return { failures, timings, baseline: baselineOf(failures, headsOf(trees)) }
 }
 
+// The run changed one change at a time, each on the run as it is then, and kept: two at once (a key
+// pressed twice, a press beside a turn's end) would each read it before the other kept its change,
+// and send the same step twice, or one undo the other. The change waits on nothing, so none holds up
+// the next; undefined keeps the run as it is.
+let changing: Promise<unknown> = Promise.resolve()
+function changeRun($: EngineInterface, change: (run: Run) => Run | undefined): Promise<Run | undefined> {
+  const next = changing.then(async () => {
+    const run = await read($, runAtom)
+    const changed = run ? change(run) : undefined
+    if (changed) await keepRun($, changed)
+    return changed
+  })
+  // A failed change is its caller's to hear of, and lets the next one go.
+  changing = next.catch(() => {})
+  return next
+}
+
+function changeStep($: EngineInterface, step: StepId, state: StepState) {
+  return changeRun($, run => setStep(run, step, state))
+}
+
 // Sends the next step not done, unless one is with Claude or a turn runs; openspec init the mod
 // runs itself.
 async function advance($: EngineInterface) {
   if (isMainTurn) return
-  let run = await read($, runAtom)
-  if (!run || (run.current && run.steps[run.current].status === 'sent')) return
-  const step = STEPS.find(s => run!.steps[s].status === 'waiting')
-  if (!step) {
-    await keepRun($, { ...run, current: null })
-    return
-  }
+  const run = await changeRun($, now => {
+    if (now.current && now.steps[now.current].status === 'sent') return undefined
+    const next = STEPS.find(s => now.steps[s].status === 'waiting')
+    return next ? { ...setStep(now, next, { status: 'sent' }), current: next } : { ...now, current: null }
+  })
+  const step = run?.current
+  if (!run || !step) return
   const w = await wordsIn($)
-  run = { ...setStep(run, step, { status: 'sent' }), current: step }
-  await keepRun($, run)
   if (step === 'openspec') {
     const r = await $.process
       .run(['openspec', 'init', '--tools', 'claude', '--no-animation'], { cwd: run.root, timeoutMs: 120_000 })
       .catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }))
     const isDone = r.exitCode === 0 && (await exists($, run.root, 'openspec'))
     const why = (r.stderr || r.stdout).trim().split('\n').at(-1) || `exit ${r.exitCode}`
-    await keepRun($, setStep(run, step, isDone ? { status: 'done' } : { status: 'failed', error: w.openspecFailed(why) }))
+    await changeStep($, step, isDone ? { status: 'done' } : { status: 'failed', error: w.openspecFailed(why) })
     if (isDone) await advance($)
     return
   }
@@ -480,12 +499,12 @@ async function advance($: EngineInterface) {
       () => true,
       () => false,
     )
-    if (!ran) await keepRun($, setStep(run, step, { status: 'failed', error: `/${command}` }))
+    if (!ran) await changeStep($, step, { status: 'failed', error: `/${command}` })
     return
   }
   const text = w.prompts[step](STEPS.indexOf(step) + 1, { skills: found.skills, hasOpenspec: found.openspec !== null, ci: found.ci, deny: DENY, lenses: lensTitles(await langIn($)) })
   const r = await $.prompt.submit({ text, asUser: true })
-  if (r.drop !== undefined) await keepRun($, setStep(run, step, { status: 'failed', error: r.drop }))
+  if (r.drop !== undefined) await changeStep($, step, { status: 'failed', error: r.drop })
 }
 
 // A main turn ended with an answer: the step with Claude is done once its files are there and pass
@@ -508,15 +527,17 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
   if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
   if (step !== 'existing' && step !== 'lenses' && !(await isWritten($, run.root, step))) return
   const failing = await failingOf($, run.root, step, issues)
+  // Only while the step is still with Claude: the person may have skipped or sent it again meanwhile.
+  const settle = (state: StepState) => changeRun($, now => (now.current === step && now.steps[step].status === 'sent' ? setStep(now, step, state) : undefined))
   if (failing.length === 0) {
-    await keepRun($, setStep(run, step, { status: 'done' }))
+    await settle({ status: 'done' })
     return void (await advance($))
   }
   if (run.steps[step].isFixSent) {
-    await keepRun($, setStep(run, step, { status: 'failed', isFixSent: true }))
+    await settle({ status: 'failed', isFixSent: true })
     return
   }
-  await sendFix($, run, step, failing)
+  await sendFix($, step, failing)
 }
 
 // What fails of a step: the check of its files, and its own. The step of permissions checks the
@@ -526,11 +547,12 @@ async function failingOf($: EngineInterface, root: string, step: StepId, issues:
   return [...(issues ?? []).filter(i => CHECKED[step](i.file) && i.kind !== 'stale-map' && step !== 'permissions'), ...(await stepIssues($, root, step))]
 }
 
-async function sendFix($: EngineInterface, run: Run, step: StepId, failing: DocIssue[]) {
+async function sendFix($: EngineInterface, step: StepId, failing: DocIssue[]) {
   const w = await wordsIn($)
-  await keepRun($, setStep(run, step, { status: 'sent', isFixSent: true }))
+  // Only to the current step: one skipped meanwhile has nothing to fix.
+  if (!(await changeRun($, now => (now.current === step ? setStep(now, step, { status: 'sent', isFixSent: true }) : undefined)))) return
   const r = await $.prompt.submit({ text: w.prompts.fix(w.steps[step], failing), asUser: true })
-  if (r.drop !== undefined) await keepRun($, setStep(run, step, { status: 'failed', error: r.drop }))
+  if (r.drop !== undefined) await changeStep($, step, { status: 'failed', error: r.drop })
 }
 
 export function startSetupTurn($: EngineInterface, text: string) {
@@ -942,15 +964,11 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   // The current step stopped on a failed check has its own buttons below the steps.
   const isRerunnable = (s: StepState, step: StepId) => !rerunning.has(step) && (s.status === 'skipped' || (s.status === 'failed' && step !== current))
   const skip = (step: StepId) => act(async () => {
-    const now = await read($, runAtom)
-    if (!now) return
-    await keepRun($, { ...setStep(now, step, { status: 'skipped' }), current: null })
+    await changeRun($, now => ({ ...setStep(now, step, { status: 'skipped' }), current: null }))
     await advance($)
   })
   const again = (step: StepId) => act(async () => {
-    const now = await read($, runAtom)
-    if (!now) return
-    await keepRun($, { ...setStep(now, step, { status: 'waiting' }), current: null })
+    await changeRun($, now => ({ ...setStep(now, step, { status: 'waiting' }), current: null }))
     await advance($)
   })
   // A step left out, or stopped on a failed check once the run went past it, started again from its
@@ -967,14 +985,15 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
       // What the step stands on left out for what is missing is missing for the step too.
       const isNeeded = was.steps[step].needs !== undefined || (under !== undefined && was.steps[under].needs !== undefined)
       const needs = isNeeded ? needsOf(step, await preflight($, was.root), w) : undefined
-      // Read again: the run may have moved on while what is installed was looked for.
-      let now = await read($, runAtom)
-      if (!now || !['skipped', 'failed'].includes(now.steps[step].status)) return
-      now = setStep(now, step, needs ? { status: 'skipped', needs } : { status: 'waiting' })
-      // Not the one stopped on its check as the current: its error and buttons stay the person's.
-      const isUnderBack = !needs && under !== undefined && (now.steps[under].status === 'skipped' || (now.steps[under].status === 'failed' && now.current !== under))
-      if (under && isUnderBack) now = setStep(now, under, { status: 'waiting' })
-      await keepRun($, now)
+      // On the run as it is now: it may have moved on while what is installed was looked for.
+      const changed = await changeRun($, now => {
+        if (!['skipped', 'failed'].includes(now.steps[step].status)) return undefined
+        const next = setStep(now, step, needs ? { status: 'skipped', needs } : { status: 'waiting' })
+        // Not the one stopped on its check as the current: its error and buttons stay the person's.
+        const isUnderBack = !needs && under !== undefined && (next.steps[under].status === 'skipped' || (next.steps[under].status === 'failed' && next.current !== under))
+        return under && isUnderBack ? setStep(next, under, { status: 'waiting' }) : next
+      })
+      if (!changed) return
       if (needs) return void (await $.ui.toast(needs))
       await advance($)
     } finally {
@@ -984,7 +1003,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const fix = (step: StepId) => act(async () => {
     const now = await read($, runAtom)
     if (!now) return
-    await sendFix($, now, step, await failingOf($, now.root, step, await checkProject($)))
+    await sendFix($, step, await failingOf($, now.root, step, await checkProject($)))
   })
   return (
     <Box flexDirection="column" gap={1}>
