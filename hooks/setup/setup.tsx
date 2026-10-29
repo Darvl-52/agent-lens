@@ -88,6 +88,10 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
 }
 // Where a project keeps its CI: a step that adds a job there has nothing to add to where there is none.
 const CI_FILES = ['.gitlab-ci.yml', '.github/workflows', 'azure-pipelines.yml', 'bitbucket-pipelines.yml', '.circleci/config.yml', 'Jenkinsfile']
+// The step each stands on: OpenSpec reads the files only of an openspec/ that is initialised.
+const STANDS_ON: Partial<Record<StepId, StepId>> = { config: 'openspec' }
+// The steps being run again from their rows: a press meanwhile runs nothing more.
+const rerunning = new Set<StepId>()
 // How often the gate sends a turn back for the same red before it lets it go to the person.
 const GATE_ROUNDS = 3
 
@@ -935,6 +939,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const state = current ? run!.steps[current] : null
   const isIdle = !state || state.status !== 'sent'
   const hasWaiting = run ? STEPS.some(s => run.steps[s].status === 'waiting') : false
+  // The current step stopped on a failed check has its own buttons below the steps.
+  const isRerunnable = (s: StepState, step: StepId) => !rerunning.has(step) && (s.status === 'skipped' || (s.status === 'failed' && step !== current))
   const skip = (step: StepId) => act(async () => {
     const now = await read($, runAtom)
     if (!now) return
@@ -946,6 +952,34 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     if (!now) return
     await keepRun($, { ...setStep(now, step, { status: 'waiting' }), current: null })
     await advance($)
+  })
+  // A step left out, or stopped on a failed check once the run went past it, started again from its
+  // row: it waits in its turn among the others, and the step with Claude, if any, stays its current.
+  // One left out for what was missing is checked for it again, and waits only once it is there; a
+  // step that stands on another left out brings that one back with it.
+  const rerun = (step: StepId) => act(async () => {
+    if (rerunning.has(step)) return
+    rerunning.add(step)
+    try {
+      const was = await read($, runAtom)
+      if (!was) return
+      const under = STANDS_ON[step]
+      // What the step stands on left out for what is missing is missing for the step too.
+      const isNeeded = was.steps[step].needs !== undefined || (under !== undefined && was.steps[under].needs !== undefined)
+      const needs = isNeeded ? needsOf(step, await preflight($, was.root), w) : undefined
+      // Read again: the run may have moved on while what is installed was looked for.
+      let now = await read($, runAtom)
+      if (!now || !['skipped', 'failed'].includes(now.steps[step].status)) return
+      now = setStep(now, step, needs ? { status: 'skipped', needs } : { status: 'waiting' })
+      // Not the one stopped on its check as the current: its error and buttons stay the person's.
+      const isUnderBack = !needs && under !== undefined && (now.steps[under].status === 'skipped' || (now.steps[under].status === 'failed' && now.current !== under))
+      if (under && isUnderBack) now = setStep(now, under, { status: 'waiting' })
+      await keepRun($, now)
+      if (needs) return void (await $.ui.toast(needs))
+      await advance($)
+    } finally {
+      rerunning.delete(step)
+    }
   })
   const fix = (step: StepId) => act(async () => {
     const now = await read($, runAtom)
@@ -965,6 +999,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                   <Text color={color}>{mark}</Text>
                   <Text bold={step === current}>{`${i + 1}. ${w.steps[step]}`}</Text>
                   <Text dimColor>{`· ${w.status[s.status]}${s.isFixSent && s.status === 'sent' ? ` · ${w.fixSent}` : ''}`}</Text>
+                  {isRerunnable(s, step) ? <Button key={`setup-rerun-${step}`} label={w.rerun} plain dimColor onPress={rerun(step)} /> : null}
                 </Box>
                 {s.error ? (
                   <Text color="error" wrap="wrap">

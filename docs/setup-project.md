@@ -19,8 +19,8 @@ Recommended, never required:
 
 `/setup-project` says in one line what it found and what it recommends
 (`✓ Matt’s skills installed · ○ OpenSpec recommended: npm install -g @fission-ai/openspec · ✓ CI: .gitlab-ci.yml`),
-and goes on. A step left out says why in the pane; installed later, the next `/setup-project` once
-the run is done brings it in.
+and goes on. A step left out says why in the pane; installed later, its `run again` brings it in, as
+does the next `/setup-project` once the run is done.
 
 ## The files and what each holds
 
@@ -135,7 +135,9 @@ each step:
 
 Sent one at a time, each once the turn before has ended; the pane shows each and where it stands,
 and any can be skipped. A step is done once the checks of its files pass; where they fail, the pane
-shows what failed and sends it back to Claude.
+shows what failed and sends it back to Claude. A step skipped, or failed once the run went past it,
+is run again from its row, in its turn among those waiting; the config's step brings back the
+init it stands on where that was left out and the CLI is there.
 
 1. `/mattpocock-skills:setup-matt-pocock-skills`: the tracker, the labels, the domain layout. Done
    already where `docs/agents/` holds its files; left out without Matt's skills.

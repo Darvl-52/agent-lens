@@ -104,7 +104,8 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('agent.spawn', ($, e) => (spawned.push(e.prompt), tasks.push(e.description), models.push(e.model), { model: e.model ?? 'sonnet' }))
   on('agent.list', () => ({ value: tasks.map((description, i) => ({ id: `judge-${i + 1}`, description, type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })) }))
   on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true } }))
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box key="engine" />
@@ -131,11 +132,12 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   const agentDone = (agentId: string, answer: string) =>
     $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
   const shells = () => runs.filter(r => r[0] === 'sh' && r[2] !== 'exit 0').map(r => r[2]!)
-  return { clock, disk, store, submitted, commands, runs, shells, opened, spawned, models, setup, turn, settle, agentDone }
+  return { clock, disk, store, submitted, commands, runs, shells, opened, spawned, models, toasts, setup, turn, settle, agentDone }
 }
 
 test('missing Matt’s skills, /setup-project recommends them and goes on, the step that needs them left out', async ($, on) => {
-  const w = await world($, on, { noMatt: true })
+  const opts = { noMatt: true }
+  const w = await world($, on, opts)
   expect((await w.setup()).text).toMatch(/^○ Matt’s skills recommended \(setup-matt-pocock-skills, domain-modeling, .*retro missing\): \/plugin install mattpocock-skills · ✓ OpenSpec 1\.14\.1/)
   await w.settle()
   expect(w.opened).toEqual(['agent-lens-setup'])
@@ -145,16 +147,41 @@ test('missing Matt’s skills, /setup-project recommends them and goes on, the s
   expect(w.submitted[0]).toMatch(/^Step 4 of \/setup-project/)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
   expect(await pane.find({ type: 'Text', text: /^  left out: Matt’s skills are not installed/ })).toBeDefined()
+  // Run again while the skills are still missing, it stays left out and says why.
+  expect(await pane.find({ type: 'Button', key: 'setup-rerun-matt' })).toBeDefined()
+  await pane.press({ key: 'setup-rerun-matt' })
+  await w.settle()
+  expect(w.commands).toEqual([])
+  expect(w.toasts).toContain('left out: Matt’s skills are not installed (/plugin install mattpocock-skills)')
+  expect(await pane.find({ type: 'Text', text: /^  left out: Matt’s skills are not installed/ })).toBeDefined()
+  // Installed (the world reads its options live), it waits for the map with Claude, then goes.
+  opts.noMatt = false
+  await pane.press({ key: 'setup-rerun-matt' })
+  await w.settle()
+  expect(await pane.find({ type: 'Text', text: /^  left out: Matt’s skills/ })).toBeUndefined()
+  expect(w.commands).toEqual([])
+  await pane.press({ key: 'setup-skip' })
+  await w.settle()
+  expect(w.commands).toEqual(['mattpocock-skills:setup-matt-pocock-skills'])
   await pane.unmount()
 })
 
 test('no OpenSpec CLI: it is recommended, and the two steps of OpenSpec are left out', async ($, on) => {
-  const w = await world($, on, { noOpenspec: true })
+  const opts = { noOpenspec: true }
+  const w = await world($, on, opts)
   expect((await w.setup()).text).toMatch(/^✓ Matt’s skills installed · ○ OpenSpec recommended: npm install -g @fission-ai\/openspec/)
   await w.settle()
   expect(w.commands).toEqual(['mattpocock-skills:setup-matt-pocock-skills'])
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
   expect(await pane.findAll({ type: 'Text', text: /^  left out: the OpenSpec CLI is not installed/ })).toHaveLength(2)
+  // Installed, the config's step run again brings back the init it stands on, which goes first.
+  opts.noOpenspec = false
+  await pane.press({ key: 'setup-rerun-config' })
+  await w.settle()
+  expect(await pane.find({ type: 'Button', key: 'setup-rerun-openspec' })).toBeUndefined()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n' })
+  await w.settle()
+  expect(w.runs.find(r => r[1] === 'init')).toBeDefined()
   await pane.unmount()
 })
 
@@ -189,6 +216,8 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   expect(await pane.find({ type: 'Text', text: /^4\. The map: glossary, architecture, ADRs$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^· check failed$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^• GLOSSARY\.md:14: not a term entry/ })).toBeDefined()
+  // The step stopped on its check has its own buttons, not the row's.
+  expect(await pane.find({ type: 'Button', key: 'setup-rerun-map' })).toBeUndefined()
   // Fixed by hand: the next turn's end finds it passing, and the standards go.
   w.disk.set('/proj/GLOSSARY.md', GLOSSARY)
   await pane.press({ key: 'setup-again' })
@@ -206,6 +235,39 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   await w.turn()
   await w.settle()
   expect(w.submitted[5]).toMatch(/^Step 7 of \/setup-project[\s\S]*\.claude\/agent-lens\.json/)
+  // A step skipped is run again from its row: it waits while another is with Claude, then goes first.
+  await pane.press({ key: 'setup-rerun-standards' })
+  await w.settle()
+  expect(w.submitted).toHaveLength(6)
+  expect(await pane.find({ type: 'Button', key: 'setup-rerun-standards' })).toBeUndefined()
+  await pane.press({ key: 'setup-skip' })
+  await w.settle()
+  expect(w.submitted[6]).toMatch(/^Step 5 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
+  expect(await pane.find({ type: 'Button', key: 'setup-rerun-checks' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a step failed once the run went past it is run again from its row, after the step with Claude', async ($, on) => {
+  const w = await world($, on)
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n' })
+  await w.settle()
+  await w.turn({ 'GLOSSARY.md': `${GLOSSARY}\nA loose note.\n`, 'ARCHITECTURE.md': '# Map\n' })
+  await w.settle()
+  await w.turn()
+  await w.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  await pane.press({ key: 'setup-next' })
+  await w.settle()
+  expect(w.submitted[2]).toMatch(/^Step 5 of/)
+  w.disk.set('/proj/GLOSSARY.md', GLOSSARY)
+  await pane.press({ key: 'setup-rerun-map' })
+  await w.settle()
+  expect(w.submitted).toHaveLength(3)
+  await pane.press({ key: 'setup-skip' })
+  await w.settle()
+  expect(w.submitted[3]).toMatch(/^Step 4 of/)
   await pane.unmount()
 })
 
@@ -246,6 +308,37 @@ test('a run kept from before the step of what is written goes on, that step take
   expect(await pane.find({ type: 'Text', text: /^3\. What is already written$/ })).toBeDefined()
   expect(await pane.find({ type: 'Text', text: /^4\. The map: glossary, architecture, ADRs$/ })).toBeDefined()
   await pane.unmount()
+})
+
+test('the config’s step skipped by hand, run again, brings back the init only once the CLI is there; an init stopped on its check stays the person’s', async ($, on) => {
+  const opts = { noOpenspec: true }
+  const steps = (openspec: object) => ({
+    matt: { status: 'done' }, openspec, existing: { status: 'done' }, map: { status: 'done' }, standards: { status: 'done' }, lenses: { status: 'done' },
+    checks: { status: 'done' }, run: { status: 'done' }, permissions: { status: 'done' }, workflow: { status: 'done' }, config: { status: 'skipped' }, ci: { status: 'done' },
+  })
+  const w = await world($, on, opts)
+  w.store.set('setup:/proj', { root: '/proj', current: null, steps: steps({ status: 'skipped', needs: 'left out: the OpenSpec CLI is not installed (npm install -g @fission-ai/openspec)' }) })
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  await pane.press({ key: 'setup-rerun-config' })
+  await w.settle()
+  expect(w.runs.find(r => r[1] === 'init')).toBeUndefined()
+  expect(w.toasts).toContain('left out: the OpenSpec CLI is not installed (npm install -g @fission-ai/openspec)')
+  expect(await pane.find({ type: 'Button', key: 'setup-rerun-config' })).toBeDefined()
+  await pane.unmount()
+  // The init failed and is the current step: the config goes, the init keeps its error.
+  opts.noOpenspec = false
+  w.store.set('setup:/proj', { root: '/proj', current: 'openspec', steps: steps({ status: 'failed', error: 'openspec init did not run' }) })
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  const again = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  await again.press({ key: 'setup-rerun-config' })
+  await w.settle()
+  expect(w.runs.find(r => r[1] === 'init')).toBeUndefined()
+  expect(w.submitted.at(-1)).toMatch(/^Step 11 of/)
+  expect(await again.find({ type: 'Text', text: /^  openspec init did not run$/ })).toBeDefined()
+  await again.unmount()
 })
 
 test('a project set up has its files checked at the start and on each edit, the row saying how many fail', async ($, on) => {
