@@ -1,6 +1,6 @@
 {
   "name": "agent-lens",
-  "version": "0.16.2",
+  "version": "0.16.3",
   "private": true,
   "description": "The checks of agent-lens for CI: the docs /setup-project writes, and the tiers of .claude/agent-lens.json.",
   "license": "MIT",
