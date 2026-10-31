@@ -10,7 +10,7 @@ import { WORDS } from './words'
 const offAtom = atom({ plugin: 'agent-lens', key: 'parts.off' } as const, null)
 const OFF_KEY = 'parts.off'
 
-export const PARTS: readonly Part[] = ['review', 'live', 'spec', 'router', 'guard', 'lenses', 'setup']
+export const PARTS: readonly Part[] = ['review', 'live', 'spec', 'router', 'guard', 'lenses', 'setup', 'security']
 export const PANE = 'agent-lens-parts'
 const COMMAND = 'agent-lens'
 

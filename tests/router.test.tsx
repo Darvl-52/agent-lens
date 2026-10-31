@@ -33,7 +33,8 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const opened: string[] = []
   const clock = mock.clock(on, { now: 1_000 })
   // The store, kept here so a test can change it as another session would.
-  const store = new Map<string, unknown>(Object.entries(setup.stored ?? {}))
+  // Security's rules would ride on every first prompt these compare; it has its own tests.
+  const store = new Map<string, unknown>(Object.entries({ 'parts.off': ['security'], ...setup.stored }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
     store.set(e.key, e.value)

@@ -356,12 +356,31 @@ export type LensReview = {
   isSent?: true
 }
 
+// The security watch over the code the agent writes.
+
+// A hole the agent found: `high` can be attacked as the code stands and goes to Claude by itself;
+// `low` wants more than this code to go wrong, and is the person's to send. `isSent` once it went.
+// `evidence`: the line it is about, a secret in it hidden, where the check of an edit quoted one.
+export type SecurityFinding = { severity: 'high' | 'low'; kind: string; file: string; line?: number; problem: string; fix: string; evidence?: string; isSent?: boolean }
+
+// One thing the journal keeps of what the agent tried: which watch saw it, and what came of it: kept
+// out of the code, let through after refusals, noted to Claude, or found in code already written.
+// `times`: how often in a row the same was tried.
+export type SecurityLogEntry = { at: number; by: 'secret' | 'edit' | 'pattern' | 'agent' | 'audit'; outcome: 'refused' | 'passed' | 'noted' | 'found'; kind: string; file: string; line?: number; problem: string; fix?: string; evidence?: string; times?: number }
+
+// The agent's last look: what it read, what it found, and what it checked where it found nothing.
+export type SecurityReview = { status: 'running' | 'done' | 'failed'; at: number; agentId?: string; files: string[]; findings: SecurityFinding[]; checked: string; isAudit?: true }
+
+// A secret an edit or a shell command was refused for: its kind, its value masked, a hash of it, and
+// where it was to go ('shell', or the file).
+export type SecurityRefused = { kind: string; masked: string; key: string; where: string }
+
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
 export type RouterChange = { name: string; done: number; total: number }
 
 // The parts of the mod a person turns on and off in /agent-lens; `live` is the review's check of
 // each edit, and goes with the review.
-export type Part = 'review' | 'live' | 'spec' | 'router' | 'guard' | 'lenses' | 'setup'
+export type Part = 'review' | 'live' | 'spec' | 'router' | 'guard' | 'lenses' | 'setup' | 'security'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -476,6 +495,12 @@ declare module 'claude-code' {
       'lenses.offer': { change: string } | null
       // A change archived, offered a retro of the work by Matt's command of that name.
       'setup.retro': { change: string; command: string } | null
+
+      // The security watch: the agent's last look, and the secrets refused and not let through yet.
+      'security.review': SecurityReview | null
+      'security.refused': SecurityRefused[]
+      // What the agent tried, newest first, in this project: kept in the store across sessions.
+      'security.log': SecurityLogEntry[]
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]

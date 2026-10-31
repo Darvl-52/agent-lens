@@ -7,6 +7,7 @@ import { registerCommand as registerReviewCommand } from './review/review'
 import { WORDS as REVIEW_WORDS } from './review/words'
 import { registerCommand as registerRouterCommand } from './router/state'
 import { WORDS as ROUTER_WORDS } from './router/words'
+import { registerCommand as registerSecurityCommand } from './security/security'
 import { registerSetup } from './setup/setup'
 import { forgetSaid, registerCommand as registerSpecCommand } from './spec/lens'
 import { WORDS as SPEC_WORDS } from './spec/words'
@@ -20,6 +21,7 @@ export async function switchLang($: EngineInterface, lang: Lang) {
   await registerRouterCommand($).catch(() => {})
   await registerSetup($).catch(() => {})
   await registerPartsCommand($).catch(() => {})
+  await registerSecurityCommand($).catch(() => {})
   await forgetSaid($).catch(() => {})
 }
 

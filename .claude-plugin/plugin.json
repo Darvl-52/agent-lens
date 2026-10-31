@@ -92,6 +92,38 @@
       "description": "The hard limit on one turn of an agent, in tool calls; the soft one is half",
       "default": 150
     },
+    "securityCheck": {
+      "type": "string",
+      "title": "Security: check each edit",
+      "description": "block: a small model reads each edit of code before it lands and refuses a hole it can see, a few seconds an edit; off: no such check, the secret scan and the agent after the turn still work",
+      "default": "block",
+      "options": [
+        "block",
+        "off"
+      ]
+    },
+    "securityCheckModel": {
+      "type": "string",
+      "title": "Model for the security check of each edit",
+      "description": "An alias like haiku or a full model id",
+      "default": "haiku"
+    },
+    "securityAgent": {
+      "type": "string",
+      "title": "Security agent",
+      "description": "auto: an agent reads what each turn changed for holes, and what can be attacked now goes back to Claude, three rounds in a row at most; button: only on /security run. Secrets are refused either way; /agent-lens turns it all off",
+      "default": "auto",
+      "options": [
+        "auto",
+        "button"
+      ]
+    },
+    "securityModel": {
+      "type": "string",
+      "title": "Model for the security agent",
+      "description": "The model that reads the changes for holes: an alias like sonnet or a full model id",
+      "default": "sonnet"
+    },
     "routerUseModel": {
       "type": "boolean",
       "title": "Route with a model",

@@ -44,6 +44,7 @@ import { configureLenses, dismissOffer, endLensAgent, lensesBeforePush, lensesCo
 import { isOn, offText, PARTS, PANE as PARTS_PANE, registerCommand as registerPartsCommand, restoreParts } from './parts/parts'
 import { command as partsCommand, pane as partsPane } from './parts/menu'
 import { langCommand } from './switch'
+import { clearSecurity, compactSecurity, configureSecurity, endSecurityAgent, endSecurityTurn, openPane as openSecurity, PANE as SECURITY_PANE, pane as securityPane, isPersons, personSpoke, registerCommand as registerSecurityCommand, restoreSecurity, securityRules, securityAfter, securityBefore, securityCommand, securityLine, securityReport } from './security/security'
 import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, registerCommand as registerSpecCommand, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
 // Four parts in one module, each in its own folder, sharing the language: the review of what the
@@ -68,13 +69,14 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
   if (isOn('spec')) await rescanSpec($).catch(() => {})
   if (isOn('router')) await restoreRouter($).catch(() => {})
   await restoreGuard($).catch(() => {})
+  await restoreSecurity($).catch(() => {})
   if (isOn('setup')) await startSetup($).catch(() => {})
 }
 
 // What the person is told such a report went to, or undefined for any other text.
 async function agentReport($: Parameters<Hook<'prompt.submit'>>[0], text: string) {
   // The docs agent and the lenses first: the critic's check knows every agent this mod started.
-  return (await judgeReport($, text).catch(() => undefined)) ?? (await lensReport($, text).catch(() => undefined)) ?? (await criticReport($, text).catch(() => undefined))
+  return (await judgeReport($, text).catch(() => undefined)) ?? (await lensReport($, text).catch(() => undefined)) ?? (await securityReport($, text).catch(() => undefined)) ?? (await criticReport($, text).catch(() => undefined))
 }
 
 export const register: Register = (on, options) => {
@@ -84,6 +86,7 @@ export const register: Register = (on, options) => {
   configureRouter(options)
   configureGuard(options)
   configureLenses(options)
+  configureSecurity(options)
 
   // A part turned off in /agent-lens still has its command, which says so, and does none of its work.
   on('session.start', async ($, e, next) => {
@@ -92,6 +95,8 @@ export const register: Register = (on, options) => {
     await restoreGuard($).catch(() => {})
     await registerPartsCommand($).catch(() => {})
     await startReview($).catch(() => {})
+    await registerSecurityCommand($).catch(() => {})
+    await restoreSecurity($).catch(() => {})
     await (isOn('spec') ? startSpec($, e.isInteractive) : registerSpecCommand($)).catch(() => {})
     await (isOn('setup') ? startSetup($) : registerSetup($)).catch(() => {})
     const started = await next(e)
@@ -109,6 +114,7 @@ export const register: Register = (on, options) => {
       await restartReview($).catch(() => {})
       await clearRouter($).catch(() => {})
       await clearGuard($).catch(() => {})
+      await clearSecurity($).catch(() => {})
       await readBack($)
     }
     return ended
@@ -120,13 +126,21 @@ export const register: Register = (on, options) => {
     return started
   }).catch(($, e, next) => next(e))
 
-  on('session.compact', ($, e, next) => sessionCompact($, e, next))
+  on('session.compact', ($, e, next) => {
+    compactSecurity()
+    return sessionCompact($, e, next)
+  })
   // The report of an agent this mod started (the spec critic, the docs agent) is its pane's, not a
   // message for Claude: the engine queues a subagent's hand-back to the main conversation as a
   // peer's prompt, and a delivery from outside the session reaches session.receive.
   on('prompt.submit', async ($, e, next) => {
     const kept = e.origin.kind === 'peer' ? await agentReport($, e.text) : undefined
-    return kept ? { drop: kept } : isOn('router') ? promptSubmit($, e, next) : next(e)
+    if (isPersons(e.origin)) personSpoke()
+    if (kept) return { drop: kept }
+    // The rules of security go ahead of the work they are for.
+    const rules = isOn('security') && e.origin.kind !== 'peer' ? await securityRules($).catch(() => undefined) : undefined
+    const told = rules ? { ...e, context: [...(e.context ?? []), rules] } : e
+    return isOn('router') ? promptSubmit($, told, next) : next(told)
   })
   on('prompt.autocomplete', ($, e, next) => (isOn('router') ? promptAutocomplete($, e, next) : next(e)))
   on('skill.prompt', ($, e, next) => skillPrompt($, e, next))
@@ -152,10 +166,12 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) {
       if (began('spec')) endSpecTurn($, e.reason)
       if (began('setup')) endSetupTurn($, e.reason)
+      if (began('security')) void endSecurityTurn($, e.reason).catch(() => {})
     } else {
       endSpecAgent($, e.agentId, e.answer)
       void endSetupAgent($, e.agentId, e.answer).catch(() => {})
       void endLensAgent($, e.agentId, e.answer).catch(() => {})
+      void endSecurityAgent($, e.agentId, e.answer).catch(() => {})
     }
     await endGuardTurn($, e.agentId).catch(() => {})
     const result = await next(e)
@@ -183,6 +199,9 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     const held = isOn('guard') ? await guardBefore($, e).catch(() => undefined) : undefined
     if (held?.deny !== undefined) return { deny: held.deny }
+    // Security goes first: an edit it refuses reaches no check of the rules.
+    const refused = await securityBefore($, e).catch(() => undefined)
+    if (refused !== undefined) return { deny: refused }
     const refusal = isOn('review') ? await checkBefore($, e).catch(() => undefined) : undefined
     if (refusal !== undefined) return { deny: refusal }
     // In Lenses: auto, work not read through the lenses since the last push waits for them.
@@ -193,7 +212,8 @@ export const register: Register = (on, options) => {
       if (isOn('spec')) afterSpecEdit($, e.file_path)
       if (isOn('setup')) afterSetupEdit($, e.file_path)
     }
-    const checked = isOn('review') ? checkAfter($, e, ran) : ran
+    const reviewed = isOn('review') ? checkAfter($, e, ran) : ran
+    const checked = isOn('security') ? await securityAfter($, e, reviewed).catch(() => reviewed) : reviewed
     return guardAfter($, e, held, checked).catch(() => checked)
   }).catch(($, e, next) => next(e))
 
@@ -215,6 +235,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'spec' }, async ($, e) => (await langCommand($, 'spec', e.args)) ?? (isOn('spec') ? specCommand($, e) : offText($, 'spec')))
   on('command.run', { command: 'setup-project' }, ($, e) => (isOn('setup') ? setupCommand($, e.args) : offText($, 'setup')))
   on('command.run', { command: 'router' }, async ($, e) => (await langCommand($, 'router', e.args)) ?? (isOn('router') ? routerCommand($, e) : offText($, 'router')))
+  on('command.run', { command: 'security' }, ($, e) => (isOn('security') ? securityCommand($, e.args, e.origin) : offText($, 'security')))
   on('command.run', { command: 'agent-lens' }, $ => partsCommand($))
 
   // One row above the prompt: the OpenSpec change in view, then what the agent's last turn changed,
@@ -281,6 +302,8 @@ export const register: Register = (on, options) => {
     if (lenses) rows.unshift(row('lenses-row', <Text color="warning">{lenses}</Text>, <Button key="open-lenses" label="/changes lenses" plain dimColor onPress={() => void openLenses($).catch(() => {})} />))
     const docs = isOn('setup') ? await setupLine($).catch(() => null) : null
     if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(() => {})} />))
+    const security = isOn('security') ? await securityLine($).catch(() => null) : null
+    if (security) rows.unshift(row('security-row', <Text color="error">{security}</Text>, <Button key="open-security" label="/security" plain dimColor onPress={() => void openSecurity($).catch(() => {})} />))
     rows.unshift(...guarded)
     if (rows.length === 0) return below
     return (
@@ -296,5 +319,6 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: ROUTER_PANE }, ($, e) => routerPane($, e))
   on('ui.render', { component: 'Pane', requestId: SETUP_PANE }, ($, e) => setupPane($, e))
   on('ui.render', { component: 'Pane', requestId: LENSES_PANE }, ($, e) => lensesPane($, e))
+  on('ui.render', { component: 'Pane', requestId: SECURITY_PANE }, ($, e) => securityPane($, e))
   on('ui.render', { component: 'Pane', requestId: PARTS_PANE }, ($, e) => partsPane($, e))
 }

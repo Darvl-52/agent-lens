@@ -13,7 +13,8 @@ const PANE = {
 // A session with the router's model answering `tdd` to every prompt, and the store kept here so a
 // later session reads what an earlier one saved.
 async function session($: Engine, on: On, stored: Record<string, unknown> = {}) {
-  const store = new Map<string, unknown>(Object.entries(stored))
+  // Security's rules would ride on every first prompt these compare; it has its own tests.
+  const store = new Map<string, unknown>(Object.entries({ 'parts.off': ['security'], ...stored }))
   const asked: string[] = []
   const entered: (readonly string[])[] = []
   const toasts: string[] = []
@@ -66,7 +67,7 @@ test('a part turned off in the menu does none of its work, and its command says 
   await ui.press({ key: 'toggle-router' })
   expect((await ui.find({ key: 'toggle-router' }))?.props.label).toBe('○ off')
   expect(s.toasts.at(-1)).toBe('Skill router: off.')
-  expect(s.store.get('parts.off')).toEqual(['router'])
+  expect(s.store.get('parts.off')).toEqual(['security', 'router'])
 
   await s.send('Добавь в корзину скидку по промокоду')
   expect(s.asked).toHaveLength(0)

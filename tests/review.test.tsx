@@ -229,7 +229,8 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   // Every command the mod ran.
   const runs: string[][] = []
   const clock = mock.clock(on, { now: 10_000 })
-  const store = new Map<string, unknown>()
+  // The security watch has its own tests; here its notes would ride on the results these compare.
+  const store = new Map<string, unknown>([['parts.off', ['security']]])
   on('state.set', ($, e, next) => (probing ? { value: { isSet: true as const, version: 0 } } : next(e)))
   on('session.root', () => ({ value: root }))
   on('fs.exists', ($, e) => {
