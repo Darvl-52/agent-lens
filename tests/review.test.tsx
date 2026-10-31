@@ -458,6 +458,25 @@ test('a turn that touched a line or two is not reviewed by itself; r on Findings
   await pane.unmount()
 })
 
+test('the request names what the developer wrote: the harness tags, notifications and hand-backs of a turn stay out', async ($, on) => {
+  const { asked, turn, review } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  const notice = '<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n<summary>Wait failed</summary>\n</task-notification>'
+  const handBack = 'Another Claude session sent a message:\n<agent-message from="a1">\n[Subagent hand-back] Tasks done, nothing committed.\n</agent-message>'
+  const command = '<command-message>opsx:apply</command-message>\n<command-name>/opsx:apply</command-name>\n<command-args>dark-mode</command-args>'
+  await turn(`${command}\n\nkeep the contrast\n${notice}\n${handBack}`, { 'src/app.ts': DARK })
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await pane.find({ type: 'Text', text: /^Asked for: \/opsx:apply dark-mode keep the contrast$/ })).toBeDefined()
+  expect(asked[0]!.prompt).not.toMatch(/Subagent hand-back|task-notification/)
+
+  // A turn only a hand-back started asked for nothing: the session's requests don't grow by it.
+  await turn(handBack, { 'src/app.ts': DARK.replace('12', '14') })
+  await review()
+  await pane.select({ key: 'mode', value: 'session' })
+  expect(await pane.find({ type: 'Text', text: /^Asked for: \/opsx:apply dark-mode keep the contrast$/ })).toBeDefined()
+  await pane.unmount()
+})
+
 test('the pane: each piece said what it is for, looked at, asked about, taken back; findings fixed or put aside', async ($, on) => {
   const { asked, native, turn, review, submitted, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
   await turn('add dark mode', { 'src/app.ts': DARK })

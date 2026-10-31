@@ -233,13 +233,27 @@ async function uncommittedDiff($: EngineInterface) {
   return capped(files.sort(byGroup))
 }
 
+// A turn's text is all the engine queued for it: the person's words beside notifications, subagents'
+// hand-backs and the transcript's marks of a command. Only the words and the command are a request.
+const ENGINE_BLOCKS = /(?:Another Claude session sent a message:\s*)?<(agent-message|task-notification|system-reminder|local-command-caveat|local-command-stdout|local-command-stderr)\b[^>]*>[\s\S]*?<\/\1>/g
+function requestOf(text: string) {
+  return text
+    .replace(ENGINE_BLOCKS, '')
+    .replace(/<command-message>[\s\S]*?<\/command-message>/g, '')
+    .replace(/<command-name>([\s\S]*?)<\/command-name>\s*(?:<command-args>([\s\S]*?)<\/command-args>)?/g, (_, name: string, args = '') => `${name} ${args}`)
+    .trim()
+}
+async function requestsOf($: EngineInterface) {
+  return (await read($, requestsAtom)).map(requestOf).filter(Boolean)
+}
+
 async function diffFor($: EngineInterface, mode: Mode): Promise<Diff | null> {
   if (mode === 'turn') {
     const turn = await read($, turnAtom)
-    return turn && { ...turn, files: withWhere(turn.files, await $.session.root()) }
+    return turn && { ...turn, request: requestOf(turn.request), files: withWhere(turn.files, await $.session.root()) }
   }
   const files = mode === 'session' ? await snapshotDiff($, await read($, beforeAtom)) : await uncommittedDiff($)
-  return { mode, files, request: (await read($, requestsAtom)).join('\n\n'), fingerprint: fingerprintOf(files), at: await $.clock.now() }
+  return { mode, files, request: (await requestsOf($)).join('\n\n'), fingerprint: fingerprintOf(files), at: await $.clock.now() }
 }
 
 // The pane follows the mode picked; the file picked stays while the diff still has it.
@@ -676,7 +690,7 @@ type TurnTaken = {
 // Taken at the turn's end and emptied in one write each, before anything is awaited: the next turn
 // may start, and edit, while this one's diff is read from the disk.
 async function takeTurn($: EngineInterface): Promise<TurnTaken> {
-  const taken: TurnTaken = { before: {}, dirty: null, shell: [], request: await read($, turnRequestAtom), requests: await read($, requestsAtom) }
+  const taken: TurnTaken = { before: {}, dirty: null, shell: [], request: requestOf(await read($, turnRequestAtom)), requests: await requestsOf($) }
   await update($, turnBeforeAtom, b => {
     taken.before = b
     return {}
