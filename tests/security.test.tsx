@@ -86,7 +86,8 @@ test('the agent’s answer is read from the JSON it ends with, the holes that ca
   expect(parseSecurityReport('No list at all.')).toBeUndefined()
 })
 
-const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { modelBlocked?: boolean; ignored?: boolean; config?: Record<string, unknown>; dirty?: () => string; committed?: () => string; dropSends?: boolean; disk?: Record<string, string>; noSpawn?: () => boolean; check?: () => string; isPlaced?: boolean } = {}) => {
+const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { modeUnsaved?: boolean; modelBlocked?: boolean; ignored?: boolean; config?: Record<string, unknown>; dirty?: () => string; committed?: () => string; dropSends?: boolean; disk?: Record<string, string>; noSpawn?: () => boolean; check?: () => string; isPlaced?: boolean } = {}) => {
+  const dirtyNow = { value: '' }
   const clock = mock.clock(on, { now: 1_000_000 })
   // The review's check of each edit holds a turn's end on a clock that stands still here.
   const store = new Map<string, unknown>([['parts.off', ['review']]])
@@ -98,14 +99,14 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('fs.read', ($, e) => (opts.disk?.[e.path] !== undefined ? { value: opts.disk[e.path]! } : { deny: 'ENOENT' }))
   on('fs.list', () => ({ value: [] }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
-  on('store.set', ($, e) => (store.set(e.key, e.value), { value: undefined }))
+  on('store.set', ($, e) => (opts.modeUnsaved && e.key === 'security:agent-mode' ? ({ deny: 'store is down' } as never) : (store.set(e.key, e.value), { value: undefined })))
   on('store.keys', () => ({ value: [...store.keys()] }))
   on('command.list', () => ({ value: [] }))
   on('command.register', () => ({ value: { command: 'x' } }))
   on('process.run', ($, e) => {
     const done = (exitCode: number, stdout = '') => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (e.argv.includes('check-ignore')) return done(opts.ignored ? 0 : 1)
-    if (e.argv.includes('status')) return done(0, (opts.dirty?.() ?? '').split('\n').filter(Boolean).join('\0'))
+    if (e.argv.includes('status')) return done(0, (opts.dirty?.() ?? dirtyNow.value).split('\n').filter(Boolean).join('\0'))
     if (e.argv.includes('rev-parse')) return done(0, 'abc123\n')
     if (e.argv.includes('--name-only')) return done(0, opts.committed?.() ?? '')
     return done(1)
@@ -146,7 +147,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
     await settle()
   }
   const run = (args: string, origin: { kind: 'composer' } | { kind: 'plugin'; name: string } = { kind: 'composer' }) => $.command.run({ command: 'security', args, origin, presentation: { isFullscreen: false, columns: 100 } })
-  return { clock, contexts, checks, store, spawned, submitted, toasts, edit, shell, turn, endTurn, agentDone, run, settle }
+  return { dirty: dirtyNow, clock, contexts, checks, store, spawned, submitted, toasts, edit, shell, turn, endTurn, agentDone, run, settle }
 }
 
 test('an edit that writes a secret is refused, whatever the tries, until the person lets it through', async ($, on) => {
@@ -769,4 +770,81 @@ test('a part turned off holds the agent it started to reading, and lets the rest
   expect((await call('watch-1')).deny).toContain('no network')
   expect((await call('someone-else')).deny).toBeUndefined()
   expect((await w.edit(`const t = "${GITHUB}"`)).deny).toBeUndefined()
+})
+
+test('m on the pane leaves the agent to a press, across sessions; r still starts it, and m brings it back', async ($, on) => {
+  const w = await world($, on)
+  const pane = await paneOf($)
+  expect((await pane.find({ key: 'security-mode' }))?.props.label).toBe('agent: after each turn')
+  await pane.press({ key: 'security-mode' })
+  await w.settle()
+  expect(w.store.get('security:agent-mode')).toBe('button')
+  expect((await pane.find({ key: 'security-mode' }))?.props.label).toBe('agent: on a press')
+  await w.turn()
+  await w.edit('const a = 1')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(0)
+  expect((await w.edit(`const t = "${GITHUB}"`)).deny).toContain('/security allow')
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.turn()
+  await w.edit('const a = 2')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(0)
+  w.dirty.value = ' M src/a.ts'
+  await pane.press({ key: 'security-run' })
+  await w.settle()
+  expect(w.spawned.length).toBe(1)
+  await w.agentDone('watch-1', '{"findings":[],"checked":"1 file"}')
+  await pane.press({ key: 'security-mode' })
+  await w.settle()
+  await pane.unmount()
+  await w.turn()
+  await w.edit('const a = 3')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(2)
+})
+
+test('/security agent sets it on a person’s word alone, and over the setting', { options: { securityAgent: 'button' } }, async ($, on) => {
+  const w = await world($, on)
+  expect(((await w.run('agent auto', { kind: 'plugin', name: 'x' })) as { text: string }).text).toContain('Only a person')
+  expect(w.store.get('security:agent-mode')).toBeUndefined()
+  expect(((await w.run('agent')) as { text: string }).text).toContain('only on r')
+  await w.run('agent auto')
+  await w.turn()
+  await w.edit('const a = 1')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(1)
+})
+
+test('the choice is read back at a session’s start', async ($, on) => {
+  const w = await world($, on)
+  w.store.set('security:agent-mode', 'button')
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.turn()
+  await w.edit('const a = 1')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(0)
+})
+
+test('left to a press, what auto gathered starts nothing by itself', async ($, on) => {
+  const w = await world($, on)
+  await w.turn()
+  await w.edit('const a = 1')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(1)
+  await w.turn()
+  await w.edit('const a = 2')
+  await w.endTurn()
+  await w.run('agent button')
+  await w.agentDone('watch-1', '{"findings":[],"checked":"1 file"}')
+  expect(w.spawned.length).toBe(1)
+})
+
+test('a choice that could not be saved says so and changes nothing', async ($, on) => {
+  const w = await world($, on, { modeUnsaved: true })
+  expect(((await w.run('agent button')) as { text: string }).text).toContain('not saved')
+  await w.turn()
+  await w.edit('const a = 1')
+  await w.endTurn()
+  expect(w.spawned.length).toBe(1)
 })

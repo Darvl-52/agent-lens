@@ -501,6 +501,8 @@ declare module 'claude-code' {
       'security.refused': SecurityRefused[]
       // What the agent tried, newest first, in this project: kept in the store across sessions.
       'security.log': SecurityLogEntry[]
+      // When the agent reads, as the person chose; null: as the setting says.
+      'security.mode': 'auto' | 'button' | null
 
       // Which skill each prompt gets.
       'router.decisions': RouterDecision[]

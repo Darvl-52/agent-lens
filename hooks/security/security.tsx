@@ -26,11 +26,15 @@ type Origin = Parameters<Hook<'prompt.submit'>>[1]['origin']
 const reviewAtom = atom({ plugin: 'agent-lens', key: 'security.review' } as const, null)
 const refusedAtom = atom({ plugin: 'agent-lens', key: 'security.refused' } as const, [])
 const logAtom = atom({ plugin: 'agent-lens', key: 'security.log' } as const, [])
+// What the person chose on the pane or by /security agent: it stands over the setting, across sessions
+// and for every project. In an atom, so the pane redraws by it.
+const modeAtom = atom({ plugin: 'agent-lens', key: 'security.mode' } as const, null)
 // The tools the watch's own agents may use: what reads local files, and nothing else.
 const READ_TOOLS = new Set(['Read', 'Grep', 'Glob'])
 const mayRead = (e: CallEvent) => READ_TOOLS.has(e.tool) || (e.tool === 'Bash' && isReadOnlyCommand(e.command))
 
 const logKey = (root: string) => `security:log:${root}`
+const MODE_KEY = 'security:agent-mode'
 
 export const PANE = 'agent-lens-security'
 const COMMAND = 'security'
@@ -60,6 +64,7 @@ const REFUSALS = 2
 
 type Mode = 'auto' | 'button'
 let settings: { mode: Mode; model: string; isChecking: boolean; checkModel: string } = { mode: 'auto', model: DEFAULT_MODEL, isChecking: true, checkModel: DEFAULT_CHECK_MODEL }
+const modeOf = (value: unknown): Mode | undefined => (value === 'auto' || value === 'button' ? value : undefined)
 
 // One repository as the first shell command found it: a command may commit, so what it changed is
 // told from this commit and these files, and the agent reads from this commit.
@@ -87,6 +92,10 @@ const others = new Set<string>()
 let told: string[] = []
 let rounds = 0
 
+async function modeIn($: EngineInterface) {
+  return (await read($, modeAtom)) ?? settings.mode
+}
+
 async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]
 }
@@ -98,7 +107,7 @@ export function configureSecurity(options: PluginOptions) {
 }
 
 export async function registerCommand($: EngineInterface) {
-  await $.command.register({ name: COMMAND, description: (await wordsIn($)).description, argumentHint: '[audit|run|allow|clear]' })
+  await $.command.register({ name: COMMAND, description: (await wordsIn($)).description, argumentHint: '[audit|run|allow|clear|agent auto|agent button]' })
 }
 
 // A /clear or /resume: nothing of the conversation before is carried on.
@@ -126,6 +135,9 @@ export async function clearSecurity($: EngineInterface) {
 let logQueue: Promise<unknown> = Promise.resolve()
 
 export async function restoreSecurity($: EngineInterface) {
+  // A read that fails changes nothing, as with the journal below.
+  const saved = await $.store.get(MODE_KEY).catch(() => null)
+  if (saved !== null) await update($, modeAtom, () => modeOf(saved) ?? null)
   const reading = logQueue.then(async () => {
     const kept = (await $.store.get(logKey(await $.session.root()))) as SecurityLogEntry[] | undefined
     await update($, logAtom, () => kept ?? [])
@@ -323,7 +335,7 @@ export async function securityBefore($: EngineInterface, e: CallEvent) {
   if (!isOn('security')) return undefined
   // The watch's own agent only reads: its git is no change of the work.
   const isOwn = e.agentId !== undefined && agents.has(e.agentId)
-  if (e.tool === 'Bash' && settings.mode === 'auto' && !isOwn) snapshot ??= takeSnapshot($).catch(() => [])
+  if (e.tool === 'Bash' && !isOwn && (await modeIn($)) === 'auto') snapshot ??= takeSnapshot($).catch(() => [])
   if (e.tool === 'Bash') await snapshot
   const file = fileWrite(e)
   if (!file && e.tool !== 'Bash') return undefined
@@ -392,8 +404,9 @@ export async function endSecurityTurn($: EngineInterface, reason: string) {
   judged.clear()
   refusals.clear()
   isFailureTold = false
-  if (settings.mode !== 'auto') edited.clear()
-  if (reason !== 'answer' || settings.mode !== 'auto') return
+  const mode = await modeIn($)
+  if (mode !== 'auto') edited.clear()
+  if (reason !== 'answer' || mode !== 'auto') return
   // Taken before the wait: a command of the next turn starts a snapshot of its own.
   const taking = snapshot
   snapshot = null
@@ -472,7 +485,7 @@ export async function endSecurityAgent($: EngineInterface, agentId: string, answ
   }
   const high = found.filter(f => f.severity === 'high')
   // An audit is of the whole project, and may be long: what to fix of it is the person's to say.
-  if (settings.mode === 'auto' && !review.isAudit && high.length > 0 && rounds < ROUNDS && (await sendFindings($, high, false)) === 'sent') rounds++
+  if ((await modeIn($)) === 'auto' && !review.isAudit && high.length > 0 && rounds < ROUNDS && (await sendFindings($, high, false)) === 'sent') rounds++
   const next = queued
   const bases = queuedBases
   queued = []
@@ -525,6 +538,20 @@ async function putAside($: EngineInterface) {
   return (await wordsIn($)).putAside
 }
 
+async function setAgentMode($: EngineInterface, mode: Mode) {
+  const w = await wordsIn($)
+  const isSaved = await $.store.set(MODE_KEY, mode).then(() => true, () => false)
+  if (!isSaved) return w.modeNotSaved
+  await update($, modeAtom, () => mode)
+  // Left to a press: what auto had gathered for a next run is not read by itself later.
+  if (mode === 'button') {
+    snapshot = null
+    queued = []
+    queuedBases = {}
+  }
+  return w.modeSet[mode]
+}
+
 async function runAudit($: EngineInterface) {
   const w = await wordsIn($)
   const ran = await readFiles($, [], {}, true)
@@ -573,6 +600,12 @@ export async function securityCommand($: EngineInterface, args: string, origin: 
     await openPane($)
     return { text }
   }
+  if (verb === 'agent') {
+    const mode = modeOf(args.trim().split(/\s+/)[1]?.toLowerCase())
+    if (!mode) return { text: w.modeSet[await modeIn($)] }
+    // Stopping the watch is the person's to say, as letting a secret through is.
+    return { text: isPersons(origin) ? await setAgentMode($, mode) : w.onlyPersonMode }
+  }
   if (verb !== '') return { text: w.usage }
   const { isPlaced } = await openPane($)
   if (isPlaced) return { text: w.opened }
@@ -602,6 +635,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const log = await read($, logAtom)
   // A run past its time is gone, and the way to start another stays open.
   const isBusy = isRunning(review, await $.clock.now())
+  const mode = await modeIn($)
   return (
     <Box flexDirection="column" gap={1}>
       {refused.length > 0 ? (
@@ -614,7 +648,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         </Box>
       ) : null}
       {!review ? (
-        <Text dimColor wrap="wrap">{w.empty}</Text>
+        <Text dimColor wrap="wrap">{mode === 'auto' ? w.empty : w.emptyButton}</Text>
       ) : isBusy ? (
         <Text color="warning" wrap="wrap">{review.isAudit ? w.auditing : w.reading(review.files.length)}</Text>
       ) : review.status === 'running' ? (
@@ -663,11 +697,15 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           </Button>
         ) : null}
         {!isBusy ? (
-          <Button key="security-run" label={w.again} hotkey="r" dimColor onPress={say(() => runNow($))}>
+          <Button key="security-run" label={review ? w.again : w.readNow} hotkey="r" dimColor onPress={say(() => runNow($))}>
             <Text dimColor>r</Text>
-            {` ${w.again}`}
+            {` ${review ? w.again : w.readNow}`}
           </Button>
         ) : null}
+        <Button key="security-mode" label={w.modeButton[mode]} hotkey="m" dimColor onPress={say(() => setAgentMode($, mode === 'auto' ? 'button' : 'auto'))}>
+          <Text dimColor>m</Text>
+          {` ${w.modeButton[mode]}`}
+        </Button>
         {open.length + refused.length > 0 ? (
           <Button key="security-aside" label={w.aside} hotkey="x" dimColor onPress={say(() => putAside($))}>
             <Text dimColor>x</Text>

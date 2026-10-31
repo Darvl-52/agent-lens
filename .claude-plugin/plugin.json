@@ -111,7 +111,7 @@
     "securityAgent": {
       "type": "string",
       "title": "Security agent",
-      "description": "auto: an agent reads what each turn changed for holes, and what can be attacked now goes back to Claude, three rounds in a row at most; button: only on /security run. Secrets are refused either way; /agent-lens turns it all off",
+      "description": "auto: an agent reads what each turn changed for holes, and what can be attacked now goes back to Claude, three rounds in a row at most; button: only on r in /security or /security run. m in /security or /security agent changes it and stands over this setting. Secrets are refused either way; /agent-lens turns it all off",
       "default": "auto",
       "options": [
         "auto",

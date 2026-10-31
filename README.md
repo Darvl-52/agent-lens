@@ -379,7 +379,11 @@ route with no check its neighbours have. `can be attacked` goes to Claude as the
 to check and fix or say why not, three rounds in a row at most until you next write a prompt or press
 `j`; `hardening`, and what is past the rounds, stays on the pane for `j` to send or `x` to put aside.
 `x` lets no secret through. The row above the prompt counts what waits on the pane. One agent runs at a time; a turn you cut short keeps its files for the
-next. `r` or `/security run` reads all that is uncommitted now.
+next. `r` or `/security run` reads all that is uncommitted now. To start the agent only by hand, press `m` on
+the pane or run `/security agent button`; `m` or `/security agent auto` brings the reading after each
+turn back. The choice is kept across sessions, for every project, and stands over the setting. By hand,
+what the agent finds waits for `j`, and a turn you cut short keeps no files; secrets and the check of each
+edit work either way.
 
 **The journal.** `/security` lists what the agent tried, newest first: when, what came of it (stopped
 and not written, let through after two refusals, noted, found in the code), the kind, the file, what
@@ -638,6 +642,7 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | `/security clear`          | Empty the journal.                                                   |
 | `/security run`            | Read all that is uncommitted for holes now.                          |
 | `/security allow`          | Let the secrets refused through, for this session.                   |
+| `/security agent auto\|button` | Whether the agent reads after each turn or only when you press `r`. |
 | `/agent-lens`              | Turn each part on or off: the review, its check of each edit, the OpenSpec change, the router, the guard, the lenses, the setup, security. |
 
 ## Turning parts off
@@ -662,7 +667,7 @@ In `/plugin`, select agent-lens, then Configure:
 | Guard: tool calls per turn  | `150`   | The limit on one turn of an agent, in tool calls; at half it is told to wrap up                                                                      |
 | Security: check each edit   | `block` | `block`: a small model refuses a hole it can see in each edit of code before it lands; `off`: no such check |
 | Model for the security check of each edit | `haiku` | An alias or a full model id |
-| Security agent              | `auto`  | `auto`: an agent reads what each turn changed in code; `button`: only on `/security run`. Secrets are refused either way |
+| Security agent              | `auto`  | `auto`: an agent reads what each turn changed in code; `button`: only on `r` in `/security` or `/security run`; `m` there or `/security agent` chooses over this setting. Secrets are refused either way |
 | Model for the security agent | `sonnet` | An alias or a full model id                                                                                                                         |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |
 | Model for routing           | `haiku` | An alias or a full model id                                                                                                                          |
