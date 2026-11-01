@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import { DENY, expand, newRed, parseConfig, permissionIssues, timingIssues } from '../hooks/setup/checks'
-import { checkDocs, hasTaskRules, parseFindings, parseTermsInUse, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
+import { checkDocs, hasSecurityLine, hasSecurityRules, hasTaskRules, parseFindings, parseTermsInUse, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const MATT = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro', 'diagnosing-bugs', 'code-review']
@@ -227,22 +227,25 @@ test('the steps go one at a time: Matt’s setup, openspec init by the mod, then
   await w.turn()
   await w.settle()
   expect(w.submitted[3]).toMatch(/^Step 5 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
-  // Skipped, the next goes: the lenses, the mod's own named to be left out.
+  // Skipped, the next goes: the security rules, and skipped too, the lenses, the mod's own named to be left out.
   await pane.press({ key: 'setup-skip' })
   await w.settle()
-  expect(w.submitted[4]).toMatch(/^Step 6 of \/setup-project[\s\S]*The neighbouring flows[\s\S]*system`[\s\S]*user\.type`[\s\S]*`LENSES\.md` at the root[\s\S]*What to push back on/)
+  expect(w.submitted[4]).toMatch(/^Step 6 of \/setup-project[\s\S]*the security rules/)
+  await pane.press({ key: 'setup-skip' })
+  await w.settle()
+  expect(w.submitted[5]).toMatch(/^Step 7 of \/setup-project[\s\S]*The neighbouring flows[\s\S]*system`[\s\S]*user\.type`[\s\S]*`LENSES\.md` at the root[\s\S]*What to push back on/)
   // None found, it writes nothing: the turn that answers it is done, and the next goes.
   await w.turn()
   await w.settle()
-  expect(w.submitted[5]).toMatch(/^Step 7 of \/setup-project[\s\S]*\.claude\/agent-lens\.json/)
+  expect(w.submitted[6]).toMatch(/^Step 8 of \/setup-project[\s\S]*\.claude\/agent-lens\.json/)
   // A step skipped is run again from its row: it waits while another is with Claude, then goes first.
   await pane.press({ key: 'setup-rerun-standards' })
   await w.settle()
-  expect(w.submitted).toHaveLength(6)
+  expect(w.submitted).toHaveLength(7)
   expect(await pane.find({ type: 'Button', key: 'setup-rerun-standards' })).toBeUndefined()
   await pane.press({ key: 'setup-skip' })
   await w.settle()
-  expect(w.submitted[6]).toMatch(/^Step 5 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
+  expect(w.submitted[7]).toMatch(/^Step 5 of \/setup-project[\s\S]*CODING_STANDARDS\.md/)
   expect(await pane.find({ type: 'Button', key: 'setup-rerun-checks' })).toBeDefined()
   await pane.unmount()
 })
@@ -331,7 +334,7 @@ test('a run kept from before the step of what is written goes on, that step take
 test('the config’s step skipped by hand, run again, brings back the init only once the CLI is there; an init stopped on its check stays the person’s', async ($, on) => {
   const opts = { noOpenspec: true }
   const steps = (openspec: object) => ({
-    matt: { status: 'done' }, openspec, existing: { status: 'done' }, map: { status: 'done' }, standards: { status: 'done' }, lenses: { status: 'done' },
+    matt: { status: 'done' }, openspec, existing: { status: 'done' }, map: { status: 'done' }, standards: { status: 'done' }, security: { status: 'done' }, lenses: { status: 'done' },
     checks: { status: 'done' }, run: { status: 'done' }, permissions: { status: 'done' }, workflow: { status: 'done' }, config: { status: 'skipped' }, ci: { status: 'done' },
   })
   const w = await world($, on, opts)
@@ -354,13 +357,13 @@ test('the config’s step skipped by hand, run again, brings back the init only 
   await again.press({ key: 'setup-rerun-config' })
   await w.settle()
   expect(w.runs.find(r => r[1] === 'init')).toBeUndefined()
-  expect(w.submitted.at(-1)).toMatch(/^Step 11 of/)
+  expect(w.submitted.at(-1)).toMatch(/^Step 12 of/)
   expect(await again.find({ type: 'Text', text: /^  openspec init did not run$/ })).toBeDefined()
   await again.unmount()
 })
 
 test('the commit of the setup is offered once every step is done, until it is sent or skipped, and again once a step runs again', async ($, on) => {
-  const done = Object.fromEntries(['matt', 'openspec', 'existing', 'map', 'standards', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci'].map(s => [s, { status: 'done' }]))
+  const done = Object.fromEntries(['matt', 'openspec', 'existing', 'map', 'standards', 'security', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci'].map(s => [s, { status: 'done' }]))
   const w = await world($, on)
   w.store.set('setup:/proj', { root: '/proj', current: null, steps: { ...done, ci: { status: 'skipped' } } })
   await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
@@ -401,7 +404,7 @@ test('a step skipped by hand stays skipped when /setup-project runs again: nothi
   await w.turn({ 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': '# Map\n' })
   await w.settle()
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 8; i++) {
     await pane.press({ key: 'setup-skip' })
     await w.settle()
   }
@@ -712,12 +715,12 @@ test('while /setup-project’s steps go, the docs agent waits: it reads what the
   expect(w.submitted.at(-1)).toMatch(/^Step 5 of/)
   expect(w.spawned).toHaveLength(0)
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
-  // The standards, the lenses, the checks, the run, the permissions, the workflow and OpenSpec's
+  // The standards, the security rules, the lenses, the checks, the run, the permissions, the workflow and OpenSpec's
   // config; CI is left out, as the project has none.
-  for (const step of [5, 6, 7, 8, 9, 10, 11]) {
+  for (const step of [5, 6, 7, 8, 9, 10, 11, 12]) {
     await pane.press({ key: 'setup-skip' })
     await w.settle()
-    if (step < 11) expect(w.spawned).toHaveLength(0)
+    if (step < 12) expect(w.spawned).toHaveLength(0)
   }
   await pane.unmount()
   // The last step skipped ends the run: the next turn's end reads all it wrote, the map and the glossary among them.
@@ -727,6 +730,92 @@ test('while /setup-project’s steps go, the docs agent waits: it reads what the
   expect(w.spawned[0]).toMatch(/=== ARCHITECTURE\.md ===[\s\S]*=== CLAUDE\.md ===[\s\S]*=== GLOSSARY\.md ===/)
 })
 
+const SET_UP_TO_SECURITY = { 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n', 'openspec/config.yaml': 'schema: spec-driven\n', 'GLOSSARY.md': GLOSSARY, 'ARCHITECTURE.md': '# Map\n', 'CODING_STANDARDS.md': '# Standards\n' }
+const SECURITY_LINE = 'Before writing code that handles input: read Security in `CODING_STANDARDS.md` and check the edit against it.\n'
+
+test('the security rules: Claude tells the sides from the code and writes them unasked; a CLAUDE.md that is there must send the agent to them', async ($, on) => {
+  const w = await world($, on, { files: { ...SET_UP_TO_SECURITY, 'docs/agents/workflow.md': '# How\n', 'CLAUDE.md': '# Rules\n' } })
+  await w.setup()
+  await w.settle()
+  // The standards' file there is not the step done: what it writes is a section of it.
+  expect(w.submitted).toHaveLength(1)
+  expect(w.submitted[0]).toMatch(/^Step 6 of \/setup-project[\s\S]*Frontend \(React[\s\S]*dangerouslySetInnerHTML[\s\S]*Backend[\s\S]*server actions[\s\S]*1\. XSS[\s\S]*14\. LLM features[\s\S]*`## Security` heading in `CODING_STANDARDS\.md`[\s\S]*to `CLAUDE\.md`[\s\S]*Before writing code/)
+  expect(w.submitted[0]).toMatch(/do not ask me\. Tell the sides from the code/)
+  expect(w.submitted[0]).not.toContain('AskUserQuestion')
+  await w.turn()
+  await w.settle()
+  expect(w.submitted).toHaveLength(1)
+  // The rules with no line to them: the agent would meet them only once it broke them, so it goes back.
+  await w.turn({ 'CODING_STANDARDS.md': '# Standards\n\n## Security\n\nBind every query.\n' })
+  await w.settle()
+  expect(w.submitted[1]).toMatch(/^The check of the files of \/setup-project's step "The security rules[\s\S]*CLAUDE\.md: has no line[\s\S]*Before writing code/)
+  await w.turn({ 'CLAUDE.md': `# Rules\n\n${SECURITY_LINE}` })
+  await w.settle()
+  expect(w.submitted.at(-1)).toMatch(/^Step 7 of \/setup-project/)
+  expect(w.submitted.filter(t => /^Step 6 of/.test(t))).toHaveLength(1)
+})
+
+test('with no CLAUDE.md yet the section is enough, and the step does not create one, which would read as the project’s own docs', async ($, on) => {
+  const w = await world($, on, { files: SET_UP_TO_SECURITY })
+  await w.setup()
+  await w.settle()
+  expect(w.submitted[0]).toMatch(/Where there is no such file, do not create it/)
+  await w.turn({ 'CODING_STANDARDS.md': '# Standards\n\n## Security\n\nBind every query.\n' })
+  await w.settle()
+  expect(w.submitted).toHaveLength(2)
+  expect(w.submitted[1]).toMatch(/^Step 7 of \/setup-project/)
+})
+
+test('the security rules asked in Russian keep the floor and the line, and a section written by hand with no line to it is not taken as done', async ($, on) => {
+  const w = await world($, on, { files: { ...SET_UP_TO_SECURITY, 'docs/agents/workflow.md': '# How\n', 'CODING_STANDARDS.md': '# Стандарты\n\n## Безопасность\n\n- Параметры.\n', 'CLAUDE.md': '# Rules\n\nSee `CODING_STANDARDS.md`.\n' } })
+  await $.command.run({ command: 'changes', args: 'lang ru', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  await w.setup()
+  await w.settle()
+  expect(w.submitted.at(0)).toMatch(/^Шаг 6 из \/setup-project[\s\S]*Фронтенд \(React[\s\S]*Бэкенд[\s\S]*## Безопасность[\s\S]*Прежде чем писать код/)
+  expect(w.submitted.at(0)).toMatch(/меня не спрашивай\. Стороны определи по коду/)
+  expect(w.submitted.at(0)).not.toContain('AskUserQuestion')
+})
+
+test('a set-up project from before the security rules gets their step with the next /setup-project, not as skipped by the person', async ($, on) => {
+  const done = Object.fromEntries(['matt', 'openspec', 'existing', 'map', 'standards', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci'].map(s => [s, { status: 'done' }]))
+  const w = await world($, on, { files: SET_UP_TO_SECURITY })
+  w.store.set('setup:/proj', { root: '/proj', current: null, steps: done })
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  expect(w.submitted).toEqual([])
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: /^  new since this run: / })).toBeDefined()
+  await pane.unmount()
+  await w.setup()
+  await w.settle()
+  expect(w.submitted.filter(t => /^Step 6 of \/setup-project[\s\S]*the security rules/.test(t))).toHaveLength(1)
+})
+
+test('a kept run with steps still to go has the new step come in from its row', async ($, on) => {
+  const steps = Object.fromEntries(['matt', 'openspec', 'existing', 'map', 'standards', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config'].map(s => [s, { status: 'done' }]))
+  const w = await world($, on, { files: SET_UP_TO_SECURITY })
+  w.store.set('setup:/proj', { root: '/proj', current: null, steps: { ...steps, ci: { status: 'waiting' } } })
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  await pane.press({ key: 'setup-rerun-security' })
+  await w.settle()
+  expect(w.submitted.at(-1)).toMatch(/^Step 6 of \/setup-project[\s\S]*the security rules/)
+  await pane.unmount()
+})
+
+test('the section of the security rules is told by its own heading, and the line to it by saying when to read it, in either language', () => {
+  expect(hasSecurityRules('# Standards\n\n## Security\n\n- Bind.\n')).toBe(true)
+  expect(hasSecurityRules('# Standards\r\n\r\n## Security\r\n\r\n- Bind.\r\n')).toBe(true)
+  expect(hasSecurityRules('# Стандарты\n\n## Безопасность\n\n- Параметры.\n')).toBe(true)
+  expect(hasSecurityRules('# Standards\n\n## Errors\n\nNot about security in a heading.\n')).toBe(false)
+  expect(hasSecurityRules('# Standards\n\n### Cookie security\n\n```sh\n# run security audit\n```\n')).toBe(false)
+  expect(hasSecurityLine(SECURITY_LINE)).toBe(true)
+  expect(hasSecurityLine('Прежде чем писать код, прочитай раздел «Безопасность» в `CODING_STANDARDS.md`.\n')).toBe(true)
+  expect(hasSecurityLine('See `CODING_STANDARDS.md`.\nSecurity matters.\n')).toBe(false)
+  expect(hasSecurityLine('`CODING_STANDARDS.md`: rules for code, the security rules among them.\n')).toBe(false)
+})
+
 // What every step before the checks writes: a project where the checks are the first step to go.
 const UP_TO_CHECKS = {
   'docs/agents/issue-tracker.md': 'GitLab.\n',
@@ -734,7 +823,7 @@ const UP_TO_CHECKS = {
   'openspec/config.yaml': 'schema: spec-driven\n',
   'GLOSSARY.md': GLOSSARY,
   'ARCHITECTURE.md': '# Map\n',
-  'CODING_STANDARDS.md': '# Standards\n',
+  'CODING_STANDARDS.md': '# Standards\n\n## Security\n\nBind every query.\n',
   'LENSES.md': '1. Paired screens. A fix on the list and not on the card. Look at: each list with a card of its own.\n',
 }
 const SETTINGS = JSON.stringify({ permissions: { deny: DENY } })
@@ -794,7 +883,7 @@ test('the step of the checks: the fast tier runs once written, what does not sta
   const w = await world($, on, { files: UP_TO_CHECKS, git: REPO, sh: c => (c === 'missing-tool' ? { exitCode: 127 } : c.startsWith('eslint') ? { exitCode: 1, stdout: 'error' } : undefined) })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 7 of \/setup-project[\s\S]*\{files\}[\s\S]*\.claude\/agent-lens\.json/)
+  expect(w.submitted[0]).toMatch(/^Step 8 of \/setup-project[\s\S]*\{files\}[\s\S]*\.claude\/agent-lens\.json/)
   await w.turn({ '.claude/agent-lens.json': JSON.stringify({ checks: { fast: ['eslint {files}', 'missing-tool'], full: ['npm test'] } }) })
   await w.settle()
   expect(w.shells()).toEqual(["eslint 'src/a.ts'", 'missing-tool'])
@@ -803,7 +892,7 @@ test('the step of the checks: the fast tier runs once written, what does not sta
   await w.turn({ '.claude/agent-lens.json': JSON.stringify({ checks: { fast: ['eslint {files}'], full: ['npm test'] } }) })
   await w.settle()
   expect(w.store.get('setup:base:/proj')).toEqual({ '.': { sha: 'abc', red: ['eslint {files}'] } })
-  expect(w.submitted[2]).toMatch(/^Step 8 of \/setup-project[\s\S]*smoke/)
+  expect(w.submitted[2]).toMatch(/^Step 9 of \/setup-project[\s\S]*smoke/)
 })
 
 test('the gate: a turn that changed the project and leaves the fast checks red is kept going, three rounds at most, then let go', async ($, on) => {
@@ -871,7 +960,7 @@ test('without Matt’s skills and OpenSpec, how work goes names none of them', a
   await w.setup()
   await w.settle()
   expect(w.submitted).toHaveLength(1)
-  expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*talked through with me[\s\S]*written down as a plan in the issue/)
+  expect(w.submitted[0]).toMatch(/^Step 11 of \/setup-project[\s\S]*talked through with me[\s\S]*written down as a plan in the issue/)
   expect(w.submitted[0]).not.toMatch(/grilling|`tdd`|retro|openspec propose/)
 })
 
@@ -879,7 +968,7 @@ test('a project with CI has a job added that runs the same checks; done once the
   const files = {
     ...UP_TO_CHECKS,
     'openspec/config.yaml': 'context: see GLOSSARY.md\nrules:\n  tasks:\n    - each task names the rules and the lenses it touches\n',
-    'CLAUDE.md': 'Read `ARCHITECTURE.md`.\n',
+    'CLAUDE.md': `Read \`ARCHITECTURE.md\`.\n${SECURITY_LINE}`,
     'docs/agents/workflow.md': '# How work goes\n',
     '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}, "run": null}',
     '.claude/settings.json': SETTINGS,
@@ -888,7 +977,7 @@ test('a project with CI has a job added that runs the same checks; done once the
   const w = await world($, on, { files })
   expect((await w.setup()).text).toMatch(/✓ CI: \.gitlab-ci\.yml/)
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 12 of \/setup-project[\s\S]*`\.gitlab-ci\.yml`[\s\S]*npx -y github:Darvl-52\/agent-lens check/)
+  expect(w.submitted[0]).toMatch(/^Step 13 of \/setup-project[\s\S]*`\.gitlab-ci\.yml`[\s\S]*npx -y github:Darvl-52\/agent-lens check/)
   await w.turn({ '.gitlab-ci.yml': 'stages: [test]\ndocs:\n  script: npx -y github:Darvl-52/agent-lens check\n' })
   await w.settle()
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
@@ -943,7 +1032,7 @@ test('while /setup-project’s steps go, the gate waits: they write the checks t
   const w = await world($, on, { files, git: REPO, sh: c => (c === 'lint' ? { exitCode: 1 } : undefined) })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 8 of/)
+  expect(w.submitted[0]).toMatch(/^Step 9 of/)
   await $.turn.start({ text: 'go', turnId: 't' })
   await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'x' })
   await w.settle()
@@ -964,9 +1053,24 @@ test('with Matt’s skills installed, how work goes names each of those it uses'
   const w = await world($, on, { files })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 10 of \/setup-project[\s\S]*`grilling`[\s\S]*`domain-modeling`[\s\S]*`tdd`[\s\S]*`diagnosing-bugs`[\s\S]*`code-review`[\s\S]*retro/)
+  expect(w.submitted[0]).toMatch(/^Step 11 of \/setup-project[\s\S]*`grilling`[\s\S]*`domain-modeling`[\s\S]*`tdd`[\s\S]*`diagnosing-bugs`[\s\S]*`code-review`[\s\S]*retro/)
+  // A section already there and no CLAUDE.md yet: the step that writes it carries the line to the rules.
+  expect(w.submitted[0]).toMatch(/has a Security section, this line too, as it stands: Before writing code that takes input/)
   // The agent as the orchestrator goes to CLAUDE.md, which every turn reads, not to the workflow.
   expect(w.submitted[0]).toMatch(/Then `CLAUDE\.md`[\s\S]*tells the agent it is the orchestrator[\s\S]*delegates by default/)
+})
+
+test('how work goes writing CLAUDE.md without the line to the security rules goes back for it', async ($, on) => {
+  const files = { ...UP_TO_CHECKS, '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}, "run": null}', '.claude/settings.json': SETTINGS }
+  const w = await world($, on, { files })
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/workflow.md': '# How work goes\n', 'CLAUDE.md': '# Rules\n' })
+  await w.settle()
+  expect(w.submitted[1]).toMatch(/^The check of the files of \/setup-project's step "How work goes, and CLAUDE\.md"[\s\S]*CLAUDE\.md: has no line[\s\S]*Before writing code/)
+  await w.turn({ 'CLAUDE.md': `# Rules\n\n${SECURITY_LINE}` })
+  await w.settle()
+  expect(w.submitted[2]).toMatch(/^Step 12 of \/setup-project/)
 })
 
 test('a baseline of another commit says nothing of this one: the red goes back, Claude told it may be older', async ($, on) => {
@@ -993,7 +1097,7 @@ test('checks written with no command in them do not close the step: the gate wou
 test('OpenSpec’s config has each task name the rules and the lenses it touches: they are before the agent that builds it', async ($, on) => {
   const files = {
     ...UP_TO_CHECKS,
-    'CLAUDE.md': 'Read `ARCHITECTURE.md`.\n',
+    'CLAUDE.md': `Read \`ARCHITECTURE.md\`.\n${SECURITY_LINE}`,
     'docs/agents/workflow.md': '# How work goes\n',
     '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}, "run": null}',
     '.claude/settings.json': SETTINGS,
@@ -1001,7 +1105,7 @@ test('OpenSpec’s config has each task name the rules and the lenses it touches
   const w = await world($, on, { files })
   await w.setup()
   await w.settle()
-  expect(w.submitted[0]).toMatch(/^Step 11 of \/setup-project[\s\S]*LENSES\.md where it is there[\s\S]*each task names the test seam it is built at, and the rules of CODING_STANDARDS\.md and the lenses it touches/)
+  expect(w.submitted[0]).toMatch(/^Step 12 of \/setup-project[\s\S]*LENSES\.md where it is there[\s\S]*each task names the test seam it is built at, and the rules of CODING_STANDARDS\.md and the lenses it touches/)
 })
 
 test('in any project with OpenSpec, a config whose tasks name no rules or lenses is offered the rule, and let go for good on ×', async ($, on) => {

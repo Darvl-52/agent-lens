@@ -320,3 +320,11 @@ function withoutComment(line: string) {
 // the config is written, under `rules` only, as its `context` names LENSES.md and agent-lens whatever
 // its rules say.
 export const hasTaskRules = (config: string) => /lens|линз/i.test(rulesSection(config) ?? '')
+
+// The section of CODING_STANDARDS.md the step of the security rules writes: told by its heading, in
+// either language, and that heading alone: `### Cookie security` is not the step done.
+export const hasSecurityRules = (standards: string) => /^##[ \t]+(security|безопасность)[ \t]*\r?$/im.test(standards)
+
+// The line of CLAUDE.md that has the agent read those rules before it writes: one naming both, and
+// when. A pointer that only says the file holds them sends no one to it in time.
+export const hasSecurityLine = (claude: string) => claude.split('\n').some(line => line.includes('CODING_STANDARDS.md') && /security|безопасн/i.test(line) && /before|прежде/i.test(line))

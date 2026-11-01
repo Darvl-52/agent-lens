@@ -22,10 +22,6 @@ A Claude Code mod for working with the agent, in parts that know of each other, 
   The project's checks run at the end of each turn that changed it, and a turn that leaves them red
   goes back to Claude.
 
-- **Security.** Claude is stopped from writing holes: a secret or a hole in an edit is refused before
-  it lands, and after each turn that changes code an agent reads it across files. `/security` is the
-  journal of what it tried; `/security audit` tests the whole project by its source, with no network.
-
 It was four mods: review-lens, rules-watchdog, openspec-lens and skill-router.
 
 ## The row above the prompt
@@ -79,34 +75,44 @@ the turn before has ended, in a pane that shows where each stands:
    rule (a banned API, an import's shape, where a file lives) goes to the project's linter, as a
    tool checks it better than prose; a judgement goes to `CODING_STANDARDS.md`. Each says what, why
    (the mistake it prevents), where it shows, and what checks it (`eslint: <rule>` or `review`).
-6. The lenses, from what the project's reviewers wrote on its last fifty or so merge or pull
+6. The security rules for the code the agent writes: what the code takes from outside and where it
+   lands is read against the kinds of hole AI-written code fails most (why these:
+   `docs/security-research.md`). Claude tells from the code whether there is a client, a server or
+   both, and writes the rules that apply itself, without asking, as this project keeps them, to a
+   linter already installed or under `## Security` in `CODING_STANDARDS.md`, where each edit and each
+   turn's review check them. A floor of rules comes with the step, frontend (React and the like) and
+   backend apart, and Claude adds what the project needs beyond it; a kind this project has no surface
+   for gets no rule. A line in `CLAUDE.md` has the agent read them before it writes code that handles
+   input, data, secrets or access. It ends by saying what it took the project to be, what it wrote and
+   left out, and where the code already breaks a rule.
+7. The lenses, from what the project's reviewers wrote on its last fifty or so merge or pull
    requests (its history of fixes where no CLI reads them): each comment checked against the code,
    a wrong one kept as what to push back on, the rest sorted into kinds of mistake, each with how
    many comments it holds and where to look, by this project's paths; a kind the mod's lenses name
    adds only what is this project's. A table and the file go to you, and what you pick is written to
    `LENSES.md`; `/changes lenses` reads the branch through them. None found, nothing is written.
-7. The checks, read from the project's own scripts and put to you, in `.claude/agent-lens.json`:
+8. The checks, read from the project's own scripts and put to you, in `.claude/agent-lens.json`:
    `fast` for the end of each turn (lint, types, the tests of the changed files, `{files}` where a
    command takes them) and `full` for before a commit, push or merge; by folder in a monorepo. The
    mod runs the fast tier once: a command that does not start or is too slow goes back, and what is
    red is kept as red before the agent.
-8. Bringing it up: the commands that bring the project up, try its main path and take it down, or
+9. Bringing it up: the commands that bring the project up, try its main path and take it down, or
    nothing for a library; a smoke test proposed where there is none.
-9. What the agent may run, in `.claude/settings.json`: denied always the usual forms of what cannot
-   be taken back (`git push --force`, `git reset --hard`, `git clean -f`, `rm -rf`; by prefix, so a
-   rail against the slip, not a sandbox), the project's secrets and
-   deploys on your word, the commands of the checks allowed.
-10. `docs/agents/workflow.md`: how work goes (OpenSpec and Matt's skills where they are installed),
+10. What the agent may run, in `.claude/settings.json`: denied always the usual forms of what cannot
+    be taken back (`git push --force`, `git reset --hard`, `git clean -f`, `rm -rf`; by prefix, so a
+    rail against the slip, not a sandbox), the project's secrets and
+    deploys on your word, the commands of the checks allowed.
+11. `docs/agents/workflow.md`: how work goes (OpenSpec and Matt's skills where they are installed),
     and when a task is done here. And `CLAUDE.md`: the language you are spoken to in first, pointers
     to the files (`GLOSSARY.md` imported with `@GLOSSARY.md` while it is short, so its terms hold on
     every turn), the checks in a line that points to `.claude/agent-lens.json`, and the agent as the
     orchestrator: it plans and puts the results together, and hands the work to subagents by default,
     the independent parts in parallel.
-11. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them,
+12. `openspec/config.yaml`: its `context` points to the files, its `rules` hold the artifacts to them,
     and each task names the rules of `CODING_STANDARDS.md` and the lenses it touches: OpenSpec gives
     the agent the rules of the artifacts only while it writes them, and `tasks.md` is what it reads
     as it builds.
-12. A job in the project's CI that runs the check of the docs and the full tier, as under The gate.
+13. A job in the project's CI that runs the check of the docs and the full tier, as under The gate.
 
 A step is done once its files are there and pass the check; where they fail, what failed goes back
 to Claude once, then waits for you (`f` sends it again, `a` the whole step, `s` skips it). A step
@@ -346,65 +352,6 @@ or rewrites a big file (a lockfile, a data file) shows the rest as `N lines left
 row, in yellow, and the review is told so; its counts are whole, and a piece cut short has no `take
 back`. A file over 4 MiB, which Claude Code does not read, is left out of the diff.
 
-## Security
-
-Claude is stopped from writing a hole, not told of it later, and `/security` keeps the journal of what
-it tried. What it looks for comes from `docs/security-research.md`.
-
-**Before it works.** The first prompt of a conversation, and the first after a compaction, carries a
-few lines of rules. A subagent gets them with its first edit.
-
-**Before an edit lands.** Two checks, on every agent's edits:
-
-- *A secret is refused.* Each Edit, Write, NotebookEdit and shell command is read for credentials by
-  their providers' own shapes (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, npm, a
-  private key, a password in a database URL), with no model. Trying again does not pass; only a
-  person's own `/security allow` or the pane's `a` lifts it, for that value and this session. A value
-  that says it is not real (`example`, `your-key`, `${TOKEN}`), one the edit only kept, a local default
-  (`postgres:postgres@localhost`: a host with no dots, or 127.0.0.1) and a file git ignores (`.env`) go. An edit of a
-  file git ignores goes to no model either: not the check, not the agent's list.
-- *A hole is refused.* A small model (`haiku`) reads each edit of code, tests and docs aside, and
-  refuses a hole it can see in it, saying what to write instead. It is told to report nothing when
-  unsure: it sees one edit and a part of its file. It may still be wrong, so a file refused twice in a
-  turn goes through on the third try, in the journal and on the pane for you to judge. A
-  check that fails lets the edit be, says so once a turn, and a risky call (`innerHTML`, SQL from a
-  string, `eval`) then goes to Claude as a note. It adds a few seconds and one small call per edit;
-  the setting Security: check each edit turns it off.
-
-**After the turn.** A turn that changed code (by a tool, or a shell command that left a file
-uncommitted or committed it; a file already uncommitted before the command is not seen as changed by
-it) starts an agent on `sonnet` that made none of it. It traces input to
-where it lands across files, through fourteen kinds of hole: what one edit cannot show, such as a
-route with no check its neighbours have. `can be attacked` goes to Claude as the plugin's message,
-to check and fix or say why not, three rounds in a row at most until you next write a prompt or press
-`j`; `hardening`, and what is past the rounds, stays on the pane for `j` to send or `x` to put aside.
-`x` lets no secret through. The row above the prompt counts what waits on the pane. One agent runs at a time; a turn you cut short keeps its files for the
-next. `r` or `/security run` reads all that is uncommitted now. To start the agent only by hand, press `m` on
-the pane or run `/security agent button`; `m` or `/security agent auto` brings the reading after each
-turn back. The choice is kept across sessions, for every project, and stands over the setting. By hand,
-what the agent finds waits for `j`, and a turn you cut short keeps no files; secrets and the check of each
-edit work either way.
-
-**The journal.** `/security` lists what the agent tried, newest first: when, what came of it (stopped
-and not written, let through after two refusals, noted, found in the code), the kind, the file, what
-is wrong, the line with any secret hidden, and which check saw it. It is kept for the project across
-sessions, the last 200; `/security clear`, typed by a person, empties it. It does not say whether a finding was fixed.
-
-**Testing the whole project.** `/security audit`, or `t` on the pane, has an agent test the project by
-its source alone, as a white-box tester would: it maps every route and input, follows each to where it
-lands, and looks for the checks that are missing. Findings wait on the pane for `j`: none goes to
-Claude by itself. It is told never to reach a URL, and the mod allows this agent and the one after
-each turn only `Read`, `Grep`, `Glob` and plain read-only commands (`cat`, `grep`, `find`, `git log`,
-`git diff`...), and refuses every other tool, MCP's among them. That list is a guard, not a sandbox: these
-agents can read any file, git-ignored ones too, and git still obeys a repository's own config and fetches
-objects a partial clone lacks. It does not start the application, so it proves nothing by attack: each finding is a
-path read in the code. Dependencies are judged by name and version from what the model knows, with no
-advisory database. It costs one long subagent run.
-
-What it does not do: all of this lowers the odds of a hole and proves none is absent. The check
-of an edit is a model's judgement, and the agent reads after the turn, so a push made in that turn goes
-before it has looked. Secrets are told by shape: a password of no known form is left to the models.
-
 ## The OpenSpec change
 
 ### Its part of the row
@@ -637,13 +584,7 @@ Switch with `/router auto`, `/router suggest`, `/router off`, or the buttons in 
 | `/router auto\|suggest\|off` | How the router acts on a pick.                                      |
 | `/router add`, `when`, `ignore`, `rm`, `list` | Your routing rules, as under The skill for each prompt. |
 | `/changes lang ru`         | Every part in Russian, its model's answers too; `lang en` back. The same after `/spec` or `/router`. |
-| `/security`                | Open the journal of what the agent tried, and what is waiting on you. |
-| `/security audit`          | Test the whole project for holes by its source, with no network.     |
-| `/security clear`          | Empty the journal.                                                   |
-| `/security run`            | Read all that is uncommitted for holes now.                          |
-| `/security allow`          | Let the secrets refused through, for this session.                   |
-| `/security agent auto\|button` | Whether the agent reads after each turn or only when you press `r`. |
-| `/agent-lens`              | Turn each part on or off: the review, its check of each edit, the OpenSpec change, the router, the guard, the lenses, the setup, security. |
+| `/agent-lens`              | Turn each part on or off: the review, its check of each edit, the OpenSpec change, the router, the guard, the lenses, the setup. |
 
 ## Turning parts off
 
@@ -665,10 +606,6 @@ In `/plugin`, select agent-lens, then Configure:
 | Guard over each agent's turn | `on`   | `off`: no limit on any agent's turn, as under The guard; `/changes guard` overrides it                                                               |
 | Guard: minutes per turn     | `60`    | The limit on one turn of an agent, in minutes of its own work; at half it is told to wrap up                                                         |
 | Guard: tool calls per turn  | `150`   | The limit on one turn of an agent, in tool calls; at half it is told to wrap up                                                                      |
-| Security: check each edit   | `block` | `block`: a small model refuses a hole it can see in each edit of code before it lands; `off`: no such check |
-| Model for the security check of each edit | `haiku` | An alias or a full model id |
-| Security agent              | `auto`  | `auto`: an agent reads what each turn changed in code; `button`: only on `r` in `/security` or `/security run`; `m` there or `/security agent` chooses over this setting. Secrets are refused either way |
-| Model for the security agent | `sonnet` | An alias or a full model id                                                                                                                         |
 | Route with a model          | on      | Off: only your rules route, no model calls                                                                                                           |
 | Model for routing           | `haiku` | An alias or a full model id                                                                                                                          |
 

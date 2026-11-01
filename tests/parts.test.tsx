@@ -13,8 +13,7 @@ const PANE = {
 // A session with the router's model answering `tdd` to every prompt, and the store kept here so a
 // later session reads what an earlier one saved.
 async function session($: Engine, on: On, stored: Record<string, unknown> = {}) {
-  // Security's rules would ride on every first prompt these compare; it has its own tests.
-  const store = new Map<string, unknown>(Object.entries({ 'parts.off': ['security'], ...stored }))
+  const store = new Map<string, unknown>(Object.entries(stored))
   const asked: string[] = []
   const entered: (readonly string[])[] = []
   const toasts: string[] = []
@@ -59,6 +58,16 @@ async function session($: Engine, on: On, stored: Record<string, unknown> = {}) 
   return { store, asked, entered, toasts, send, run }
 }
 
+test('a security part kept off from before is dropped: no row for it in the menu, nothing added to a prompt, and the rest stands', async ($, on) => {
+  const s = await session($, on, { 'parts.off': ['security', 'router'] })
+  expect((await s.run('agent-lens')).text).toBe('agent-lens parts opened.')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await ui.find({ key: 'toggle-security' })).toBeUndefined()
+  expect((await ui.find({ key: 'toggle-router' }))?.props.label).toBe('○ off')
+  await s.send('Добавь в корзину скидку по промокоду')
+  expect(s.entered.at(-1)).toEqual([])
+})
+
 test('a part turned off in the menu does none of its work, and its command says where to turn it on', async ($, on) => {
   const s = await session($, on)
   expect((await s.run('agent-lens')).text).toBe('agent-lens parts opened.')
@@ -67,7 +76,7 @@ test('a part turned off in the menu does none of its work, and its command says 
   await ui.press({ key: 'toggle-router' })
   expect((await ui.find({ key: 'toggle-router' }))?.props.label).toBe('○ off')
   expect(s.toasts.at(-1)).toBe('Skill router: off.')
-  expect(s.store.get('parts.off')).toEqual(['security', 'router'])
+  expect(s.store.get('parts.off')).toEqual(['router'])
 
   await s.send('Добавь в корзину скидку по промокоду')
   expect(s.asked).toHaveLength(0)

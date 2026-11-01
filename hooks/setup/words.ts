@@ -12,9 +12,104 @@ const ROLES = `- CLAUDE.md: pointers to the files below, and the few rules every
 - GLOSSARY.md: the project's own domain terms, a definition of a sentence or two each and the words to avoid. No paths, code or decisions.
 - ARCHITECTURE.md: the map: modules, their bounds, who calls whom, where the data lives. 150 lines at most.
 - docs/adr/NNNN-slug.md: one decision each that is hard to reverse, surprising, and the result of a trade-off, and why.
-- CODING_STANDARDS.md: rules for code a reviewer can check an edit against. 300 lines at most.
+- CODING_STANDARDS.md: rules for code a reviewer can check an edit against, the project's security rules among them. 300 lines at most.
 - LENSES.md: the kinds of mistake this project's reviews catch, beyond the mod's own lenses, each with where to look for it; not rules of one edit, which go to CODING_STANDARDS.md. 150 lines at most.
 - docs/agents/workflow.md: how work goes, step by step, and where the person decides.`
+
+// What the step of the security rules goes through, the kinds AI-written code fails most first
+// (docs/security-research.md).
+const KINDS = `1. XSS: user data reaching innerHTML, dangerouslySetInnerHTML, v-html, document.write, a template's raw output, an href that may be javascript:.
+2. Log injection: input written to a log unneutralized; a secret or personal data in a log.
+3. Broken access control: a route or query with no check of who is asking; an object fetched by an id from the request and not scoped to its owner; a role read from the client.
+4. Injection: SQL and NoSQL built from strings, OS commands, code and template injection.
+5. Secrets and data exposure: credentials in source, config or a client bundle (NEXT_PUBLIC_, VITE_, REACT_APP_), in error answers or URLs; a stack trace or an internal field returned to the client.
+6. Authentication and sessions: a critical route with no authentication, a password stored by a fast hash, a JWT not verified, cookies without HttpOnly, Secure, SameSite; no limit on login attempts; a token from an insecure random source.
+7. CSRF: a state-changing route on cookie auth with no token or SameSite; CORS reflecting any origin with credentials.
+8. Paths and URLs from input: path traversal, SSRF, open redirects; an upload whose type or name is trusted.
+9. Mass assignment: a request body written to a model whole.
+10. Unsafe parsing: deserialization of untrusted data, XXE, prototype pollution, ReDoS; no limit on the size or count of what a request may make the server do.
+11. Misconfiguration: debug mode or default credentials left on, security headers removed, an error path that fails open.
+12. Weak crypto and transport: MD5 or SHA-1 for security, ECB, a fixed IV or key, TLS verification off.
+13. Supply chain: a package added that may not exist or is misspelt, one with no pinned version, a CI step or install script from an unpinned source.
+14. LLM features: user or fetched text put into a prompt with authority over tools, a model's output run or rendered unescaped.`
+
+const KINDS_RU = `1. XSS: данные пользователя попадают в innerHTML, dangerouslySetInnerHTML, v-html, document.write, сырой вывод шаблона, href, который может быть javascript:.
+2. Инъекция в логи: ввод пишется в лог без нейтрализации; секрет или личные данные в логе.
+3. Нарушение контроля доступа: маршрут или запрос без проверки, кто спрашивает; объект берётся по id из запроса без привязки к владельцу; роль читается у клиента.
+4. Инъекции: SQL и NoSQL из строк, команды ОС, инъекции кода и шаблонов.
+5. Секреты и раскрытие данных: учётные данные в коде, конфиге или клиентском бандле (NEXT_PUBLIC_, VITE_, REACT_APP_), в ответах об ошибках или URL; стек или внутреннее поле уходит клиенту.
+6. Аутентификация и сессии: критичный маршрут без аутентификации, пароль под быстрым хешем, непроверенный JWT, cookie без HttpOnly, Secure, SameSite; нет лимита попыток входа; токен из небезопасного источника случайности.
+7. CSRF: меняющий состояние маршрут на cookie без токена или SameSite; CORS, отражающий любой origin с credentials.
+8. Пути и URL из ввода: path traversal, SSRF, открытые редиректы; загрузка, которой верят на слово о типе или имени.
+9. Mass assignment: тело запроса пишется в модель целиком.
+10. Небезопасный разбор: десериализация недоверенных данных, XXE, prototype pollution, ReDoS; нет лимита на размер или число того, что запрос заставляет делать сервер.
+11. Ошибки конфигурации: оставлен режим отладки или пароли по умолчанию, убраны заголовки безопасности, путь ошибки пропускает запрос.
+12. Слабая криптография и транспорт: MD5 или SHA-1 для безопасности, ECB, фиксированный IV или ключ, выключенная проверка TLS.
+13. Цепочка поставок: добавлен пакет, которого может не быть или с опечаткой в имени, без закреплённой версии; шаг CI или скрипт установки из незакреплённого источника.
+14. Функции с LLM: текст пользователя или загруженный извне попадает в промпт с властью над инструментами; вывод модели запускается или выводится без экранирования.`
+
+// What the step starts from whatever the project shows, a web app's two sides apart: rules an edit
+// can be checked against, for Claude to put as the project keeps them.
+const RULES = `Any code:
+- SQL and commands: bind parameters, pass argument lists; never build them from strings. No eval, new Function or a string timer with data.
+- Secrets come from the environment or a secret store; never in the source, a client bundle, a log, a URL or an error answer.
+- Neutralize line breaks in input before it is logged; no password, token or personal data in a log.
+- Paths and URLs from input are checked against what is allowed before use.
+- Passwords by argon2, scrypt or bcrypt; tokens from a secure random source.
+- Before adding a package, make sure it exists and is the one meant; its version is pinned by the lockfile.
+
+Frontend (React, Vue, Svelte, Angular, Next, Nuxt and the like):
+- Data is output as text, through the framework's escaping. dangerouslySetInnerHTML, v-html, {@html}, [innerHTML], innerHTML and document.write take only what the project's allow-list sanitizer returned.
+- A URL from data in href, src, action or location is allowed only as relative or http(s), never javascript: or data:. A redirect target from the query (next, returnUrl) stays on this origin.
+- An object from outside is never spread as props onto an element or a component.
+- What the client hides protects nothing: a hidden button or a route guard is a convenience, and the server checks the same action.
+- All of a client bundle is public: NEXT_PUBLIC_, VITE_, REACT_APP_, PUBLIC_ and the like hold no secret. A server component or SSR passes the client only the fields it shows, as props are serialized into the page; state put into a script tag goes through a safe serializer.
+- A session token is not kept in localStorage or sessionStorage; it lives in a cookie as below.
+- postMessage names its target origin, and its listener checks event.origin.
+
+Backend (and a full-stack framework's server actions, route handlers and loaders, which are public endpoints):
+- Every route, resolver, server action and webhook sits behind the check of who asks, by the server's session, not the client's word; a new one is closed by default. A webhook verifies its signature.
+- Every query that reads or changes an object by an id from the request scopes it to its owner or tenant, and a role comes from the session, not the request.
+- Input is validated on the server by a schema that allows fields, types and sizes; a request body is never written to a model whole, and an answer names the fields it returns, so no hash or internal field goes out.
+- A route on cookie auth that changes state has a CSRF token or SameSite; CORS allows a list of origins and never reflects one with credentials.
+- Cookies HttpOnly, Secure, SameSite; a JWT is verified, with its algorithm fixed; login, password reset and costly routes have a rate limit, and lists a page limit.
+- An upload is limited in size, its type told from its content, its name generated, and it is kept outside the web root.
+- A server-side request to a URL from input goes only to allowed hosts, never to an internal address.
+- An error answer says nothing of the internals, the detail goes to the log, and a check that fails denies.`
+
+const RULES_RU = `Любой код:
+- SQL и команды: параметры привязываются, команды идут списком аргументов; из строк не собираются. Никакого eval, new Function и таймера со строкой, если в них данные.
+- Секреты берутся из окружения или хранилища секретов; их нет в коде, клиентском бандле, логе, URL и ответе об ошибке.
+- Переводы строк во вводе нейтрализуются до записи в лог; в логе нет паролей, токенов и личных данных.
+- Пути и URL из ввода сверяются с разрешённым до использования.
+- Пароли через argon2, scrypt или bcrypt; токены из безопасного источника случайности.
+- Прежде чем добавить пакет, убедись, что он существует и это именно тот пакет; версию закрепляет lockfile.
+
+Фронтенд (React, Vue, Svelte, Angular, Next, Nuxt и подобные):
+- Данные выводятся как текст, через экранирование фреймворка. В dangerouslySetInnerHTML, v-html, {@html}, [innerHTML], innerHTML и document.write идёт только то, что вернул санитайзер проекта с белым списком.
+- URL из данных в href, src, action или location допустим только относительный или http(s), не javascript: и не data:. Адрес редиректа из запроса (next, returnUrl) остаётся на этом же origin.
+- Объект извне не разворачивается в пропсы элемента или компонента.
+- То, что клиент скрывает, ничего не защищает: скрытая кнопка или гард маршрута только удобство, то же действие проверяет сервер.
+- Весь клиентский бандл публичен: в NEXT_PUBLIC_, VITE_, REACT_APP_, PUBLIC_ и подобных нет секретов. Серверный компонент или SSR передаёт клиенту только те поля, что он показывает, потому что пропсы сериализуются в страницу; состояние в теге script идёт через безопасный сериализатор.
+- Токен сессии не хранится в localStorage и sessionStorage; он живёт в cookie, как ниже.
+- postMessage называет целевой origin, а его обработчик проверяет event.origin.
+
+Бэкенд (и серверные действия, обработчики маршрутов и загрузчики full-stack фреймворка: это публичные точки входа):
+- Каждый маршрут, резолвер, серверное действие и вебхук стоит за проверкой, кто спрашивает, по сессии на сервере, а не по словам клиента; новый закрыт по умолчанию. Вебхук проверяет подпись.
+- Каждый запрос, который читает или меняет объект по id из запроса, ограничен его владельцем или арендатором, а роль берётся из сессии, не из запроса.
+- Ввод проверяется на сервере схемой, разрешающей поля, типы и размеры; тело запроса не пишется в модель целиком, а ответ называет свои поля, чтобы хеш или внутреннее поле не ушли наружу.
+- У маршрута на cookie, меняющего состояние, есть CSRF-токен или SameSite; CORS разрешает список origin и никогда не отражает их с credentials.
+- Cookie с HttpOnly, Secure, SameSite; JWT проверяется, алгоритм закреплён; у входа, сброса пароля и дорогих маршрутов есть лимит запросов, у списков лимит страницы.
+- Загрузка ограничена по размеру, тип определяется по содержимому, имя генерируется, файл лежит вне web root.
+- Запрос с сервера на URL из ввода идёт только на разрешённые хосты и никогда на внутренний адрес.
+- Ответ об ошибке ничего не говорит о внутренностях, подробности идут в лог, а упавшая проверка отказывает.`
+
+// The line in CLAUDE.md that has the agent read the rules before it writes: what it is told every
+// turn, as CODING_STANDARDS.md by itself is read at review.
+const SECURITY_LINE = {
+  en: `Before writing code that takes input from outside, reaches a database, a shell, files or outgoing requests, renders data as HTML, writes logs, or touches secrets, sessions or access: read Security in \`CODING_STANDARDS.md\` and check the edit against it.`,
+  ru: `Прежде чем писать код, который принимает ввод извне, ходит в базу, шелл, файлы или внешние запросы, выводит данные как HTML, пишет логи или касается секретов, сессий и доступа: прочитай раздел «Безопасность» в \`CODING_STANDARDS.md\` и сверь с ним правку.`,
+}
 
 // Russian plural: 1 проблема, 2 проблемы, 5 проблем.
 const plural = (n: number, one: string, few: string, many: string) => {
@@ -30,7 +125,7 @@ const leadRu = (n: number, what: string) =>
   `Шаг ${n} из /setup-project, который готовит проект к работе с агентом: ${what}. Дополняй то, что есть; ничего не перезаписывай и спроси меня, прежде чем убрать что-то, что написал я. Вопросы, варианты ответов и итоги — по-русски.`
 
 const EN = {
-  description: 'Prepare the project for work with the agent: the glossary and the map, the coding standards, the checks and the gate on them, how work goes; check: the check of those files; baseline: what is red now, kept as red before the agent',
+  description: 'Prepare the project for work with the agent: the glossary and the map, the coding standards and security rules, the checks and the gate on them, how work goes; check: the check of those files; baseline: what is red now, kept as red before the agent',
   title: 'Setup',
   // What is installed: recommended, never required.
   ready: (found: Ready): string =>
@@ -42,6 +137,7 @@ const EN = {
   needsMatt: 'left out: Matt’s skills are not installed (/plugin install mattpocock-skills)',
   needsOpenspec: 'left out: the OpenSpec CLI is not installed (npm install -g @fission-ai/openspec)',
   needsCi: 'left out: the project has no CI to add a job to',
+  newStep: 'new since this run: `run again` or the next /setup-project brings it in',
   opened: 'Opened the setup: the steps go to Claude one at a time.',
   // The pane.
   steps: {
@@ -50,6 +146,7 @@ const EN = {
     existing: 'What is already written',
     map: 'The map: glossary, architecture, ADRs',
     standards: 'The coding standards',
+    security: 'The security rules for the code the agent writes',
     lenses: 'The lenses: the kinds of mistake this project’s reviews catch',
     checks: 'The checks, and the gate at each turn’s end',
     run: 'Bringing the project up, and its smoke test',
@@ -98,6 +195,7 @@ const EN = {
       'checks-slow': `the fast check ${i.detail} is too slow for every turn’s end: move it to full, or give it {files}`,
       'permissions-shape': `out of its form: ${i.detail}`,
       'permissions-deny': `permissions.deny lacks what cannot be taken back: ${i.detail}`,
+      'security-line': `has no line telling the agent to read the security rules before it writes. Add this one: ${SECURITY_LINE.en}`,
     }
     return `${at}: ${what[i.kind]}`
   },
@@ -210,6 +308,29 @@ Sort each rule:
 Each rule in a line or two: what, why (the mistake it prevents, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\`, \`stylelint: <rule>\`, or \`review\`).
 
 Put the rules to me with AskUserQuestion, a few at a time with multiSelect, saying for each whether it goes to the linter or to the file, and write only those I pick: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. Then run the lint script and say what the new rules found.`,
+    security: (n: number, _: Ctx): string =>
+      `${leadEn(n, 'the security rules for the code the agent writes')}
+
+Read the code for what can be attacked: which parts are the client and which the server, what takes input from outside (routes, handlers, server actions, webhooks, uploads, CLI arguments, queue consumers), what that input reaches (queries, shell commands, HTML, files, outgoing requests, logs), how a route tells who is asking and what they may touch, and where secrets are kept.
+
+You decide what applies, from what you read; do not ask me. Tell the sides from the code: its dependencies, entry points and folders show whether there is a client, a server, or both.
+
+These rules are the floor. Take each one this project has a surface for: the frontend's where it has a client, the backend's where it has a server, both in a full-stack app or a monorepo, with the part each holds for named.
+${RULES}
+
+Then go through these kinds of hole, those AI-written code fails most first, and add the rules this project needs beyond the floor, for its own framework, data and routes:
+${KINDS}
+
+Write each rule as this project keeps it: by its own query layer, sanitizer, access check, validation and secret store, each named by its path. No surface, no rule: a project with no HTML needs none on XSS. Where the project has no safe way yet (no access check to name), write the rule as what new code must do, and say so at the end. Take only rules one edit can be checked against, as agent-lens checks each edit against this file. A rule CODING_STANDARDS.md or the linter's config already holds counts as found.
+
+Each rule in a line or two: what, why (the attack it stops, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\` or \`review\`). A mechanical one goes to the linter's config where a linter and the plugin for it are already installed (with eslint-plugin-react, \`react/no-danger\` and \`react/jsx-no-script-url\`); install no package for it, and leave it to \`review\` otherwise.
+
+Write the rules, under a \`## Security\` heading in \`CODING_STANDARDS.md\` at the root, by \`### Frontend\`, \`### Backend\` and \`### Any code\` where the project has both sides, keeping the file within 300 lines; what went to the linter gets a line under that heading.
+
+The agent has to have these before it writes, not only be told of them after: add this line to \`CLAUDE.md\`, as every turn and every subagent reads that file. Where there is no such file, do not create it: the step of how work goes writes it with this line.
+${SECURITY_LINE.en}
+
+Where the project has no surface at all, write nothing and tell me this step can be skipped in the pane. End with what you found the project to be, the rules you wrote, those you left out and why, and where the code already breaks a rule, by file and line, without fixing it.`,
     lenses: (n: number, ctx: Ctx): string =>
       `${leadEn(n, 'the lenses')}
 
@@ -268,7 +389,7 @@ Then, in the same file:
 
 Then \`CLAUDE.md\` (create it where there is none), 120 lines at most:
 - the language I am spoken to in, as its first rule, where it is not English;
-- a short section of pointers to ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on when to read it; GLOSSARY.md imported with a line \`@GLOSSARY.md\` where it is under 80 lines, so its terms hold on every turn, else pointed to;
+- a short section of pointers to ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md and docs/agents/workflow.md, a line each on when to read it; where CODING_STANDARDS.md has a Security section, this line too, as it stands: ${SECURITY_LINE.en}; GLOSSARY.md imported with a line \`@GLOSSARY.md\` where it is under 80 lines, so its terms hold on every turn, else pointed to;
 - the rules every turn needs, read from the project's scripts and config: how to install and run (the \`run\` of \`.claude/agent-lens.json\` where it has one); the checks in a line: the fast tier runs by itself at each turn's end, the full tier before a commit, push or merge, sending only on green; their commands are in \`.claude/agent-lens.json\`, not copied here;
 - how to commit;
 - a section that tells the agent it is the orchestrator, as every turn needs it: it takes the task apart, plans, decides the architecture, keeps the parts in order, puts the results together and answers me; the work itself goes to subagents: reading code, implementing, running checks, the browser, reviews. It delegates by default, a subagent for each part of the task: the independent ones in parallel in one message, each with its own files (a shared contract first where they depend on each other; \`isolation: "worktree"\` where their files may meet), each prompt self-contained (the goal, the files and what not to touch, these rules, when it is done, what to answer), the answers short. By hand, only what is cheaper than explaining it. What they report is checked (the full tier) before it is told to me.
@@ -292,7 +413,7 @@ Both read \`.claude/agent-lens.json\` and need Node 20 or later in the job's ima
 }
 
 const RU: typeof EN = {
-  description: 'Подготовить проект к работе с агентом: глоссарий и карта, стандарты кода, проверки и гейт на них, как идёт работа; check: проверка этих файлов; baseline: что красное сейчас, запомнить как красное до агента',
+  description: 'Подготовить проект к работе с агентом: глоссарий и карта, стандарты кода и правила безопасности, проверки и гейт на них, как идёт работа; check: проверка этих файлов; baseline: что красное сейчас, запомнить как красное до агента',
   title: 'Подготовка',
   ready: found =>
     [
@@ -303,6 +424,7 @@ const RU: typeof EN = {
   needsMatt: 'пропущен: не установлены скиллы Мэтта (/plugin install mattpocock-skills)',
   needsOpenspec: 'пропущен: не установлен OpenSpec CLI (npm install -g @fission-ai/openspec)',
   needsCi: 'пропущен: в проекте нет CI, куда добавить задачу',
+  newStep: 'появился после этого прогона: его добавит `запустить заново` или следующий /setup-project',
   opened: 'Открыл подготовку: шаги уходят Claude по одному.',
   steps: {
     matt: 'Скиллы Мэтта: трекер, метки, раскладка домена',
@@ -310,6 +432,7 @@ const RU: typeof EN = {
     existing: 'Что уже написано',
     map: 'Карта: глоссарий, архитектура, ADR',
     standards: 'Стандарты кода',
+    security: 'Правила безопасности для кода, который пишет агент',
     lenses: 'Линзы: какие ошибки ловят ревью этого проекта',
     checks: 'Проверки и гейт в конце каждого хода',
     run: 'Как поднять проект, и его смоук-тест',
@@ -356,6 +479,7 @@ const RU: typeof EN = {
       'checks-slow': `быстрая проверка ${i.detail} слишком медленная для конца каждого хода: перенеси её в full или дай ей {files}`,
       'permissions-shape': `не по форме: ${i.detail}`,
       'permissions-deny': `в permissions.deny нет того, что нельзя отменить: ${i.detail}`,
+      'security-line': `нет строки, которая велит агенту читать правила безопасности до того, как писать. Добавь эту: ${SECURITY_LINE.ru}`,
     }
     return `${at}: ${what[i.kind]}`
   },
@@ -460,6 +584,29 @@ ${ROLES}
 Каждое правило в одну-две строки: что, почему (какую ошибку предотвращает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\`, \`stylelint: <правило>\` или \`ревью\`).
 
 Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, у каждого скажи, идёт оно в линтер или в файл, и запиши только выбранные: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. Потом запусти скрипт линта и скажи, что нашли новые правила.`,
+    security: n =>
+      `${leadRu(n, 'правила безопасности для кода, который пишет агент')}
+
+Прочитай код глазами атакующего: какие части клиент, а какие сервер, что принимает ввод извне (маршруты, обработчики, серверные действия, вебхуки, загрузки, аргументы CLI, потребители очередей), куда этот ввод доходит (запросы, команды шелла, HTML, файлы, исходящие запросы, логи), как маршрут узнаёт, кто спрашивает и что ему можно, и где лежат секреты.
+
+Что применимо, решай сам по прочитанному и меня не спрашивай. Стороны определи по коду: зависимости, точки входа и папки показывают, есть ли клиент, сервер или оба.
+
+Эти правила минимум. Возьми каждое, которому в проекте есть где проявиться: фронтенд, если есть клиент, бэкенд, если есть сервер, оба в full-stack приложении или монорепозитории, называя, к какой части относится правило.
+${RULES_RU}
+
+Потом пройди по этим видам дыр, сначала те, на которых код от ИИ ошибается чаще всего, и допиши правила, которые проекту нужны сверх минимума, под его фреймворк, данные и маршруты:
+${KINDS_RU}
+
+Каждое правило пиши так, как оно держится здесь: через свой слой запросов, санитайзер, проверку доступа, валидацию и хранилище секретов, называя их по пути. Негде проявиться, значит, правила нет: проекту без HTML правило про XSS не нужно. Где безопасного способа в проекте пока нет (нечего назвать проверкой доступа), напиши правило как то, что должен делать новый код, и скажи об этом в конце. Бери только правила, по которым можно проверить одну правку: agent-lens проверяет по этому файлу каждую правку. Правила, что уже есть в CODING_STANDARDS.md и в конфиге линтера, считаются найденными.
+
+Каждое правило в одну-две строки: что, почему (какую атаку останавливает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\` или \`ревью\`). Механическое идёт в конфиг линтера, если линтер и плагин для него уже установлены (с eslint-plugin-react это \`react/no-danger\` и \`react/jsx-no-script-url\`); пакетов для этого не ставь, иначе оставь правило на \`ревью\`.
+
+Запиши правила под заголовком \`## Безопасность\` в \`CODING_STANDARDS.md\` в корне, по \`### Фронтенд\`, \`### Бэкенд\` и \`### Любой код\`, если в проекте есть обе стороны, не выходя за 300 строк; то, что ушло в линтер, отметь там одной строкой.
+
+Агент должен знать эти правила до того, как пишет, а не только услышать о них потом: добавь эту строку в \`CLAUDE.md\`, его читает каждый ход и каждый сабагент. Если такого файла нет, не создавай его: шаг о том, как идёт работа, напишет его с этой строкой.
+${SECURITY_LINE.ru}
+
+Если проекту совсем негде их применить, ничего не пиши и скажи, что этот шаг можно пропустить в панели. В конце скажи, каким ты определил проект, какие правила записал, какие не взял и почему, и где код уже нарушает правило, по файлу и строке, ничего не исправляя.`,
     lenses: (n, ctx) =>
       `${leadRu(n, 'линзы')}
 
@@ -518,7 +665,7 @@ ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 
 Потом \`CLAUDE.md\` (создай, если нет), не больше 120 строк:
 - первым правилом — язык, на котором со мной говорят: «Отвечай и задавай вопросы по-русски»;
-- короткий раздел указателей на ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, когда его читать; GLOSSARY.md подключи строкой \`@GLOSSARY.md\`, если в нём меньше 80 строк, чтобы термины действовали в каждом ходе, иначе дай указатель;
+- короткий раздел указателей на ARCHITECTURE.md, docs/adr/, CODING_STANDARDS.md и docs/agents/workflow.md, по строке, когда его читать; если в CODING_STANDARDS.md есть раздел о безопасности, ещё и эту строку как есть: ${SECURITY_LINE.ru}; GLOSSARY.md подключи строкой \`@GLOSSARY.md\`, если в нём меньше 80 строк, чтобы термины действовали в каждом ходе, иначе дай указатель;
 - правила, нужные каждому ходу, из скриптов и конфигов проекта: как поставить и запустить (\`run\` из \`.claude/agent-lens.json\`, где он есть); проверки одной строкой: быстрая ступень идёт сама в конце каждого хода, полная — перед коммитом, пушем или мержем, и заливать только при зелёном; их команды — в \`.claude/agent-lens.json\`, сюда не копируются;
 - как коммитить;
 - раздел, который говорит агенту, что он оркестратор, — это нужно каждому ходу: он разбирает задачу, планирует, решает архитектуру, держит порядок частей, сводит результаты и отвечает мне; саму работу делают саб-агенты: чтение кода, реализация, прогон проверок, браузер, ревью. Он делегирует по умолчанию, по саб-агенту на каждую часть задачи: независимые — параллельно одним сообщением, у каждого свои файлы (где части зависят друг от друга — сначала общий контракт; \`isolation: "worktree"\`, если их файлы могут пересечься), промпт самодостаточный (цель, файлы и чего не трогать, эти правила, когда готово, что ответить), ответы короткие. Руками — только то, что дешевле, чем объяснить. Что они доложили, проверяется (полная ступень), прежде чем сказать мне.

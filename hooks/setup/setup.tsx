@@ -8,7 +8,7 @@ import { WORDS as LENS_WORDS } from '../lenses/words'
 import { below, joinPath, parentOf } from '../review/diff'
 import { diffLines } from '../spec/spec'
 import { baselineOf, CONFIG, DENY, type Exec, fingerprintOf, joinRel, newRed, parseConfig, permissionIssues, runTier, SETTINGS, timingIssues, whereOf } from './checks'
-import { ADR_DIR, type Disk, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, parseTermsInUse, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
+import { ADR_DIR, type Disk, hasSecurityLine, hasSecurityRules, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, parseTermsInUse, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
 import { WORDS } from './words'
 
 // The mod's own lenses by their names in a language, by the names /changes lenses gives them: the
@@ -39,10 +39,10 @@ const runKey = (root: string) => `setup:${root}`
 // What the fast checks were red on, by folder, on the commit they ran on before the agent.
 const baseKey = (root: string) => `setup:base:${root}`
 
-// The lenses come once the standards hold what one edit can be checked against; the checks once the
-// linter has the standards' rules; how work goes once there are commands to point to; CI last, as
-// it runs what the steps before it wrote.
-const STEPS: StepId[] = ['matt', 'openspec', 'existing', 'map', 'standards', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci']
+// The security rules are standards of their own, and the lenses come once the standards hold what one
+// edit can be checked against; the checks once the linter has the standards' rules; how work goes
+// once there are commands to point to; CI last, as it runs what the steps before it wrote.
+const STEPS: StepId[] = ['matt', 'openspec', 'existing', 'map', 'standards', 'security', 'lenses', 'checks', 'run', 'permissions', 'workflow', 'config', 'ci']
 // The skills of Matt's the way of working stands on; the first sets the project up for the rest.
 const MATT = 'mattpocock-skills'
 const MATT_SKILLS = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro']
@@ -54,16 +54,17 @@ const MARK = 'docs/agents/workflow.md'
 // one is there, what is written is sorted before the steps write more.
 const OWN_DOCS = ['AGENTS.md', ...Object.keys(OLD_GLOSSARIES), '.cursorrules', '.cursor/rules', '.github/copilot-instructions.md']
 
-// The files each step writes: the step is done once they are there and pass the check. Matt's
-// skill writes its own and keeps them to its own form. Sorting what is written writes none of its
-// own, and the lenses none where the project's reviews show no kind beyond the mod's: each is done
-// with the turn that answers it.
+// The files each step writes: the step is done once they are there and pass the check; the security
+// rules once their section is in the file, which isWritten reads. Matt's skill writes its own and
+// keeps them to its own form. Sorting what is written writes none of its own, and the lenses none
+// where the project's reviews show no kind beyond the mod's: each is done with the turn that answers it.
 const WRITES: Record<StepId, string[]> = {
   matt: ['docs/agents/issue-tracker.md', 'docs/agents/domain.md'],
   openspec: ['openspec/config.yaml'],
   existing: [],
   map: ['GLOSSARY.md', 'ARCHITECTURE.md'],
   standards: ['CODING_STANDARDS.md'],
+  security: ['CODING_STANDARDS.md'],
   lenses: ['LENSES.md'],
   checks: [CONFIG],
   run: [CONFIG],
@@ -78,6 +79,7 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
   existing: f => f in OLD_GLOSSARIES,
   map: f => /(^|\/)GLOSSARY(-MAP)?\.md$/.test(f) || f === 'ARCHITECTURE.md' || f.startsWith(`${ADR_DIR}/`),
   standards: f => f === 'CODING_STANDARDS.md',
+  security: f => f === 'CODING_STANDARDS.md',
   lenses: f => f === 'LENSES.md',
   checks: f => f === CONFIG,
   run: f => f === CONFIG,
@@ -409,8 +411,22 @@ async function ciTexts($: EngineInterface, root: string) {
   return texts
 }
 
+async function hasSecuritySection($: EngineInterface, root: string) {
+  return hasSecurityRules((await readRel($, root, 'CODING_STANDARDS.md')) ?? '')
+}
+
+// Whether CLAUDE.md sends the agent to the security rules. None yet is no fault: the step of how work
+// goes creates it with that line, so this step does not make it look like the project's own docs.
+async function sendsToSecurity($: EngineInterface, root: string) {
+  const claude = await readRel($, root, 'CLAUDE.md')
+  return claude === undefined || hasSecurityLine(claude)
+}
+
 async function isWritten($: EngineInterface, root: string, step: StepId) {
   if (step === 'existing') return !(await hasOwnDocs($, root))
+  // The standards' file may be there with no rule of these: its section is what this step writes, and
+  // a CLAUDE.md that does not send the agent to it leaves the step to do, a section by hand included.
+  if (step === 'security') return (await hasSecuritySection($, root)) && (await sendsToSecurity($, root))
   if (step === 'config') {
     const config = (await readRel($, root, 'openspec/config.yaml')) ?? ''
     return config.includes('GLOSSARY.md') && hasTaskRules(config)
@@ -439,6 +455,8 @@ async function stepIssues($: EngineInterface, root: string, step: StepId): Promi
     return found
   }
   if (step === 'permissions') return permissionIssues((await readRel($, root, SETTINGS)) ?? '{}')
+  // How work goes writes CLAUDE.md where there was none for the rules' step to add its line to.
+  if ((step === 'security' || step === 'workflow') && (await hasSecuritySection($, root)) && !(await sendsToSecurity($, root))) return [{ file: 'CLAUDE.md', kind: 'security-line' }]
   return []
 }
 
@@ -530,7 +548,9 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
   const run = await read($, runAtom)
   const step = run?.current
   if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
-  if (step !== 'existing' && step !== 'lenses' && !(await isWritten($, run.root, step))) return
+  // The security rules written with no line to them go back for it, as files out of their form do.
+  const isAnswered = step === 'existing' || step === 'lenses' || (step === 'security' ? await hasSecuritySection($, run.root) : await isWritten($, run.root, step))
+  if (!isAnswered) return
   const failing = await failingOf($, run.root, step, issues)
   // Only while the step is still with Claude: the person may have skipped or sent it again meanwhile.
   const settle = (state: StepState) => changeRun($, now => (now.current === step && now.steps[step].status === 'sent' ? setStep(now, step, state) : undefined))
@@ -810,8 +830,10 @@ export async function startSetup($: EngineInterface) {
   await registerSetup($)
   const root = await $.session.root()
   const kept = (await $.store.get(runKey(root)).catch(() => undefined)) as Run | undefined
-  // A run kept by a version with fewer steps: the steps it has not, skipped.
-  const steps = kept && (Object.fromEntries(STEPS.map(s => [s, kept.steps[s] ?? { status: 'skipped' }])) as Run['steps'])
+  // A run kept by a version with fewer steps: the steps it has not wait outside the run, and come in
+  // with its `run again` or the next /setup-project, as one the person skipped would not.
+  const { newStep } = await wordsIn($)
+  const steps = kept && (Object.fromEntries(STEPS.map(s => [s, kept.steps[s] ?? { status: 'skipped', needs: newStep }])) as Run['steps'])
   await update($, runAtom, () => (kept && steps ? { ...kept, steps } : null))
   await checkProject($).catch(() => {})
   unfound = []
