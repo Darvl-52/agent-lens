@@ -29,11 +29,44 @@ const DELEGATING = new Set(['Agent', 'Task'])
 
 // One call a loop made and what came of it, by a key of the tool and its input and a hash of the result.
 type Done = { key: string; result: string; isError: boolean }
-// A loop's turn so far: when it started, its tool calls, the time a person or another loop took,
-// its last calls, and how far past its limits it went.
-type Loop = { at: number; steps: number; outside: number; done: Done[]; level: 'under' | 'soft' | 'hard' }
+// A loop's turn so far: when it started, its tool calls, the spans of time a person or another loop
+// took (subagents side by side overlap: their time is counted once), its last calls, and how far
+// past its limits it went.
+type Loop = { at: number; steps: number; outside: [number, number][]; done: Done[]; level: 'under' | 'soft' | 'hard' }
 
 const loops = new Map<string, Loop>()
+// A subagent's loop once its turn ended, and when: continued by a message, it goes on from there.
+const ended = new Map<string, { loop: Loop; at: number }>()
+// The input that names or paces a call, not what it does: a retry under another name is the same call.
+const UNKEYED = new Set(['description', 'timeout', 'run_in_background'])
+// A command that waits on something outside (CI, a deploy, a service coming up) asks the same thing
+// again by design: its repeats are no loop. Only where every piece of it waits, asks, or reads the
+// answer: a `sleep 5 && npm test` is the test run again.
+const POLL = /^(gh\s+(run\s+(view|watch|list)|pr\s+checks)|glab\s+(ci|pipeline)\s+(status|view|get|list)|kubectl\s+(get|rollout\s+status|wait)|docker\s+(compose\s+)?ps)\b|^curl\b.*\/health\b/
+const SLEEP = /^sleep\s+\d+\w?$/
+const WAITS = /^(true|date|echo\b.*|(grep|head|tail|jq|wc)\b.*|cd\s+\S+|do|then|else|done|fi)$/
+// What comes before the command itself: a loop's word, the variables set for it.
+const LEAD = /^((while|until|do|then|else|elif|if)\s+|\w+=\S*\s+)+/
+const isPollingCommand = (command: string) => {
+  const pieces = command
+    .split(/&&|\|\||[;|\n]/)
+    .map(p => p.trim().replace(LEAD, '').trim())
+    .filter(Boolean)
+  return pieces.some(p => POLL.test(p) || SLEEP.test(p)) && pieces.every(p => POLL.test(p) || SLEEP.test(p) || WAITS.test(p))
+}
+
+// The time inside the spans, each counted once however they overlap.
+export const spanned = (spans: readonly [number, number][]) => {
+  let total = 0
+  let reach = -Infinity
+  for (const [from, to] of [...spans].sort((a, b) => a[0] - b[0])) {
+    const start = Math.max(from, reach)
+    if (to > start) total += to - start
+    reach = Math.max(reach, to)
+  }
+  return total
+}
+const workedOf = (loop: Loop, now: number) => now - loop.at - spanned(loop.outside)
 // The calls whose permission was put to the person, by id: the wait is theirs.
 const asked = new Set<string>()
 let setting: Setting = { isOn: true, minutes: 60, steps: 150 }
@@ -60,19 +93,26 @@ export async function restoreGuard($: EngineInterface) {
 }
 
 // A turn starts: its loop's count starts over. One whose start was missed (a reload) starts at its next call.
+// A subagent continued by a message goes on with its count, the time it was idle left out.
 export async function startGuardTurn($: EngineInterface, agentId: string | undefined) {
-  loops.set(agentId ?? MAIN, { at: await $.clock.now(), steps: 0, outside: 0, done: [], level: 'under' })
-  await clearAlert($, agentId ?? MAIN)
+  const now = await $.clock.now()
+  const was = agentId !== undefined ? ended.get(agentId) : undefined
+  if (agentId !== undefined) ended.delete(agentId)
+  loops.set(agentId ?? MAIN, was ? { ...was.loop, outside: [...was.loop.outside, [was.at, now]] } : { at: now, steps: 0, outside: [], done: [], level: 'under' })
+  if (!was) await clearAlert($, agentId ?? MAIN)
 }
 
 export async function endGuardTurn($: EngineInterface, agentId: string | undefined) {
+  const loop = loops.get(agentId ?? MAIN)
   loops.delete(agentId ?? MAIN)
+  if (agentId !== undefined && loop) ended.set(agentId, { loop, at: await $.clock.now() })
   await clearAlert($, agentId ?? MAIN)
 }
 
 // A /clear or /resume: no turn of the conversation before runs on.
 export async function clearGuard($: EngineInterface) {
   loops.clear()
+  ended.clear()
   asked.clear()
   await update($, alertsAtom, () => ({}))
 }
@@ -89,8 +129,9 @@ export function checkedGuard(toolUseId: string | undefined, decision: string) {
 // The tool and its input, as the model gave them: the engine's own keys left out.
 const keyOf = (e: CallEvent) => {
   const { tool_use_id: _id, agentId: _agent, requestMeta: _meta, consent: _consent, ...input } = e as CallEvent & Record<string, unknown>
-  return JSON.stringify(input)
+  return JSON.stringify(Object.fromEntries(Object.entries(input).filter(([k]) => !UNKEYED.has(k))))
 }
+const isPolling = (e: CallEvent) => e.tool === 'Bash' && isPollingCommand(e.command)
 
 const hashOf = (text: string) => {
   let h = 5381
@@ -131,15 +172,15 @@ export async function guardBefore($: EngineInterface, e: CallEvent): Promise<{ d
   const now = await $.clock.now()
   let loop = loops.get(id)
   if (!loop) {
-    loop = { at: now, steps: 0, outside: 0, done: [], level: 'under' }
+    loop = { at: now, steps: 0, outside: [], done: [], level: 'under' }
     loops.set(id, loop)
   }
   const w = await wordsIn($)
   const key = keyOf(e)
-  const stuck = stuckOf(loop.done, key)
+  const stuck = isPolling(e) ? undefined : stuckOf(loop.done, key)
   if (stuck) return { deny: w.stuck(stuck.why, stuck.n) }
   loop.steps++
-  const worked = now - loop.at - loop.outside
+  const worked = workedOf(loop, now)
   if (loop.level === 'hard' || minutesOf(worked) >= setting.minutes || loop.steps > setting.steps) {
     if (loop.level !== 'hard') {
       loop.level = 'hard'
@@ -158,10 +199,10 @@ export async function guardAfter($: EngineInterface, e: CallEvent, held: Held | 
   if (!held || loops.get(held.id) !== held.loop) return ran
   const { id, key, loop } = held
   const after = await $.clock.now()
-  if (ASKING.has(e.tool) || DELEGATING.has(e.tool) || (e.tool_use_id && asked.delete(e.tool_use_id))) loop.outside += after - held.at
+  if (ASKING.has(e.tool) || DELEGATING.has(e.tool) || (e.tool_use_id && asked.delete(e.tool_use_id))) loop.outside.push([held.at, after])
   if (ran.deny !== undefined) return ran
   loop.done = [...loop.done, { key, result: hashOf(ran.text ?? JSON.stringify(ran.result ?? null)), isError: ran.isError === true }].slice(-KEPT)
-  const worked = after - loop.at - loop.outside
+  const worked = workedOf(loop, after)
   if (loop.level === 'under' && (minutesOf(worked) >= Math.round(setting.minutes / 2) || loop.steps >= Math.round(setting.steps / 2))) {
     loop.level = 'soft'
     await alert($, id, worked, loop.steps, false)
@@ -211,7 +252,7 @@ export async function guardCommand($: EngineInterface, args: string) {
   if (arg !== '') await $.store.set(SETTING_KEY, setting)
   const now = await $.clock.now()
   const running = await Promise.all(
-    [...loops].map(async ([id, loop]) => w.running(await whoIs($, id), minutesOf(now - loop.at - loop.outside), loop.steps)),
+    [...loops].map(async ([id, loop]) => w.running(await whoIs($, id), minutesOf(workedOf(loop, now)), loop.steps)),
   )
   return { text: `${w.status(setting.isOn, setting.minutes, setting.steps)}${setting.isOn ? w.loops(running) : ''}` }
 }

@@ -118,6 +118,12 @@ const plural = (n: number, one: string, few: string, many: string) => {
   return ten === 1 && hundred !== 11 ? one : ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14) ? few : many
 }
 
+// What a step leaves to the person: only what Claude is not sure of, asked at once at its end.
+const askEn = (what: string) =>
+  `Decide yourself what the code and the files show, and write it. Ask me with AskUserQuestion only ${what}: all of those together once the rest is written, a few a question with multiSelect, and write them on my answer; where there are none, ask nothing.`
+const askRu = (what: string) =>
+  `Что видно из кода и файлов, решай сам и пиши. Через AskUserQuestion спрашивай меня только ${what}: всё это разом, когда остальное записано, по нескольку в вопросе с multiSelect, и пиши по моему ответу; если такого нет, ничего не спрашивай.`
+
 // What a step tells Claude first: which step it is, and that it adds to what is there.
 const leadEn = (n: number, what: string) =>
   `Step ${n} of /setup-project, which prepares this project for work with the agent: ${what}. Add to what is there; never write over it, and ask me before taking out anything I wrote.`
@@ -138,7 +144,7 @@ const EN = {
   needsOpenspec: 'left out: the OpenSpec CLI is not installed (npm install -g @fission-ai/openspec)',
   needsCi: 'left out: the project has no CI to add a job to',
   newStep: 'new since this run: `run again` or the next /setup-project brings it in',
-  opened: 'Opened the setup: the steps go to Claude one at a time.',
+  opened: 'Opened the setup: the steps go to Claude one at a time; one not sent yet may be skipped from its row, and the dear ones say so.',
   // The pane.
   steps: {
     matt: 'Matt’s skills: the tracker, the labels, the domain layout',
@@ -155,6 +161,14 @@ const EN = {
     config: 'OpenSpec reads the files',
     ci: 'The checks in CI',
   } as Record<StepId, string>,
+  // What a step costs, said beside it while it waits, so the dear ones may be left out ahead.
+  costs: {
+    existing: 'reads every doc: a long turn',
+    map: 'reads the whole code: a long turn',
+    standards: 'reads the whole code: a long turn',
+    security: 'reads the whole code: a long turn',
+    lenses: 'reads some fifty merge requests: the dearest step',
+  } as Partial<Record<StepId, string>>,
   status: { waiting: 'waiting', sent: 'with Claude', done: 'done', skipped: 'skipped', failed: 'check failed' },
   fixSent: 'what failed went back to Claude',
   next: 'send the next step',
@@ -208,6 +222,12 @@ const EN = {
     : g.status === 'answered' ? '○ red, held by Claude as not of its changes: let go (/setup-project baseline keeps it)'
     : `✗ red: sent back to Claude (round ${g.rounds} of ${max})`,
   gateBand: (n: number) => `checks: ${n} red`,
+  gateOff: (why: string) => `checks off: .claude/agent-lens.json does not read (${why})`,
+  fastGone: (gone: string[]) => `the agent took out of the fast checks: ${gone.map(c => `\`${c}\``).join(', ')}`,
+  fastGoneWhy: 'The gate holds the agent to the fast checks: one it takes out is yours to allow. Leave it, or have Claude put it back.',
+  // A step stopped, its turn cut short or its check failing after the fix: the run waits for the person.
+  stepBand: (n: number) => `setup: step ${n} stopped, waits for you`,
+  stepStopped: 'its turn was stopped before it ended: `w` sends the step again, `s` skips it',
   gateBase: 'The fast checks are red as on this commit before the agent: the gate lets the turn end. Fix the base first, then /setup-project baseline, or the gate holds no turn to them.',
   gateReleased: (rounds: number) => `The fast checks are still red after ${rounds} rounds: the gate let the turn end. /setup-project shows what.`,
   gateAnswered: 'Sent back, Claude changed nothing: it holds the red is not of its changes. The gate let the turn end; /setup-project baseline keeps it as red before the agent.',
@@ -267,6 +287,9 @@ End your answer with JSON alone, an entry for each term: [{"file": "its glossary
   termAnswered: (t: Term, answer: 'kept' | 'later') => `"${t.term}": ${answer === 'kept' ? 'in use, not asked again' : 'asked again next session or after /clear'}`,
   termDropPrompt: (t: Term) =>
     `The glossary term "${t.term}" in ${t.file} is found nowhere outside the glossaries, in any form or name, by git and the docs agent, and I hold it out of use. Take its entry out of ${t.file}, and where the other docs (ARCHITECTURE.md, the ADRs, CLAUDE.md) name it as a term, say what they mean without it; change nothing else, and show me what you took out.`,
+  // A term the ledger sends Claude to take out, under its glossary's name.
+  termPoint: (t: Term) =>
+    `the term "${t.term}" is found nowhere outside the glossaries, in any form or name, by git or the docs agent: take its entry out, and where ARCHITECTURE.md, the ADRs or CLAUDE.md name it as a term, say what they mean without it.`,
   minor: 'minor',
   // After an archive.
   retroOffer: (change: string): string => `"${change}" is archived: a retro of the work?`,
@@ -286,9 +309,9 @@ ${ROLES}
 - where it is: a project skill, the README for people, Matt's docs/agents/.
 - out: untrue of the code now, a second copy, or what an agent does anyway.
 
-Put the plan to me with AskUserQuestion, file by file, a few pieces a question with multiSelect, each with its home, and move only what I pick. A piece moves word for word and leaves its old place, so each fact stays in one file. A glossary by its old name moves with \`git mv\` (CONTEXT.md to GLOSSARY.md, CONTEXT-MAP.md to GLOSSARY-MAP.md, with the glossaries it links), and docs/agents/domain.md then names the new name. ADRs kept elsewhere move to docs/adr/, numbered on in order. The steps after this one add what is still missing, so this one writes nothing new.
+Move each piece whose home is clear yourself. ${askEn('of a piece you would take out (as I may have written it), and of one whose home you are not sure of')} A piece moves word for word and leaves its old place, so each fact stays in one file. A glossary by its old name moves with \`git mv\` (CONTEXT.md to GLOSSARY.md, CONTEXT-MAP.md to GLOSSARY-MAP.md, with the glossaries it links), and docs/agents/domain.md then names the new name. ADRs kept elsewhere move to docs/adr/, numbered on in order. The steps after this one add what is still missing, so this one writes nothing new.
 
-Done when every piece of every file found has my answer. End with a table: the piece, where it was, where it went.`,
+Done when every piece of every file found has its home. End with a table: the piece, where it was, where it went, and whether you or I decided it.`,
     map: (n: number, _: Ctx): string =>
       `${leadEn(n, 'the map')}
 
@@ -307,7 +330,7 @@ Sort each rule:
 - a judgement (consistency across files, the right layer, a name that says what it is): it goes to \`CODING_STANDARDS.md\`.
 Each rule in a line or two: what, why (the mistake it prevents, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\`, \`stylelint: <rule>\`, or \`review\`).
 
-Put the rules to me with AskUserQuestion, a few at a time with multiSelect, saying for each whether it goes to the linter or to the file, and write only those I pick: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. Then run the lint script and say what the new rules found.`,
+Write the rules the code keeps throughout yourself: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. ${askEn('of a rule the code keeps only in part, where its files disagree, and of a rule you would move from CODING_STANDARDS.md to the linter')} Then run the lint script and say what the new rules found. End with a table: the rule, where it went (the linter or the file), where the code shows it, and the rules you left out and why.`,
     security: (n: number, _: Ctx): string =>
       `${leadEn(n, 'the security rules for the code the agent writes')}
 
@@ -345,7 +368,7 @@ A lens is a kind of mistake, as a habit to check, and where to look for it: one 
    - a line on where the lenses came from: how many comments, on how many requests, over what time;
    - \`## Lenses\`: each \`N. **Its name** (how many comments). What goes wrong, as a habit to check. Look at: where, by this project's paths.\`, the most frequent first. A kind one of the mod's lenses names takes the mod's name and only what this project adds, its examples and where to look: the review reads the two as one lens.
    - \`## What to push back on\`: what reviewers asked for that the code shows is not so, each with why and its link.
-Show me a table (the comment, its lens, the edit of the file) and the file as it would be, then put the lenses to me with AskUserQuestion, a few at a time with multiSelect, and write only those I pick. Where no comment and no fix is found, write nothing and say where you looked.`,
+Write yourself each lens two comments or more back that hold against the code. ${askEn('of a lens only one comment backs, and of a comment you are not sure is fair')} End with a table: the comment, its lens, the edit of the file, and what you left out and why. Where no comment and no fix is found, write nothing and say where you looked.`,
     checks: (n: number, _: Ctx): string =>
       `${leadEn(n, 'the checks')}
 
@@ -353,7 +376,7 @@ Read how this project is checked, whatever its stack: its manifests and scripts 
 - fast: runs at the end of each of my agent's turns that changed the project, so seconds, a minute or two at most: lint and the type check, and the tests of the changed files where the runner can take files. Where a command takes files, put \`{files}\` where they go (\`eslint {files}\`, \`vitest related --run {files}\`, \`ruff check {files}\`): it then runs on the files changed against the commit, and not at all where there are none. A tool that fails on a file it does not read takes only its own, by extension: \`{files:py,pyi}\`. A command with no \`{files}\` runs on its whole folder.
 - full: before a commit, push or merge: everything (lint, types, all tests, e2e, the build).
 Where the project has parts with tools of their own (a monorepo, packages, repositories in folders), give each part's commands by its folder.
-Put both tiers to me with AskUserQuestion, then write them to \`.claude/agent-lens.json\`, keeping what else is there: \`{"checks": {"fast": ["…"], "full": ["…"]}}\`, or by folder, \`{"checks": {"fast": {"api": ["…"], "web": ["…"]}, "full": {…}}}\`. Each command is a line for the shell, run from its folder as a person would type it; the project's own scripts where it has them. Do not run them yourself: agent-lens runs the fast tier once the file is written, keeps what is red now as red before you, and tells you what does not start or is too slow.`,
+${askEn('of a command you are not sure is fast enough for the fast tier, and of one no script or CI job of the project runs')} Write both tiers to \`.claude/agent-lens.json\`, keeping what else is there: \`{"checks": {"fast": ["…"], "full": ["…"]}}\`, or by folder, \`{"checks": {"fast": {"api": ["…"], "web": ["…"]}, "full": {…}}}\`. Each command is a line for the shell, run from its folder as a person would type it; the project's own scripts where it has them. Do not run them yourself: agent-lens runs the fast tier once the file is written, keeps what is red now as red before you, and tells you what does not start or is too slow. End with a table: the command, its tier, its folder, where you took it from.`,
     run: (n: number, _: Ctx): string =>
       `${leadEn(n, 'bringing the project up, and its smoke test')}
 
@@ -362,15 +385,15 @@ Otherwise find how it is brought up and tried, from what it has (compose files, 
 - up: one command that brings it up and returns once it answers, waiting for its health; a server left in the foreground never returns, so use the tool's detach or wait flag, or a script that starts it and waits.
 - smoke: one command that tries the main path end to end: an e2e test tagged smoke, a request to its health and one real endpoint, the CLI with \`--help\` and one real command.
 - down: what takes it down, where up leaves something running.
-Where there is no smoke test, propose to me the smallest one that proves the main path works, in the project's own test runner, and write it only on my yes.
-Put the commands to me with AskUserQuestion, write them under \`"run"\` in \`.claude/agent-lens.json\`, keeping what else is there, then run up, smoke and down once and tell me what each did.`,
+Where there is no smoke test, write the smallest one that proves the main path works, in the project's own test runner, and say so at the end.
+Ask me with AskUserQuestion only where the files show more than one way up and none says which is in use. Write the commands under \`"run"\` in \`.claude/agent-lens.json\`, keeping what else is there, then run up, smoke and down once. End with a table: the command, where you took it from, what it did.`,
     permissions: (n: number, ctx: Ctx): string =>
       `${leadEn(n, 'what the agent may and may not run')}
 
 In \`.claude/settings.json\` (create it where there is none; keep all that is there), under \`"permissions"\`:
 - \`"deny"\`: always these, which cannot be taken back: ${ctx.deny.map(r => `\`${r}\``).join(', ')}. Then propose to me what else of this project should be off limits: files with real secrets (keys, certificates, an env file with real values; read a file before naming it, as one with local values only is no secret), commands that publish, deploy or reach production.
 - \`"allow"\`: the commands of \`.claude/agent-lens.json\` (checks and run) as Bash rules by their prefix (\`Bash(npm run lint:*)\`), git that only reads (status, diff, log, show), the project's test runners.
-Put what else to deny and what to allow to me with AskUserQuestion with multiSelect, and write the rules above and what I pick.`,
+Write the deny rules above and the allow rules yourself. What else to deny is mine to decide, as only I know what is a real secret and what reaches production: put it to me with AskUserQuestion with multiSelect and write what I pick. End with a table: the rule, deny or allow, why.`,
     workflow: (n: number, ctx: Ctx): string => {
       const has = (skill: string) => ctx.skills.includes(skill)
       const steps = [
@@ -405,7 +428,7 @@ In \`openspec/config.yaml\`, add to \`context\`, keeping what is there, a pointe
 The project's CI is in ${ctx.ci.map(f => `\`${f}\``).join(', ')}. Add a job that runs on each merge or pull request and on each push to the main branch, so what the gate holds for my agent holds for everyone:
 - the check of the docs: \`npx -y github:Darvl-52/agent-lens check\`;
 - the full tier: \`npx -y github:Darvl-52/agent-lens checks full\`, in the image the project's own jobs build and test in.
-Both read \`.claude/agent-lens.json\` and need Node 20 or later in the job's image. Where the project's image has no Node, give the docs check a job of its own on a Node image, and leave the full tier to the project's jobs that run the same commands; do not copy the commands into the CI. Write the job the way the jobs there are written (stages, images, caches, rules), and show it to me with AskUserQuestion before writing it, saying what it costs: the Node it needs in the image, a job of its own where the image has none. Write it on my yes.`,
+Both read \`.claude/agent-lens.json\` and need Node 20 or later in the job's image. Where the project's image has no Node, give the docs check a job of its own on a Node image, and leave the full tier to the project's jobs that run the same commands; do not copy the commands into the CI. Write the job the way the jobs there are written (stages, images, caches, rules). End with what it costs: the Node it needs in the image, a job of its own where the image has none, and how long it adds to a pipeline, as far as the jobs there show.`,
     fix: (step: string, issues: DocIssue[]): string =>
       `The check of the files of /setup-project's step "${step}" found these. Fix each in its file and change nothing else:\n${issues.map(i => `- ${EN.issue(i)}`).join('\n')}`,
   },
@@ -425,7 +448,7 @@ const RU: typeof EN = {
   needsOpenspec: 'пропущен: не установлен OpenSpec CLI (npm install -g @fission-ai/openspec)',
   needsCi: 'пропущен: в проекте нет CI, куда добавить задачу',
   newStep: 'появился после этого прогона: его добавит `запустить заново` или следующий /setup-project',
-  opened: 'Открыл подготовку: шаги уходят Claude по одному.',
+  opened: 'Открыл подготовку: шаги уходят Claude по одному; ещё не отправленный можно пропустить в его строке, а дорогие помечены.',
   steps: {
     matt: 'Скиллы Мэтта: трекер, метки, раскладка домена',
     openspec: 'OpenSpec в проекте',
@@ -440,6 +463,13 @@ const RU: typeof EN = {
     workflow: 'Как идёт работа, и CLAUDE.md',
     config: 'OpenSpec читает эти файлы',
     ci: 'Проверки в CI',
+  },
+  costs: {
+    existing: 'читает все доки: долгий ход',
+    map: 'читает весь код: долгий ход',
+    standards: 'читает весь код: долгий ход',
+    security: 'читает весь код: долгий ход',
+    lenses: 'читает около пятидесяти MR: самый дорогой шаг',
   },
   status: { waiting: 'ждёт', sent: 'у Claude', done: 'готово', skipped: 'пропущен', failed: 'проверка не прошла' },
   fixSent: 'что не прошло, ушло Claude',
@@ -491,6 +521,11 @@ const RU: typeof EN = {
     : g.status === 'answered' ? '○ красные, но Claude считает, что не из-за его правок: отпущены (/setup-project baseline запомнит)'
     : `✗ красные: отправлены Claude (круг ${g.rounds} из ${max})`,
   gateBand: n => `проверки: ${n} ${plural(n, 'красная', 'красные', 'красных')}`,
+  gateOff: why => `проверки выключены: .claude/agent-lens.json не читается (${why})`,
+  fastGone: gone => `агент убрал из быстрых проверок: ${gone.map(c => `\`${c}\``).join(', ')}`,
+  fastGoneWhy: 'Гейт держит агента быстрыми проверками: убрать проверку — решать вам. Оставьте как есть или пусть Claude вернёт её.',
+  stepBand: n => `setup: шаг ${n} остановлен, ждёт вас`,
+  stepStopped: 'его ход остановили до конца: `w` отправит шаг снова, `s` пропустит его',
   gateBase: 'Быстрые проверки красные так же, как на этом коммите до агента: гейт отпускает ход. Сначала почини базу, потом /setup-project baseline, иначе гейт не держит ход по этим проверкам.',
   gateReleased: rounds => `Быстрые проверки красные и после ${rounds} ${plural(rounds, 'круга', 'кругов', 'кругов')}: гейт отпустил ход. Что именно — в /setup-project.`,
   gateAnswered: 'Ход вернули, а Claude ничего не поменял: он считает, что красное не из-за его правок. Гейт отпустил ход; /setup-project baseline запомнит это как красное до агента.',
@@ -546,6 +581,8 @@ ${terms.map(t => `- "${t.term}" (${t.file})`).join('\n')}
   termAnswered: (t, answer) => `«${t.term}»: ${answer === 'kept' ? 'в ходу, больше не спрошу' : 'спрошу в следующей сессии или после /clear'}`,
   termDropPrompt: t =>
     `Термин «${t.term}» из ${t.file} ни git, ни агент документов не нашли нигде, кроме глоссариев, ни в какой форме и ни под каким именем, и я считаю, что он не в ходу. Убери его запись из ${t.file}, а где другие документы (ARCHITECTURE.md, ADR, CLAUDE.md) называют его как термин, скажи то, что они имеют в виду, без него; больше ничего не меняй и покажи мне, что убрал.`,
+  termPoint: t =>
+    `термин «${t.term}» ни git, ни агент документов не нашли нигде, кроме глоссариев, ни в какой форме и ни под каким именем: убери его запись, а где ARCHITECTURE.md, ADR или CLAUDE.md называют его как термин, скажи то же без него.`,
   minor: 'мелочь',
   retroOffer: change => `«${change}» в архиве: ретро по работе?`,
   retroArgs: change => `работа в этой сессии над изменением OpenSpec «${change}», до его архива. Говори со мной по-русски: вопросы, варианты и итоги`,
@@ -562,9 +599,9 @@ ${ROLES}
 - где есть: скилл проекта, README для людей, docs/agents/ Мэтта.
 - вон: неверно для кода сейчас, вторая копия или то, что агент и так делает.
 
-Предложи план мне через AskUserQuestion, по файлу, по нескольку кусков в вопросе с multiSelect, у каждого — его дом, и переноси только выбранное. Кусок переезжает слово в слово и уходит со старого места, чтобы каждый факт жил в одном файле. Глоссарий под старым именем переезжает через \`git mv\` (CONTEXT.md в GLOSSARY.md, CONTEXT-MAP.md в GLOSSARY-MAP.md, вместе с глоссариями, на которые он ссылается), и docs/agents/domain.md потом называет новое имя. ADR, что лежат в другом месте, переезжают в docs/adr/ с номерами по порядку. Чего не хватает, допишут следующие шаги, поэтому этот нового не пишет.
+Кусок, чей дом ясен, переноси сам. ${askRu('о куске, который ты бы убрал (его мог написать я), и о том, чей дом тебе не ясен')} Кусок переезжает слово в слово и уходит со старого места, чтобы каждый факт жил в одном файле. Глоссарий под старым именем переезжает через \`git mv\` (CONTEXT.md в GLOSSARY.md, CONTEXT-MAP.md в GLOSSARY-MAP.md, вместе с глоссариями, на которые он ссылается), и docs/agents/domain.md потом называет новое имя. ADR, что лежат в другом месте, переезжают в docs/adr/ с номерами по порядку. Чего не хватает, допишут следующие шаги, поэтому этот нового не пишет.
 
-Готово, когда у каждого куска каждого найденного файла есть мой ответ. В конце — таблица: кусок, где был, куда ушёл.`,
+Готово, когда у каждого куска каждого найденного файла есть дом. В конце — таблица: кусок, где был, куда ушёл и кто решил: ты или я.`,
     map: n =>
       `${leadRu(n, 'карта')}
 
@@ -583,7 +620,7 @@ ${ROLES}
 - на суждение (согласованность между файлами, верный слой, имя, которое говорит, что это): идёт в \`CODING_STANDARDS.md\`.
 Каждое правило в одну-две строки: что, почему (какую ошибку предотвращает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\`, \`stylelint: <правило>\` или \`ревью\`).
 
-Предложи правила мне через AskUserQuestion, по нескольку с multiSelect, у каждого скажи, идёт оно в линтер или в файл, и запиши только выбранные: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. Потом запусти скрипт линта и скажи, что нашли новые правила.`,
+Правила, которые код держит везде, запиши сам: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. ${askRu('о правиле, которое код держит лишь местами, где его файлы расходятся, и о правиле, которое ты бы перенёс из CODING_STANDARDS.md в линтер')} Потом запусти скрипт линта и скажи, что нашли новые правила. В конце — таблица: правило, куда ушло (линтер или файл), где его видно в коде, и какие правила ты не взял и почему.`,
     security: n =>
       `${leadRu(n, 'правила безопасности для кода, который пишет агент')}
 
@@ -621,7 +658,7 @@ ${SECURITY_LINE.ru}
    - строка о том, откуда линзы: сколько замечаний, в скольких запросах, за какой срок;
    - \`## Линзы\`: каждая \`N. **Её имя** (сколько замечаний). Что идёт не так, как проверяемая привычка. Смотреть: где, путями этого проекта.\`, самые частые первыми. Класс, который называет линза мода, берёт её имя и только то, что добавляет этот проект, — его примеры и где смотреть: ревью читает их как одну линзу.
    - \`## На что возражать\`: о чём просили ревьюеры, а код показывает, что это не так, — каждое с причиной и ссылкой.
-Покажи мне таблицу (замечание, линза, правка файла) и файл, каким он станет, потом предложи линзы через AskUserQuestion, по несколько с multiSelect, и запиши только выбранные. Если не нашлось ни замечаний, ни исправлений, ничего не пиши и скажи, где искал.`,
+Линзу, за которой два замечания или больше и которая подтверждается кодом, запиши сам. ${askRu('о линзе, за которой одно замечание, и о замечании, в справедливости которого ты не уверен')} В конце — таблица: замечание, линза, правка файла и что ты не взял и почему. Если не нашлось ни замечаний, ни исправлений, ничего не пиши и скажи, где искал.`,
     checks: n =>
       `${leadRu(n, 'проверки')}
 
@@ -629,7 +666,7 @@ ${SECURITY_LINE.ru}
 - fast: идёт в конце каждого хода моего агента, который поменял проект, поэтому секунды, минута-две самое большее: линт и проверка типов, и тесты изменённых файлов, если раннер умеет брать файлы. Где команда берёт файлы, поставь \`{files}\` на их место (\`eslint {files}\`, \`vitest related --run {files}\`, \`ruff check {files}\`): тогда она идёт по файлам, изменённым относительно коммита, и не идёт вовсе, если их нет. Инструменту, который падает на чужих файлах, дай только его файлы, по расширению: \`{files:py,pyi}\`. Команда без \`{files}\` идёт по всей своей папке.
 - full: перед коммитом, пушем или мержем: всё (линт, типы, все тесты, e2e, сборка).
 Если у проекта есть части со своими инструментами (монорепо, пакеты, репозитории в папках), дай команды каждой части по её папке.
-Предложи мне обе ступени через AskUserQuestion, потом запиши их в \`.claude/agent-lens.json\`, сохранив, что там есть: \`{"checks": {"fast": ["…"], "full": ["…"]}}\` или по папкам, \`{"checks": {"fast": {"api": ["…"], "web": ["…"]}, "full": {…}}}\`. Каждая команда — строка для шелла, которая запускается из своей папки так, как её набрал бы человек; где у проекта есть свои скрипты — они. Сам их не запускай: agent-lens прогонит быструю ступень, как только файл записан, запомнит красное сейчас как красное до тебя и скажет, что не запускается или слишком медленно.`,
+${askRu('о команде, про которую не уверен, что она достаточно быстрая для быстрой ступени, и о той, которую не запускает ни один скрипт и ни одна задача CI проекта')} Запиши обе ступени в \`.claude/agent-lens.json\`, сохранив, что там есть: \`{"checks": {"fast": ["…"], "full": ["…"]}}\` или по папкам, \`{"checks": {"fast": {"api": ["…"], "web": ["…"]}, "full": {…}}}\`. Каждая команда — строка для шелла, которая запускается из своей папки так, как её набрал бы человек; где у проекта есть свои скрипты — они. Сам их не запускай: agent-lens прогонит быструю ступень, как только файл записан, запомнит красное сейчас как красное до тебя и скажет, что не запускается или слишком медленно. В конце — таблица: команда, ступень, папка, откуда ты её взял.`,
     run: n =>
       `${leadRu(n, 'как поднять проект, и его смоук-тест')}
 
@@ -638,15 +675,15 @@ ${SECURITY_LINE.ru}
 - up: одна команда, которая поднимает проект и возвращается, когда он отвечает, дождавшись здоровья; сервер на переднем плане не вернётся никогда, поэтому нужен флаг detach или wait у инструмента или скрипт, который запускает и ждёт.
 - smoke: одна команда, которая пробует главный путь насквозь: e2e-тест с тегом smoke, запрос к здоровью и к одной настоящей ручке, утилита с \`--help\` и одной настоящей командой.
 - down: что его останавливает, если up оставляет что-то запущенным.
-Если смоук-теста нет, предложи мне самый маленький, который доказывает, что главный путь работает, в тест-раннере проекта, и пиши его только после моего «да».
-Предложи команды мне через AskUserQuestion, запиши их в \`"run"\` в \`.claude/agent-lens.json\`, сохранив, что там есть, потом один раз запусти up, smoke и down и скажи, что сделала каждая.`,
+Если смоук-теста нет, напиши самый маленький, который доказывает, что главный путь работает, в тест-раннере проекта, и скажи об этом в конце.
+Через AskUserQuestion спрашивай меня, только если файлы показывают несколько способов поднять проект и ни один не говорит, какой в ходу. Запиши команды в \`"run"\` в \`.claude/agent-lens.json\`, сохранив, что там есть, потом один раз запусти up, smoke и down. В конце — таблица: команда, откуда ты её взял, что она сделала.`,
     permissions: (n, ctx) =>
       `${leadRu(n, 'что агенту можно и нельзя запускать')}
 
 В \`.claude/settings.json\` (создай, если нет; всё, что там есть, сохрани) в \`"permissions"\`:
 - \`"deny"\`: всегда эти, их не отменить: ${ctx.deny.map(r => `\`${r}\``).join(', ')}. Потом предложи мне, что ещё в этом проекте должно быть под запретом: файлы с настоящими секретами (ключи, сертификаты, env-файл с настоящими значениями; прочитай файл, прежде чем его назвать: файл только с локальными значениями — не секрет), команды, которые публикуют, деплоят или ходят в прод.
 - \`"allow"\`: команды из \`.claude/agent-lens.json\` (проверки и run) правилами Bash по префиксу (\`Bash(npm run lint:*)\`), git только на чтение (status, diff, log, show), тест-раннеры проекта.
-Что ещё запретить и что разрешить, предложи мне через AskUserQuestion с multiSelect, и запиши правила выше и то, что я выберу.`,
+Правила запрета выше и разрешения запиши сам. Что ещё запретить, решаю я: только я знаю, что настоящий секрет и что ходит в прод. Предложи это мне через AskUserQuestion с multiSelect и запиши то, что я выберу. В конце — таблица: правило, запрет или разрешение, почему.`,
     workflow: (n, ctx) => {
       const has = (skill: string) => ctx.skills.includes(skill)
       const steps = [
@@ -681,7 +718,7 @@ ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 CI проекта — в ${ctx.ci.map(f => `\`${f}\``).join(', ')}. Добавь задачу, которая идёт на каждом merge или pull request и на каждом пуше в основную ветку, чтобы то, что гейт держит для моего агента, держалось для всех:
 - проверка документов: \`npx -y github:Darvl-52/agent-lens check\`;
 - полная ступень: \`npx -y github:Darvl-52/agent-lens checks full\`, в том образе, где собирают и тестируют свои задачи проекта.
-Обе читают \`.claude/agent-lens.json\` и требуют Node 20 или новее в образе задачи. Если в образе проекта Node нет, дай проверке документов свою задачу на образе с Node, а полную ступень оставь задачам проекта, которые гоняют те же команды; команды в CI не копируй. Пиши задачу так, как написаны задачи там (стадии, образы, кэши, правила), и покажи её мне через AskUserQuestion до записи, сказав, чего она стоит: Node, нужный в образе, своя задача, где его нет. Запиши после моего «да».`,
+Обе читают \`.claude/agent-lens.json\` и требуют Node 20 или новее в образе задачи. Если в образе проекта Node нет, дай проверке документов свою задачу на образе с Node, а полную ступень оставь задачам проекта, которые гоняют те же команды; команды в CI не копируй. Пиши задачу так, как написаны задачи там (стадии, образы, кэши, правила). В конце скажи, чего она стоит: Node, нужный в образе, своя задача, где его нет, и сколько она добавит к пайплайну, насколько это видно по задачам там.`,
     fix: (step, issues) =>
       `Проверка файлов шага «${step}» из /setup-project нашла это. Исправь каждое в его файле и больше ничего не меняй:\n${issues.map(i => `- ${RU.issue(i)}`).join('\n')}`,
   },

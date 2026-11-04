@@ -4,9 +4,13 @@ import type { EngineInterface, Hook, MatchedHook, ModelEffort, ModelUsage, Plugi
 import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode, ShellRun, Spent, Tab } from '../../types/review'
 import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { send } from '../core/outbox'
+import { flush, type Point, toDecide } from '../ledger/ledger'
+import { spendOn } from '../core/spend'
 import { nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
 import { isOn as isPartOn } from '../parts/parts'
+import { isStepDoc } from '../setup/setup'
 import { specInView } from '../spec/lens'
 import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
@@ -88,6 +92,8 @@ const GUTTER = 10
 const UNTRACKED_LIMIT = 40
 // Uncommitted files taken before a shell command, and found changed by it, at most, per repository.
 const SHELL_LIMIT = 100
+// How many files one shell command wrote are checked against the rules, at most.
+const SHELL_CHECKS = 5
 // An edit refused this many times in a turn for one rule goes through on the next try, in `block`:
 // a check that is wrong does not hold Claude up for good. Claude is not told so, and the count
 // starts over each turn and once an edit to the file passes clean.
@@ -123,6 +129,8 @@ const notes = new Map<string, Note[]>()
 const pending = new Map<string, Set<Promise<void>>>()
 const stopped = new Set<string>()
 let sentBack = false
+// Whether a classic Stop of the main turn under way carried its notes: the review sends back once a turn.
+let isStopTold = false
 // A note for Claude and the caught rules it tells of, marked told once it reaches Claude.
 type Note = { text: string; ids: string[] }
 
@@ -243,6 +251,10 @@ function requestOf(text: string) {
     .replace(/<command-name>([\s\S]*?)<\/command-name>\s*(?:<command-args>([\s\S]*?)<\/command-args>)?/g, (_, name: string, args = '') => `${name} ${args}`)
     .trim()
 }
+// What the person asked in this session, oldest first, as the review of each turn reads it.
+export async function sessionRequests($: EngineInterface) {
+  return requestsOf($)
+}
 async function requestsOf($: EngineInterface) {
   return (await read($, requestsAtom)).map(requestOf).filter(Boolean)
 }
@@ -289,12 +301,15 @@ function userRulesPath($: EngineInterface) {
 async function ruleFilesFor($: EngineInterface, paths: readonly string[]) {
   const root = await $.session.root()
   const found: { path: string; text: string }[] = []
+  // The files another one pulls in with `@`: read in it, not once more on their own.
+  const imported = new Set<string>()
   const take = (walked: Awaited<ReturnType<EngineInterface['fs']['ancestors']>>) => {
     // Root first, so turned round, each folder's names in their order.
     const dirs = [...new Set(walked.map(a => canonical(a.dir)))].reverse()
     for (const dir of dirs)
       for (const rules of walked.filter(a => canonical(a.dir) === dir)) {
         const path = canonical(rules.parts[0]?.path ?? joinPath(rules.dir, rules.name))
+        for (const part of rules.parts.slice(1)) imported.add(canonical(part.path))
         if (!found.some(f => f.path === path)) found.push({ path, text: rules.content })
       }
   }
@@ -310,14 +325,25 @@ async function ruleFilesFor($: EngineInterface, paths: readonly string[]) {
     const text = await readOrNull($, user)
     if (text !== null) found.push({ path: canonical(user), text })
   }
-  return found.filter(f => f.text.trim() !== '' && (settings.includeUserRules || !user || !samePath(f.path, user)))
+  return found.filter(f => f.text.trim() !== '' && !imported.has(f.path) && (settings.includeUserRules || !user || !samePath(f.path, user)))
+}
+
+// A rule file past its limit is cut, but its security rules, the section /setup-project writes last,
+// are read whole: the rest gives way to them.
+const SECURITY_SECTION = /^##[ \t]+(security|безопасность)[ \t]*$[\s\S]*?(?=^##[ \t]|(?![\s\S]))/im
+function clipRules(text: string) {
+  if (text.length <= RULE_FILE_LIMIT) return text
+  const security = text.match(SECURITY_SECTION)?.[0]
+  if (!security) return text.slice(0, RULE_FILE_LIMIT)
+  const rest = text.replace(security, '')
+  return `${rest.slice(0, Math.max(0, RULE_FILE_LIMIT - security.length))}\n[... cut]\n\n${security}`
 }
 
 const rulesText = (found: readonly { path: string; text: string }[], shown: (path: string) => string) => {
   let text = ''
   for (const rules of found) {
     if (text.length > RULES_LIMIT) break
-    text += `=== ${shown(rules.path)} ===\n${rules.text.replace(/\r\n/g, '\n').slice(0, RULE_FILE_LIMIT)}\n\n`
+    text += `=== ${shown(rules.path)} ===\n${clipRules(rules.text.replace(/\r\n/g, '\n'))}\n\n`
   }
   return text
 }
@@ -388,7 +414,8 @@ async function contextFor($: EngineInterface, diff: Diff) {
   return `${inView}${earlier}${w.requestHeading(diff.request)}\n\n${shell}${files ? `${w.filesHeading}\n\n${files}` : ''}${await repoFilesFor($, diff.files)}${w.diffHeading}\n\n${diffText(diff.files)}`
 }
 
-async function spend($: EngineInterface, u: ModelUsage) {
+async function spend($: EngineInterface, u: ModelUsage, part = 'review') {
+  spendOn(part, u)
   await update($, spentAtom, s => ({
     calls: s.calls + 1,
     input: s.input + u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
@@ -482,6 +509,28 @@ async function reviewDiff($: EngineInterface, whole: Diff) {
   const next = reviewNext
   reviewNext = undefined
   if (next) await reviewDiff($, next)
+  else await flush($).catch(() => {})
+}
+
+// What the review found and nobody answered yet, for the ledger to take to Claude: the likely bugs
+// and the rules broken hold, the rest are minor. What the check of each edit caught is told to
+// Claude by its own notes.
+export async function reviewPoints($: EngineInterface): Promise<Point[]> {
+  const turn = await read($, turnAtom)
+  if (!turn) return []
+  const sent = await read($, sentAtom)
+  const dismissed = await read($, dismissedAtom)
+  const review = (await read($, reviewsAtom))[turn.fingerprint] ?? []
+  const all = [...review.filter(f => open(f, sent, dismissed)), ...(await earlierFindings($, turn))]
+  return all.map(f => ({ id: f.id, where: findingAt(f), text: f.rule ? `${f.text} (${f.rule})` : f.text, isMinor: f.severity === 'note' }))
+}
+
+export async function reviewTaken($: EngineInterface, ids: readonly string[]) {
+  await update($, sentAtom, s => [...s, ...ids.filter(id => !s.includes(id))])
+}
+
+export async function reviewAside($: EngineInterface, ids: readonly string[]) {
+  await update($, dismissedAtom, d => [...d, ...ids.filter(id => !d.includes(id))])
 }
 
 // A line as a later diff is matched against it: its text, spaces at the ends aside, hashed.
@@ -573,7 +622,7 @@ async function ask($: EngineInterface, question: string) {
 // Sends `text` to the session as the person's prompt and marks `ids` as sent.
 async function sendToClaude($: EngineInterface, ids: readonly string[], text: string) {
   const w = await wordsIn($)
-  const r = await $.prompt.submit({ text, asUser: true })
+  const r = await send($, { from: 'review' }, text)
   if (r.drop !== undefined) {
     const why = r.drop
     await update($, errorAtom, () => why)
@@ -813,22 +862,29 @@ async function noteShell($: EngineInterface, command: string, ran: ToolCallResul
 }
 
 // One edit checked against the rules in force for its file by the small model; an edit to a rule
-// file, to the OpenSpec change (/spec reads it), or to a file no rule applies to, is let be.
+// file, to the OpenSpec change (/spec reads it), to a doc a /setup-project step writes in its turn,
+// or to a file no rule applies to, is let be.
 async function inspect($: EngineInterface, change: Change) {
-  if (isRuleFile(change.file) || isSpecPath(change.file)) return []
+  if (isRuleFile(change.file) || isSpecPath(change.file) || isStepDoc(await $.session.root(), change.file)) return []
   const rules = rulesText(await ruleFilesFor($, [change.file]), shownFrom(await $.session.root()))
   if (rules === '') return []
   const r = await $.model.complete({
     model: settings.liveModel,
     system: LIVE_SYSTEM,
     prompt: [{ text: rules, cache: true }, { text: `\n\n# The change\n\n${change.text}` }],
-    maxTokens: 1024,
+    maxTokens: 2048,
     effort: 'low',
     timeoutMs: LIVE_TIMEOUT_MS,
   })
-  await spend($, r.usage)
-  if (!r.isAnswered) await checkFailed($, whyNot(r))
-  return r.isAnswered ? (parseViolations(r.text) ?? []) : []
+  await spend($, r.usage, 'live')
+  if (!r.isAnswered) {
+    await checkFailed($, whyNot(r))
+    return []
+  }
+  // An answer with no list is no clean edit: the check failed, and is counted so.
+  const violations = parseViolations(r.text)
+  if (violations === undefined) await checkFailed($, (await wordsIn($)).unparsed)
+  return violations ?? []
 }
 
 // A check that gave no answer let its edit through unchecked: counted, and said once a turn.
@@ -906,9 +962,14 @@ async function settle($: EngineInterface, loop: string) {
 
 // Where no classic Stop hook ran, as where an organization manages Claude Code: a main turn that
 // ended with notes unread gets them as a prompt of its own, once; a subagent's go to the main loop.
-async function settleTurn($: EngineInterface, agentId: string | undefined, reason: string) {
+// A stop kept going by another hook (the gate among them) left its notes for the next tool result;
+// the turn ended with none, so they go now as that prompt. With the review turned off since the turn
+// began, nothing is sent: its notes wait.
+async function settleTurn($: EngineInterface, agentId: string | undefined, reason: string, isOnNow = true) {
   const loop = agentId ?? MAIN
-  if (stopped.delete(loop)) return
+  const wasStopped = stopped.delete(loop)
+  if (wasStopped && (loop !== MAIN || isStopTold || !notes.get(MAIN)?.length)) return
+  if (!isOnNow) return
   if (loop !== MAIN) {
     const delivered = await settle($, loop)
     if (delivered.length > 0) notes.set(MAIN, [...(notes.get(MAIN) ?? []), ...delivered.map(note => ({ ...note, text: `A subagent left this unfixed:\n${note.text}` }))])
@@ -926,8 +987,7 @@ async function settleTurn($: EngineInterface, agentId: string | undefined, reaso
   }
   sentBack = true
   // Not awaited: the prompt runs once the session is idle, after this turn's end.
-  void $.prompt
-    .submit({ text: textOf(delivered).join('\n\n') })
+  void send($, { from: 'review', tag: 'notes' }, textOf(delivered).join('\n\n'), {})
     .then(r => (r.drop === undefined ? markTold($, delivered) : putBack(MAIN, delivered)))
     .catch(() => putBack(MAIN, delivered))
 }
@@ -1042,6 +1102,7 @@ export async function restartReview($: EngineInterface) {
 export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Parameters<Hook<'turn.start'>>[1], next: Parameters<Hook<'turn.start'>>[2]) {
   if (e.agentId === undefined) {
     isFailureTold = false
+    isStopTold = false
     refusals.clear()
     await update($, turnBeforeAtom, () => ({}))
     await update($, turnDirtyAtom, () => null)
@@ -1072,19 +1133,81 @@ export async function beforeNotebookEdit($: Parameters<MatchedHook<'tool.call', 
 
 export async function aroundShell($: Parameters<MatchedHook<'tool.call', { tool: 'Bash' }>>[0], e: Parameters<MatchedHook<'tool.call', { tool: 'Bash' }>>[1], next: Parameters<MatchedHook<'tool.call', { tool: 'Bash' }>>[2]) {
   await beforeShell($).catch(() => {})
+  const was = isLiveOn() ? await dirtyNow($).catch(() => undefined) : undefined
   const ran = await next(e)
   await noteShell($, e.command, ran).catch(() => {})
+  if (was && ran.deny === undefined) await checkShellWrites($, e.agentId ?? MAIN, was).catch(() => {})
   return ran
+}
+
+const isLiveOn = () => settings.live !== 'off' && isPartOn('live')
+
+// What is uncommitted in each repository the session works in, by repository.
+async function dirtyNow($: EngineInterface) {
+  const out = new Map<string, Set<string>>()
+  for (const repo of await sessionRepos($)) out.set(repo, new Set((await uncommittedIn($, repo)).map(canonical)))
+  return out
+}
+
+// A shell command that wrote files (`sed -i`, `cat >`, `tee`) is checked against the rules as an
+// edit is: each file it left uncommitted that was not, by what changed since its commit. A file
+// already uncommitted before it is left to the review of the turn.
+async function checkShellWrites($: EngineInterface, loop: string, was: Map<string, Set<string>>) {
+  let left = SHELL_CHECKS
+  for (const [repo, before] of was) {
+    for (const path of await uncommittedIn($, repo)) {
+      if (left <= 0) return
+      if (before.has(canonical(path))) continue
+      const now = await readNow($, path)
+      if (typeof now !== 'string') continue
+      const head = await git($, repo, ['show', `HEAD:${below(path, repo) ?? ''}`])
+      if (head?.isStdoutTruncated) continue
+      const span = changedSpan(head?.exitCode === 0 ? head.stdout : '', now)
+      if (span.now.trim() === '') continue
+      left--
+      checkInBackground($, loop, describeEdit(path, span.was, span.now))
+    }
+  }
 }
 
 type ToolCallEvent = Parameters<Hook<'tool.call'>>[1]
 type ToolCallDone = Awaited<ReturnType<Parameters<Hook<'tool.call'>>[2]>>
 
 const changeOf = (e: ToolCallEvent) =>
-  settings.live === 'off' || !isPartOn('live') ? undefined
+  !isLiveOn() ? undefined
   : e.tool === 'Edit' ? describeEdit(e.file_path, e.old_string, e.new_string)
   : e.tool === 'Write' ? describeWrite(e.file_path, e.content)
+  : e.tool === 'NotebookEdit' && e.edit_mode !== 'delete' ? describeWrite(e.notebook_path, e.new_source)
   : undefined
+
+// The lines an edit takes out of a rule file: a rule the agent drops or weakens is the person's
+// call. A step of /setup-project that moves its pieces to their homes is let be.
+async function removedRules($: EngineInterface, e: ToolCallEvent) {
+  const path = e.tool === 'Edit' || e.tool === 'Write' ? e.file_path : undefined
+  if (!path || !isRuleFile(path) || isStepDoc(await $.session.root(), path)) return []
+  const before = e.tool === 'Edit' ? e.old_string : ((await readNow($, path)) ?? '')
+  const after = e.tool === 'Edit' ? e.new_string : e.tool === 'Write' ? e.content : ''
+  const kept = new Set(after.split('\n').map(l => l.trim()))
+  return before
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.replace(/^[-*>#\d.\s]+/, '').length > 3 && !kept.has(l))
+}
+
+// Read before the edit, as it is the file before that tells what goes; raised once the edit landed.
+export type RemovedRules = { point: Point; why: string }
+export async function rulesRemovedBy($: EngineInterface, e: ToolCallEvent): Promise<RemovedRules | undefined> {
+  const removed = await removedRules($, e).catch(() => [])
+  if (removed.length === 0 || (e.tool !== 'Edit' && e.tool !== 'Write')) return undefined
+  const w = await wordsIn($)
+  const shown = whereIn(canonical(e.file_path), await $.session.root(), await repoOf($, e.file_path)).shown
+  const text = w.ruleRemoved(removed.slice(0, 3), removed.length)
+  return { point: { id: hash(`${shown}\n${removed.join('\n')}`), where: shown, text, isMinor: false }, why: w.ruleRemovedWhy }
+}
+
+export async function raiseRemoved($: EngineInterface, found: RemovedRules) {
+  await toDecide($, 'rules', found.point, found.why)
+}
 
 // Each edit checked against the rules as it is made: before it lands, to refuse it, in `block`.
 export async function checkBefore($: EngineInterface, e: ToolCallEvent) {
@@ -1100,8 +1223,12 @@ export async function checkBefore($: EngineInterface, e: ToolCallEvent) {
   const passed = found.filter(v => tries(v) >= REFUSALS)
   if (passed.length > 0) {
     for (const v of passed) refusals.delete(keyOf(v))
-    await keepCaught($, change, passed, 'open').catch(() => {})
-    await $.ui.toast((await wordsIn($)).letThrough(nameOf(change.file)))
+    const ids = await keepCaught($, change, passed, 'open').catch(() => [] as string[])
+    const w = await wordsIn($)
+    const shown = whereIn(canonical(change.file), await $.session.root(), await repoOf($, change.file)).shown
+    // Let through, it is the person's to decide, with the others that wait for them.
+    for (const [k, v] of passed.entries()) if (ids[k]) await toDecide($, 'review', { id: ids[k], where: shown, text: `${v.rule}${v.evidence ? ` (${v.evidence})` : ''}`, ...(v.fix ? { fix: v.fix } : {}), isMinor: false }, w.passedWhy).catch(() => {})
+    await $.ui.toast(w.letThrough(nameOf(change.file)))
   }
   if (violations.length === 0) return undefined
   for (const v of violations) refusals.set(keyOf(v), tries(v) + 1)
@@ -1124,9 +1251,9 @@ export function checkAfter($: EngineInterface, e: ToolCallEvent, ran: ToolCallDo
 
 // The turn's end waits for the checks of its edits, so what they caught is told to Claude and
 // looked for again before the turn's diff is read.
-export async function endReviewTurn($: EngineInterface, agentId: string | undefined, reason: string) {
+export async function endReviewTurn($: EngineInterface, agentId: string | undefined, reason: string, isOnNow = true) {
   const taken = agentId === undefined ? await takeTurn($).catch(() => undefined) : undefined
-  await settleTurn($, agentId, reason).catch(() => {})
+  await settleTurn($, agentId, reason, isOnNow).catch(() => {})
   if (taken) void afterTurn($, taken).catch(() => {})
 }
 
@@ -1143,6 +1270,7 @@ export async function classicStop($: Parameters<Hook<'classic.Stop'>>[0], e: Par
     return result
   }
   await markTold($, delivered)
+  isStopTold = true
   return { ...result, block: textOf(delivered).join('\n\n') }
 }
 
@@ -1169,7 +1297,8 @@ export async function command($: Parameters<MatchedHook<'command.run', { command
   if (verb.toLowerCase() === 'rules') {
     const found = await ruleFilesFor($, [])
     const running = [...pending.values()].reduce((n, r) => n + r.size, 0)
-    const files = found.length > 0 ? `${w.rulesHere}\n${found.map(f => `  ${f.path}`).join('\n')}` : w.noRulesHere
+    // A file past what the check reads is said so: the rules past the cut are not checked.
+    const files = found.length > 0 ? `${w.rulesHere}\n${found.map(f => `  ${f.path}${f.text.length > RULE_FILE_LIMIT ? ` ${w.rulesCut(f.text.length, RULE_FILE_LIMIT)}` : ''}`).join('\n')}` : w.noRulesHere
     const failed = checksFailed > 0 ? `\n${w.checksFailed(checksFailed)}` : ''
     return { text: `${w.liveHeader(settings.live, settings.liveModel, running)}${failed}\n\n${files}` }
   }
@@ -1499,7 +1628,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               <Button
                 key="seen-file"
                 label={w.markFileSeen}
-                hotkey="s"
+                hotkey="v"
                 onPress={() =>
                   void (async () => {
                     await markSeen($, picked.hunks.map(hunk => hunk.id))

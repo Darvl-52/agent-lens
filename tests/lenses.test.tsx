@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { parseLensReport, sendsOut } from '../hooks/lenses/report'
+import { aliasesOf, isMcpPush, parseLensReport, pushedRefs, sendsOut } from '../hooks/lenses/report'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const REPORT = `Read the branch.
@@ -14,11 +14,13 @@ const REPORT = `Read the branch.
 
 // A repository at /proj on a branch off origin/main, with `files` on its disk and `changed` the
 // files that differ from where it forks.
-const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; changed?: string[]; untracked?: string[]; isRepo?: boolean; noDefault?: boolean; noSpawn?: boolean; clones?: Record<string, string[]>; rootNoBase?: boolean } = {}) => {
+const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; changed?: string[]; untracked?: string[]; isRepo?: boolean; noDefault?: boolean; noSpawn?: boolean; clones?: Record<string, string[]>; rootNoBase?: boolean; autonomy?: 'manual' | 'auto' | 'full'; branches?: Record<string, string>; aliases?: string; reply?: string } = {}) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   mock.env(on, { HOME: '/home/me' })
   const disk = new Map(Object.entries(opts.files ?? {}))
-  const store = new Map<string, unknown>()
+  // What the checks find waits for the person here, as by hand, unless `autonomy` says otherwise.
+  const store = new Map<string, unknown>([['autonomy', opts.autonomy ?? 'manual']])
+  const asked: string[] = []
   const spawned: { prompt: string; model?: string; description: string }[] = []
   const submitted: string[] = []
   const opened: string[] = []
@@ -40,6 +42,11 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (opts.isRepo === false || e.argv[0] !== 'git') return { value: { exitCode: 128, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return ok(`${head}\n`)
+    // A branch named is the one checked out, unless it is one of `branches`.
+    if (args[0] === 'rev-parse' && args[1] === '--verify') return ok(`${opts.branches?.[args[3]!.replace(/\^\{commit\}$/, '')] ?? head}\n`)
+    // The commits come one after another: h1, h2, h3.
+    if (args[0] === 'merge-base' && args[1] === '--is-ancestor') return args[2]! <= args[3]! ? ok('') : { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (args[0] === 'config' && args[1] === '--get-regexp') return ok(opts.aliases ?? '')
     if (args[0] === 'rev-parse') return ok('/proj\n')
     if (args[0] === 'symbolic-ref' && !opts.noDefault && !(opts.rootNoBase && !clone)) return ok('origin/main\n')
     if (args[0] === 'merge-base' && args[2] === 'origin/main' && !opts.noDefault && !(opts.rootNoBase && !clone)) return ok('abc123def4567890\n')
@@ -53,7 +60,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('agent.spawn', ($, e) => (opts.noSpawn ? { deny: 'no agents here' } : (spawned.push({ prompt: e.prompt, model: e.model, description: e.description }), { model: e.model ?? 'sonnet' })))
   on('agent.list', () => ({ value: spawned.map((s, i) => ({ id: `lenses-${i + 1}`, description: s.description, type: 'Explore', status: 'running' as const, spawnedBy: 'agent-lens' })) }))
   on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text }))
-  on('model.complete', () => ({ value: { isAnswered: true as const, text: '{"findings":[]}', usage: USAGE } }))
+  on('model.complete', ($, e) => (asked.push(typeof e.prompt === 'string' ? e.prompt : ''), { value: { isAnswered: true as const, text: opts.reply ?? '{"dropped": []}', usage: USAGE } }))
   on('ui.open', ($, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.toast', ($, e) => (toasts.push(String((e as { text?: unknown }).text ?? '')), { value: undefined }))
   on('ui.render', ($, e) => {
@@ -70,7 +77,14 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
     $.turn.complete({ agentId, answer, durationMs: 1, isAborted: false, turnId: agentId, reason: 'answer', usage: { ...USAGE, model: 'test' } })
   const settle = () => clock.advance(10)
   const commit = (sha: string) => (head = sha)
-  return { clock, spawned, submitted, opened, toasts, changes, agentDone, settle, commit }
+  // A main turn of the prompt `text`, its answer `answer`, with `during` run inside it.
+  const mainTurn = async (text: string, during: () => Promise<unknown> = async () => {}, answer = '') => {
+    await $.turn.start({ text, turnId: text.slice(0, 12) })
+    await during()
+    await $.turn.complete({ answer, durationMs: 1, isAborted: false, turnId: text.slice(0, 12), reason: 'answer', usage: { ...USAGE, model: 'test' } })
+    await clock.advance(10)
+  }
+  return { clock, spawned, submitted, opened, toasts, asked, changes, agentDone, settle, commit, mainTurn }
 }
 
 test('the answer of the review by lenses is read from the JSON it ends with: a lens with findings is one whatever it says', () => {
@@ -113,6 +127,7 @@ test('what the review found shows on the pane and the row, goes to Claude on j, 
   const w = await world($, on)
   await w.changes('lenses')
   await w.agentDone('lenses-1', REPORT)
+  await w.settle()
   const band = await $.ui.mount({
     plugin: 'agent-lens',
     surface: 'terminal',
@@ -129,7 +144,8 @@ test('what the review found shows on the pane and the row, goes to Claude on j, 
   expect(await pane.find({ type: 'Text', text: '  4 new names against src/users.ts' })).toBeDefined()
   await pane.press({ key: 'lenses-send' })
   await pane.unmount()
-  expect(w.submitted.at(-1)).toMatch(/^The review of the branch by lenses found these\.[\s\S]*- 1\. Code not in its layer: src\/orders\.ts:12 — The status is checked in the service \(a second check drifts from the mapper\)\n- outside the lenses: src\/orders\.ts:30/)
+  // Numbered for Claude's answer on each, as every check's points go.
+  expect(w.submitted.at(-1)).toMatch(/^agent-lens: the checks of your work found these\.[\s\S]*#1 src\/orders\.ts:12 — 1\. Code not in its layer: The status is checked in the service \(a second check drifts from the mapper\)\n#2 outside the lenses — src\/orders\.ts:30/)
   expect(w.submitted.at(-1)).not.toMatch(/src\/cart\.ts/)
   expect(await $.prompt.submit({ text: 'Another Claude session sent a message:\n<agent-message from="lenses-1">\n[Subagent hand-back] ...\n</agent-message>', origin: { kind: 'peer' }, isMeta: true, wait: false } as never)).toMatchObject({ drop: 'The branch through lenses' })
 })
@@ -158,6 +174,7 @@ test('an answer with no list fails the review; r reads again, from the base it w
   const w = await world($, on)
   await w.changes('lenses release')
   await w.agentDone('lenses-1', 'I looked, and all is well.')
+  await w.settle()
   const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-lenses', props: {} } as never)
   expect(await pane.find({ type: 'Text', text: '✗ The review by lenses gave no list.' })).toBeDefined()
   await pane.press({ key: 'lenses-again' })
@@ -232,10 +249,16 @@ test('Lenses: auto holds a push of commits the lenses have not read: the review 
   expect(w.spawned).toHaveLength(1)
   await w.agentDone('lenses-1', REPORT)
   await w.settle()
-  expect(w.submitted.at(-1)).toMatch(/^The review of the branch by lenses found these\.[\s\S]*Then push, as you meant to\.$/)
-  // The fixes are a commit of their own: the push it held goes once all the same, not into another round.
-  w.commit('h2')
-  expect((await push($)).deny).toBeUndefined()
+  const findings = w.submitted.at(-1)!
+  expect(findings).toMatch(/^agent-lens: the checks of your work found these\.[\s\S]*Then push, as you meant to\.$/)
+  // The fixes are a commit of their own, made in the turn of the findings: the push goes with them,
+  // not into another round.
+  let pushed: { deny?: string } = {}
+  await w.mainTurn(findings, async () => {
+    w.commit('h2')
+    pushed = await push($)
+  }, '#1 fixed\n#2 fixed')
+  expect(pushed.deny).toBeUndefined()
   // The same commits go again freely, the pull request after the push among them, and spend nothing.
   expect((await push($, 'gh pr create --fill')).deny).toBeUndefined()
   expect((await push($)).deny).toBeUndefined()
@@ -245,14 +268,18 @@ test('Lenses: auto holds a push of commits the lenses have not read: the review 
   expect(w.spawned).toHaveLength(2)
 })
 
-test('Lenses: auto lets a subagent’s push go, and a review gone past its time holds nothing', { options: { lenses: 'auto' } }, async ($, on) => {
+test('Lenses: auto holds a subagent’s push too, its outcome told to the main loop, and a review gone past its time holds nothing', { options: { lenses: 'auto' } }, async ($, on) => {
   const w = await world($, on)
-  expect((await push($, 'git push', 'sub-1')).deny).toBeUndefined()
-  expect(w.spawned).toHaveLength(0)
+  expect((await push($, 'git push', 'sub-1')).deny).toMatch(/^agent-lens reads the work[\s\S]*Do not push: finish your task and say in your answer that the push waits/)
+  expect(w.spawned).toHaveLength(1)
+  await w.agentDone('lenses-1', '{"lenses": [{"lens": "1. Layer", "status": "clean", "checked": "2 files", "findings": []}], "outside": []}')
+  await w.settle()
+  expect(w.submitted.at(-1)).toBe('The review of the work by lenses found nothing. Push now, as you meant to.')
+  w.commit('h2')
   await w.changes('lenses')
   await w.clock.advance(31 * 60_000)
   expect((await push($)).deny).toMatch(/^agent-lens reads the work/)
-  expect(w.spawned).toHaveLength(2)
+  expect(w.spawned).toHaveLength(3)
 })
 
 test('Lenses: auto, a review that finds nothing sends the push on, and one that gave no list holds it no more', { options: { lenses: 'auto' } }, async ($, on) => {
@@ -282,7 +309,7 @@ test('Lenses: auto, where nothing changed there is nothing to read and the push 
   expect(w.spawned).toHaveLength(0)
 })
 
-test('Lenses: auto, the commits a review read are those it started on; a review by hand keeps the pass a held push was given', { options: { lenses: 'auto' } }, async ($, on) => {
+test('Lenses: auto, the commits a review read are those it started on; a review by hand reads them as well as a held one', { options: { lenses: 'auto' } }, async ($, on) => {
   const w = await world($, on)
   await push($)
   // A commit made while the review reads is not among what it read.
@@ -292,10 +319,95 @@ test('Lenses: auto, the commits a review read are those it started on; a review 
   expect((await push($)).deny).toMatch(/^agent-lens reads the work/)
   await w.agentDone('lenses-2', REPORT)
   await w.settle()
-  // A review by hand before the push does not take the pass back.
+  // A commit past the turn of the findings, read by hand before the push: the push goes.
   w.commit('h3')
   await w.changes('lenses')
   await w.agentDone('lenses-3', REPORT)
   await w.settle()
   expect((await push($)).deny).toBeUndefined()
+})
+
+test('a push is found inside a shell handed it as text, past timeout, eval and a git alias, and an MCP server’s push is one', () => {
+  for (const c of [`sh -c 'git push origin main'`, `bash -lc "cd x && git push"`, `eval 'git push'`, 'eval git push', 'timeout 60 git push', 'timeout -s INT 5m git push', `/bin/zsh -c 'gh pr create --fill'`, `bash --login -c 'git push'`, 'sudo -k git push', 'timeout -k 5 60 git push'])
+    expect([c, sendsOut(c)]).toEqual([c, true])
+  for (const c of [`sh -c 'git status'`, `bash -c "echo git push"`, 'timeout 60 git fetch', 'ssh host true', `git commit -m "run sh -c 'git push' later"`])
+    expect([c, sendsOut(c)]).toEqual([c, false])
+  // A heredoc's apostrophe opens no quote: the push after it is still read.
+  for (const c of [`cat > notes.md <<'EOF'\ndon't forget\nEOF\nbash -c 'git push'`, `git commit -F- <<'EOF' && git push\nthe message\nEOF`])
+    expect([c, sendsOut(c)]).toEqual([c, true])
+  const aliases = aliasesOf('alias.pu push -u origin\nalias.ship !git fetch && git push\nalias.st status\n')
+  expect(sendsOut('git pu', aliases)).toBe(true)
+  expect(sendsOut('git ship', aliases)).toBe(true)
+  expect(sendsOut('git st', aliases)).toBe(false)
+  expect(pushedRefs('git push -u origin feature/x')).toEqual(['feature/x'])
+  expect(pushedRefs('git push origin +HEAD:main other:release')).toEqual(['HEAD', 'other'])
+  expect(pushedRefs('git push')).toEqual([])
+  expect(isMcpPush('mcp__github__push_files')).toBe(true)
+  expect(isMcpPush('mcp__gitlab__create_merge_request')).toBe(true)
+  expect(isMcpPush('mcp__github__get_file_contents')).toBe(false)
+})
+
+test('Lenses: auto, a push of a branch not checked out is told to check it out unless read, an MCP push is held, an alias read through', { options: { lenses: 'auto' } }, async ($, on) => {
+  const w = await world($, on, { branches: { release: 'r9', old: 'h0', same: 'h1' }, aliases: 'alias.pu push -u origin\n' })
+  expect((await push($, 'git push origin release')).deny).toMatch(/"release" is not it\. Check out release and push from it/)
+  expect(w.spawned).toHaveLength(0)
+  expect((await push($, 'git pu')).deny).toMatch(/^agent-lens reads the work/)
+  expect(w.spawned).toHaveLength(1)
+  await w.agentDone('lenses-1', '{"lenses": [{"lens": "1. Layer", "status": "clean", "checked": "1 file", "findings": []}], "outside": []}')
+  await w.settle()
+  // A branch whose commit is under the one read goes; one that is not is still told.
+  expect((await push($, 'git push origin old')).deny).toBeUndefined()
+  expect((await push($, 'git push origin same')).deny).toBeUndefined()
+  expect((await push($, 'git push origin release')).deny).toMatch(/"release" is not it/)
+  w.commit('h2')
+  expect(((await $.tool.call({ tool: 'mcp__github__create_pull_request', title: 'x' } as never)) as { deny?: string }).deny).toMatch(/^agent-lens reads the work/)
+})
+
+test('the review is told what was asked, the commits and what was settled, by an agent that reads code; one finding per kind, shown from the code', async ($, on) => {
+  const w = await world($, on)
+  await w.mainTurn('add the order status')
+  await w.changes('lenses')
+  expect(w.spawned[0]!.prompt).toMatch(/What the developer asked the agent in this session[^\n]*\n- add the order status/)
+  expect(w.spawned[0]!.prompt).toMatch(/One finding per kind of mistake, its places listed[\s\S]*a clean lens is worth more than a finding without evidence[\s\S]*No finding, push back on it instead/)
+  expect(w.spawned[0]!.prompt).toMatch(/"evidence": "what you read that shows it, with numbers", "confidence": "confirmed" or "likely"/)
+})
+
+test('a finding not shown from the code gets a second look on its lines: one that does not hold is kept aside, not sent; one shown is not looked at again', async ($, on) => {
+  const report = `{"lenses": [{"lens": "1. Layer", "status": "findings", "checked": "", "findings": [
+    {"file": "src/orders.ts", "line": 2, "problem": "The status is checked in the service", "risk": "drift", "evidence": "line 2 checks status; the mapper checks it too (grep: 2)", "confidence": "confirmed"},
+    {"file": "src/orders.ts", "line": 3, "places": ["src/cart.ts:1"], "problem": "The total may be negative", "risk": "a refund", "confidence": "likely"}
+  ]}], "outside": []}`
+  const w = await world($, on, { files: { '/proj/src/orders.ts': 'a\nif (status) x\ntotal = max(0, t)\n' }, reply: '{"dropped": [{"n": 1, "why": "line 3 clamps the total at 0"}]}' })
+  await w.changes('lenses')
+  await w.agentDone('lenses-1', report)
+  await w.settle()
+  // One look, at the doubtful one only, with its lines and its other place.
+  expect(w.asked).toHaveLength(1)
+  expect(w.asked[0]).toMatch(/^\[1\] The total may be negative \(a refund\)\n=== src\/orders\.ts:3 ===\n1  a\n2  if \(status\) x\n3  total = max\(0, t\)[\s\S]*=== src\/cart\.ts:1 ===\n\(no such file\)/)
+  expect(w.asked[0]).not.toMatch(/checked in the service/)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-lenses', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: '1 finding in 1 lens, against abc123def456' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: 'Not held by a second look on the lines named: 1, not sent' })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: '• src/orders.ts:3 — The total may be negative: line 3 clamps the total at 0' })).toBeUndefined()
+  await pane.press({ key: 'lenses-send' })
+  await pane.unmount()
+  expect(w.submitted.at(-1)).toMatch(/#1 src\/orders\.ts:2 — 1\. Layer: The status is checked in the service/)
+  expect(w.submitted.at(-1)).not.toMatch(/negative/)
+})
+
+test('in auto, the findings go to Claude by themselves, Claude’s answers are counted on the pane, and what it showed false is settled for the next review', async ($, on) => {
+  const w = await world($, on, { autonomy: 'auto' })
+  await w.changes('lenses')
+  await w.agentDone('lenses-1', REPORT)
+  await w.settle()
+  const sent = w.submitted.at(-1)!
+  expect(sent).toMatch(/^agent-lens: the checks of your work found these\.[\s\S]*#1 src\/orders\.ts:12/)
+  await w.mainTurn(sent, async () => {}, '#1 rejected: the mapper only reads it\n#2 fixed')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-lenses', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: 'Of the findings Claude answered, 1 of 2 held (50%).' })).toBeDefined()
+  expect(await pane.find({ key: 'lenses-send' })).toBeUndefined()
+  await pane.unmount()
+  w.commit('h2')
+  await w.changes('lenses')
+  expect(w.spawned[1]!.prompt).toMatch(/Settled already[^\n]*\n- src\/orders\.ts:12 — 1\. Code not in its layer: The status is checked in the service \(a second check drifts from the mapper\) \(the mapper only reads it\)/)
 })

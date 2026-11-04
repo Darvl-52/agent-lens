@@ -3,12 +3,15 @@ import type { EngineInterface, Hook, TurnCompleteReason } from 'claude-code'
 
 import type { Baseline, DocIssue, Finding, Gate, Judge, Run, StepId, StepState, Term, TermCheck, TermVerdict } from '../../types/setup'
 import type { PaneHook, StopNext } from '../core/hooks'
+import { expectTurn, isPerson, isWaiting, type Owner, PERSON, send, turnOwner } from '../core/outbox'
+import { flush, isAutoNow, type Point, toDecide } from '../ledger/ledger'
+import { ownAgent } from '../core/spend'
 import { langIn } from '../core/lang'
 import { WORDS as LENS_WORDS } from '../lenses/words'
 import { below, joinPath, parentOf } from '../review/diff'
 import { diffLines } from '../spec/spec'
 import { baselineOf, CONFIG, DENY, type Exec, fingerprintOf, joinRel, newRed, parseConfig, permissionIssues, runTier, SETTINGS, timingIssues, whereOf } from './checks'
-import { ADR_DIR, type Disk, hasSecurityLine, hasSecurityRules, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, parseTermsInUse, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
+import { ADR_DIR, DOC_FILES, type Disk, hasSecurityLine, hasSecurityRules, hasTaskRules, issuesIn as issuesOf, LIMITS, OLD_GLOSSARIES, parseFindings, parseTermsInUse, pathsIn, readDocs as readDocsOf, termsOf } from './docs'
 import { WORDS } from './words'
 
 // The mod's own lenses by their names in a language, by the names /changes lenses gives them: the
@@ -88,6 +91,16 @@ const CHECKED: Record<StepId, (file: string) => boolean> = {
   config: () => false,
   ci: () => false,
 }
+// Whether `path` is a doc a step of /setup-project writes, edited in that step's turn: the check of
+// each edit lets it be, as the step's own check and the docs agent read it against the code.
+export function isStepDoc(root: string, path: string) {
+  const by = turnOwner()
+  const step = by.from === 'setup' ? STEPS.find(s => s === by.tag) : undefined
+  const rel = below(path, root)
+  if (step === undefined || rel === undefined) return false
+  return WRITES[step].includes(rel) || CHECKED[step](rel) || DOC_FILES.includes(rel) || rel.startsWith(`${ADR_DIR}/`)
+}
+
 // Where a project keeps its CI: a step that adds a job there has nothing to add to where there is none.
 const CI_FILES = ['.gitlab-ci.yml', '.github/workflows', 'azure-pipelines.yml', 'bitbucket-pipelines.yml', '.circleci/config.yml', 'Jenkinsfile']
 // The step each stands on: OpenSpec reads the files only of an openspec/ that is initialised.
@@ -99,9 +112,10 @@ const GATE_ROUNDS = 3
 
 // Whether the main loop is in a turn: a step waits for its end.
 let isMainTurn = false
-// The docs agent's findings sent to Claude, and whether the turn under way is the one they went in:
-// once it ends, they are off the pane.
-let findingsPrompt: string | null = null
+// Whose prompt started the main turn under way: a step is judged by its own turns alone.
+let turnBy: Owner = PERSON
+// Whether the turn under way is the one the docs agent's findings went in: once it ends, they are
+// off the pane.
 let isFindingsTurn = false
 // The tree of each folder the fast checks run in, and its commit, by the folder.
 type Trees = Record<string, { head: string; tree: string }>
@@ -111,8 +125,11 @@ type GateChain = { rounds: number; last: Trees | null }
 // What the gate knows of the main turn: its trees as it found them, the files it edited through a
 // tool, how many of those its last run had seen, its chain, and which turn of the session it is.
 // It runs only where the turn changed something.
-type GateTurn = { before: Promise<Trees>; edited: string[]; seen: number; chain: GateChain; generation: number }
+// A turn of another part's prompt the engine ran before the gate's is aside: it goes on with the
+// gate's chain where it changed something, and answers nothing for the gate where it did not.
+type GateTurn = { before: Promise<Trees>; edited: string[]; seen: number; chain: GateChain; generation: number; isAside: boolean }
 let gateTurn: GateTurn | null = null
+// The person's turns started this session: a red of a turn the person moved on from is not sent.
 let generation = 0
 // Whether a classic Stop saw this turn's end: where none runs, the gate goes as a prompt instead,
 // and the turn that prompt starts, told by its text, goes on with its chain. A prompt of the
@@ -332,16 +349,40 @@ async function checkTerms($: EngineInterface) {
   await askTerms($)
 }
 
-// The terms neither git nor the docs agent found, put to the person.
+// The terms neither git nor the docs agent found, put to the person; unless the checks' findings go
+// to Claude by themselves: then a term the agent found nowhere goes to Claude to take out, and only
+// one the agent could not look at is the person's.
 async function askTerms($: EngineInterface) {
   const known = await verdictsIn($, await $.session.root())
+  const isAuto = isAutoNow()
   // Not found by the agent, or not looked at by it, and not answered in use or put off.
   const isAsked = (t: Term) => {
     const verdict = known[termKey(t)]?.verdict
-    return (verdict === 'unused' || (verdict === undefined && unjudged.has(termKey(t)))) && !later.has(termKey(t))
+    return ((verdict === 'unused' && !isAuto) || (verdict === undefined && unjudged.has(termKey(t)))) && !later.has(termKey(t))
   }
   const questions = unfound.filter(isAsked)
   await update($, questionsAtom, () => (questions.length > 0 ? questions : null))
+  if (isAuto) await flush($).catch(() => {})
+}
+
+// The terms the docs agent found nowhere, as the ledger takes them to Claude to take out.
+export async function termsPoints($: EngineInterface): Promise<Point[]> {
+  const known = await verdictsIn($, await $.session.root())
+  const w = await wordsIn($)
+  return unfound
+    .filter(t => known[termKey(t)]?.verdict === 'unused' && !later.has(termKey(t)))
+    .map(t => ({ id: termKey(t), where: t.file, text: w.termPoint(t), isMinor: false }))
+}
+
+// Sent to Claude: not asked again this session.
+export async function termsTaken($: EngineInterface, ids: readonly string[]) {
+  for (const id of ids) later.add(id)
+}
+
+// Claude says the term is in use, and the person agrees: it is kept for good.
+export async function termsAside($: EngineInterface, ids: readonly string[]) {
+  const at = await $.clock.now()
+  await keepVerdicts($, await $.session.root(), Object.fromEntries(ids.map(id => [id, { verdict: 'kept' as const, at }])))
 }
 
 // The person's word on the term asked: in use, kept for good; out, which Claude takes out of the
@@ -365,7 +406,7 @@ async function answerOnce($: EngineInterface, term: Term, answer: 'kept' | 'drop
   if (answer === 'kept') await keepVerdicts($, root, { [key]: { verdict: 'kept', at: await $.clock.now() } })
   else if (answer === 'later') later.add(key)
   else {
-    const r = await $.prompt.submit({ text: (await wordsIn($)).termDropPrompt(term), asUser: true }).catch(() => undefined)
+    const r = await send($, { from: 'setup', tag: 'terms' }, (await wordsIn($)).termDropPrompt(term)).catch(() => undefined)
     if (!r || r.drop !== undefined) return
     later.add(key)
   }
@@ -517,22 +558,26 @@ async function advance($: EngineInterface) {
   const found = await preflight($, run.root)
   if (step === 'matt') {
     const command = found.setupCommand ?? `${MATT}:setup-matt-pocock-skills`
-    // In the mod's language, which the skill does not know of.
+    // In the mod's language, which the skill does not know of. Run as if typed, the turn it starts is the step's.
+    const untake = expectTurn({ from: 'setup', tag: step })
     const ran = await $.command.run({ command, ...(w.speak ? { args: w.speak } : {}) }).then(
       () => true,
       () => false,
     )
-    if (!ran) await changeStep($, step, { status: 'failed', error: `/${command}` })
+    if (!ran) {
+      untake()
+      await changeStep($, step, { status: 'failed', error: `/${command}` })
+    }
     return
   }
   const text = w.prompts[step](STEPS.indexOf(step) + 1, { skills: found.skills, hasOpenspec: found.openspec !== null, ci: found.ci, deny: DENY, lenses: lensTitles(await langIn($)) })
-  const r = await $.prompt.submit({ text, asUser: true })
+  const r = await send($, { from: 'setup', tag: step }, text)
   if (r.drop !== undefined) await changeStep($, step, { status: 'failed', error: r.drop })
 }
 
 // A main turn ended with an answer: the step with Claude is done once its files are there and pass
 // the check; where they fail, what failed goes back once, then it waits for the person.
-async function afterTurn($: EngineInterface) {
+async function afterTurn($: EngineInterface, by: Owner) {
   await lookForTaskRules($).catch(() => {})
   // What was found stale, looked for again: the turn may have settled it.
   if (drift.length > 0 || unfound.length > 0) {
@@ -540,14 +585,22 @@ async function afterTurn($: EngineInterface) {
     if (found) await keepDrift($, found)
   }
   const issues = await checkProject($)
-  await settleStep($, issues)
+  await settleStep($, issues, by)
   await startJudge($).catch(() => {})
 }
 
-async function settleStep($: EngineInterface, issues: DocIssue[] | null) {
+// Only by a turn of the step's own prompt, or one of the person's once none of the step's waits (the
+// person answering what the step asked): another part's prompt that ran first answers nothing of it.
+// A step stopped on its check waits for the person, whatever turns go meanwhile.
+async function settleStep($: EngineInterface, issues: DocIssue[] | null, by: Owner) {
   const run = await read($, runAtom)
   const step = run?.current
-  if (!run || !step || run.steps[step].status !== 'sent') return void (await advance($))
+  if (!run || !step) return void (await advance($))
+  const { status } = run.steps[step]
+  if (status === 'failed') return
+  if (status !== 'sent') return void (await advance($))
+  const isOwn = (by.from === 'setup' && by.tag === step) || (isPerson(by) && !isWaiting('setup', step))
+  if (!isOwn) return
   // The security rules written with no line to them go back for it, as files out of their form do.
   const isAnswered = step === 'existing' || step === 'lenses' || (step === 'security' ? await hasSecuritySection($, run.root) : await isWritten($, run.root, step))
   if (!isAnswered) return
@@ -576,24 +629,31 @@ async function sendFix($: EngineInterface, step: StepId, failing: DocIssue[]) {
   const w = await wordsIn($)
   // Only to the current step: one skipped meanwhile has nothing to fix.
   if (!(await changeRun($, now => (now.current === step ? setStep(now, step, { status: 'sent', isFixSent: true }) : undefined)))) return
-  const r = await $.prompt.submit({ text: w.prompts.fix(w.steps[step], failing), asUser: true })
+  const r = await send($, { from: 'setup', tag: step }, w.prompts.fix(w.steps[step], failing))
   if (r.drop !== undefined) await changeStep($, step, { status: 'failed', error: r.drop })
 }
 
-export function startSetupTurn($: EngineInterface, text: string) {
+export function startSetupTurn($: EngineInterface) {
   isMainTurn = true
-  isFindingsTurn = findingsPrompt !== null && text.includes(findingsPrompt.slice(0, 200))
-  if (isFindingsTurn) findingsPrompt = null
+  fastBefore = fastNow($).catch(() => undefined)
+  const by = turnOwner()
+  turnBy = by
+  isFindingsTurn = by.from === 'setup' && by.tag === 'findings'
   turnBefore = watched($).catch(() => ({}))
-  generation += 1
-  const chain = gatePrompt && text.includes(gatePrompt.text.slice(0, 200)) ? gatePrompt.chain : { rounds: 0, last: null }
-  gatePrompt = null
-  gateTurn = { before: treesNow($).catch(() => ({})), edited: [], seen: 0, chain, generation }
+  if (isPerson(by)) generation += 1
+  const isGateTurn = by.from === 'setup' && by.tag === 'gate'
+  const isAside = !isPerson(by) && !isGateTurn && gatePrompt !== null
+  const chain = (isGateTurn || isAside) && gatePrompt ? gatePrompt.chain : { rounds: 0, last: null }
+  if (!isAside) gatePrompt = null
+  gateTurn = { before: treesNow($).catch(() => ({})), edited: [], seen: 0, chain, generation, isAside }
   isStopSeen = false
 }
 
-export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason) {
+// A main turn ended. With the setup turned off since it started, nothing is sent from its end: it is
+// only let go. A step's own turn stopped before its answer waits for the person.
+export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason, isOnNow = true) {
   isMainTurn = false
+  const by = turnBy
   if (isFindingsTurn) {
     isFindingsTurn = false
     // A docs agent started again meanwhile keeps its own.
@@ -602,16 +662,47 @@ export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason) {
   // Taken now: the next turn may start, and take its own, while this one's gate runs.
   const turn = gateTurn
   gateTurn = null
-  if (reason === 'answer') {
+  if (!isOnNow) turnBefore = null
+  else if (reason === 'answer') {
     if (!isStopSeen) void gateAfterTurn($, turn).catch(() => {})
-    void afterTurn($).catch(() => {})
-  } else turnBefore = null
+    void afterTurn($, by).catch(() => {})
+  } else {
+    turnBefore = null
+    void stopStep($, by).catch(() => {})
+  }
+}
+
+async function stopStep($: EngineInterface, by: Owner) {
+  const step = by.from === 'setup' ? STEPS.find(s => s === by.tag) : undefined
+  if (!step) return
+  const { stepStopped } = await wordsIn($)
+  await changeRun($, now => (now.current === step && now.steps[step].status === 'sent' ? setStep(now, step, { status: 'failed', error: stepStopped }) : undefined))
 }
 
 // An edit to one of the files is checked beside the turn; any edit is a change the gate looks at.
 export function afterSetupEdit($: EngineInterface, path: string) {
   gateTurn?.edited.push(path)
   if (DOC_PATH.test(path)) void checkProject($).catch(() => {})
+  if (/(?:^|[\\/])\.claude[\\/]agent-lens\.json$/.test(path)) void askOnFast($).catch(() => {})
+}
+
+// The fast checks as the turn found them: the agent taking one out, or changing it, is the person's
+// call, as the gate holds the agent to them. The step of the checks writes them, and is let be.
+let fastBefore: Promise<string[] | undefined> = Promise.resolve(undefined)
+async function fastNow($: EngineInterface) {
+  const fast = (await configIn($, await $.session.root()))?.checks?.fast
+  return fast ? Object.entries(fast).flatMap(([folder, list]) => list.map(c => (folder === '.' ? c : `${folder}: ${c}`))) : undefined
+}
+async function askOnFast($: EngineInterface) {
+  const by = turnOwner()
+  if (by.from === 'setup' && (by.tag === 'checks' || by.tag === 'run')) return
+  const was = await fastBefore
+  if (!was) return
+  const now = (await fastNow($)) ?? []
+  const gone = was.filter(c => !now.includes(c))
+  if (gone.length === 0) return
+  const w = await wordsIn($)
+  await toDecide($, 'rules', { id: `fast:${gone.join('\n')}`, where: CONFIG, text: w.fastGone(gone), isMinor: false }, w.fastGoneWhy)
 }
 
 // The tree of each folder the fast checks run in, by the folder.
@@ -645,7 +736,9 @@ async function runGate($: EngineInterface, turn: GateTurn | null) {
   const isEdited = turn.edited.slice(turn.seen).some(p => below(p, root) !== undefined)
   turn.seen = turn.edited.length
   const w = await wordsIn($)
-  if (!isEdited && Object.keys(now).every(f => since[f]?.tree === now[f]?.tree)) {
+  const isSame = !isEdited && Object.keys(now).every(f => since[f]?.tree === now[f]?.tree)
+  if (isSame && turn.isAside) return undefined
+  if (isSame) {
     if (!isContinued) return undefined
     await update($, gateAtom, (g): Gate => ({ status: 'answered', rounds: chain.rounds, failures: g?.failures ?? [] }))
     chain.rounds = 0
@@ -653,7 +746,7 @@ async function runGate($: EngineInterface, turn: GateTurn | null) {
     return undefined
   }
   chain.last = now
-  const { failures } = await runTier(execOf($), root, fast, { isFast: true, now: () => $.clock.now() })
+  const { failures } = await runTier(execOf($), root, fast, { isFast: true, now: () => $.clock.now(), since: headsOf(await turn.before) })
   if (failures.length === 0) {
     chain.rounds = 0
     await update($, gateAtom, (): Gate => ({ status: 'green', rounds: 0, failures: [] }))
@@ -699,8 +792,10 @@ async function gateAfterTurn($: EngineInterface, turn: GateTurn | null) {
   // Not where the person started a turn while the checks ran: that turn's end is checked in its turn,
   // and the row does not say this red went back.
   if (turn.generation !== generation) return void (await update($, gateAtom, () => null))
+  // Its prompt sent already waits for its turn, which goes on with this chain.
+  if (isWaiting('setup', 'gate')) return
   gatePrompt = { text, chain: turn.chain }
-  const r = await $.prompt.submit({ text, asUser: true })
+  const r = await send($, { from: 'setup', tag: 'gate' }, text)
   if (r.drop !== undefined) gatePrompt = null
 }
 
@@ -717,6 +812,9 @@ const lineCount = (text: string) => text.trimEnd().split('\n').length
 
 // A step with Claude: the run goes on. One stopped on a failed check, waiting for the person, does not.
 const isRunning = (run: Run | null) => run !== null && STEPS.some(s => run.steps[s].status === 'sent')
+// A run whose own step of OpenSpec's config is still to come, or a step with Claude: the row does
+// not offer the rule of the tasks beside it.
+const isUnderway = (run: Run | null) => run !== null && (isRunning(run) || ['waiting', 'sent', 'failed'].includes(run.steps.config.status))
 
 const clipped = (text: string) => (text.length > EDIT_LIMIT ? `${text.slice(0, EDIT_LIMIT)}\n[... ${text.length - EDIT_LIMIT} more characters]` : text)
 
@@ -769,8 +867,24 @@ async function spawnAgent($: EngineInterface, prompt: string, task: string, mode
   const spawned = await $.agent.spawn({ prompt, description: task, subagentType: 'Explore', model }).catch(() => undefined)
   const agentId =
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
-  if (agentId) judges.add(agentId)
+  if (agentId) {
+    judges.add(agentId)
+    ownAgent(agentId, 'setup')
+    await keepJudge($, agentId).catch(() => {})
+  }
   return agentId
+}
+
+// The docs agents' ids, kept past a reload of the module: a report of one started before it is
+// still told as the docs agent's.
+const JUDGES_KEY = 'setup:judges'
+const JUDGES_KEPT = 20
+async function keptJudges($: EngineInterface) {
+  const kept = await $.store.get(JUDGES_KEY).catch(() => undefined)
+  return Array.isArray(kept) ? kept.filter((id): id is string => typeof id === 'string') : []
+}
+async function keepJudge($: EngineInterface, agentId: string) {
+  await $.store.set(JUDGES_KEY, [...(await keptJudges($)), agentId].slice(-JUDGES_KEPT))
 }
 
 // A subagent's run ended: the docs agent's, its findings are read, or its word on the terms kept.
@@ -782,6 +896,23 @@ export async function endSetupAgent($: EngineInterface, agentId: string, answer:
   const findings = parseFindings(answer)
   await update($, judgeAtom, (): Judge => ({ ...judge, status: findings ? 'done' : 'failed', findings: findings ?? [] }))
   if (findings && findings.some(f => !f.isMinor)) await $.ui.toast((await wordsIn($)).band(findings.filter(f => !f.isMinor).length))
+  if (findings && findings.length > 0) await flush($).catch(() => {})
+}
+
+// The docs agent's findings not yet sent, for the ledger to take to Claude: its blockers hold.
+export async function docsPoints($: EngineInterface): Promise<Point[]> {
+  const judge = await read($, judgeAtom)
+  if (judge?.status !== 'done' || judge.isSent) return []
+  return judge.findings.flatMap((f, i) => (f.isTaken ? [] : [{ id: `${judge.at}:${i}`, where: f.file, text: f.text, ...(f.fix ? { fix: f.fix } : {}), isMinor: f.isMinor === true }]))
+}
+
+// Taken to Claude, or put aside by the person: off the list, as sent ones are.
+export async function docsTaken($: EngineInterface, ids: readonly string[]) {
+  await update($, judgeAtom, judge => {
+    if (judge?.status !== 'done') return judge
+    const findings = judge.findings.map((f, i): Finding => (ids.includes(`${judge.at}:${i}`) ? { ...f, isTaken: true } : f))
+    return { ...judge, findings, ...(findings.every(f => f.isTaken) ? { isSent: true as const } : {}) }
+  })
 }
 
 // The docs agent's word on the terms, matched whatever its spelling of them: a term it left out of
@@ -805,20 +936,17 @@ export async function judgeReport($: EngineInterface, text: string) {
   const terms = (await read($, termsAtom))?.agentId
   if (terms && text.includes(terms)) return (await wordsIn($)).termsTitle
   const kept = (await read($, judgeAtom))?.agentId
-  return [...judges, ...(kept ? [kept] : [])].some(id => text.includes(id)) ? (await wordsIn($)).judgeTitle : undefined
+  const ids = [...judges, ...(kept ? [kept] : []), ...(await keptJudges($).catch(() => []))]
+  return ids.some(id => text.includes(id)) ? (await wordsIn($)).judgeTitle : undefined
 }
 
 async function sendFindings($: EngineInterface) {
   const judge = await read($, judgeAtom)
-  if (!judge || judge.status !== 'done' || judge.isSent || judge.findings.length === 0) return
+  const left = judge?.findings.filter(f => !f.isTaken) ?? []
+  if (!judge || judge.status !== 'done' || judge.isSent || left.length === 0) return
   await update($, judgeAtom, () => ({ ...judge, isSent: true as const }))
-  const text = (await wordsIn($)).judgeFix(judge.findings)
-  findingsPrompt = text
-  const r = await $.prompt.submit({ text, asUser: true })
-  if (r.drop !== undefined) {
-    findingsPrompt = null
-    await update($, judgeAtom, () => judge)
-  }
+  const r = await send($, { from: 'setup', tag: 'findings' }, (await wordsIn($)).judgeFix(left))
+  if (r.drop !== undefined) await update($, judgeAtom, () => judge)
 }
 
 export async function registerSetup($: EngineInterface) {
@@ -857,7 +985,7 @@ async function lookForTaskRules($: EngineInterface) {
   const isMissing = config !== undefined && config.trim() !== '' && !hasTaskRules(config)
   if (!isMissing && rulesSentIn === root) rulesSentIn = null
   const isDismissed = (await $.store.get(rulesDismissedKey(root)).catch(() => undefined)) === true
-  const isOffered = isMissing && !isDismissed && rulesSentIn !== root && !isRunning(await read($, runAtom))
+  const isOffered = isMissing && !isDismissed && rulesSentIn !== root && !isUnderway(await read($, runAtom))
   await update($, rulesOfferAtom, () => (isOffered ? {} : null))
 }
 
@@ -866,9 +994,9 @@ export async function rulesLine($: EngineInterface) {
 }
 
 export async function addTaskRules($: EngineInterface) {
-  if (!(await read($, rulesOfferAtom)) || isRunning(await read($, runAtom))) return
+  if (!(await read($, rulesOfferAtom)) || isUnderway(await read($, runAtom))) return
   const lang = await langIn($)
-  const r = await $.prompt.submit({ text: WORDS[lang].rulesPrompt(lensTitles(lang)), asUser: true })
+  const r = await send($, { from: 'setup', tag: 'rules' }, WORDS[lang].rulesPrompt(lensTitles(lang)))
   if (r.drop !== undefined) return
   rulesSentIn = await $.session.root()
   await update($, rulesOfferAtom, () => null)
@@ -971,12 +1099,17 @@ export async function retroLine($: EngineInterface) {
 export async function setupLine($: EngineInterface) {
   const issues = (await read($, issuesAtom)) ?? []
   const judge = await read($, judgeAtom)
-  const blockers = judge?.status === 'done' && !judge.isSent ? judge.findings.filter(f => !f.isMinor).length : 0
+  const blockers = judge?.status === 'done' && !judge.isSent ? judge.findings.filter(f => !f.isMinor && !f.isTaken).length : 0
   const n = issues.length + blockers
   const w = await wordsIn($)
   const gate = await read($, gateAtom)
   const asked = (await read($, questionsAtom))?.length ?? 0
-  const parts = [...(n > 0 ? [w.band(n)] : []), ...(asked > 0 ? [w.termsBand(asked)] : []), ...(gate && (gate.status === 'red' || gate.status === 'released' || gate.status === 'answered') ? [w.gateBand(gate.failures.length)] : [])]
+  const run = await read($, runAtom)
+  const stopped = run?.current && run.steps[run.current].status === 'failed' ? [w.stepBand(STEPS.indexOf(run.current) + 1)] : []
+  // A config the gate cannot read holds the agent to nothing: said, not left off quietly.
+  const config = await readRel($, await $.session.root(), CONFIG).catch(() => undefined)
+  const broken = config === undefined || config.trim() === '' ? undefined : parseConfig(config).issues.find(i => i.kind === 'checks-shape' && /^(not JSON|not a JSON object|checks)/.test(i.detail ?? ''))
+  const parts = [...(broken ? [w.gateOff(broken.detail ?? '')] : []), ...stopped, ...(n > 0 ? [w.band(n)] : []), ...(asked > 0 ? [w.termsBand(asked)] : []), ...(gate && (gate.status === 'red' || gate.status === 'released' || gate.status === 'answered') ? [w.gateBand(gate.failures.length)] : [])]
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
@@ -1013,6 +1146,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
     await changeRun($, now => ({ ...setStep(now, step, { status: 'skipped' }), current: null }))
     await advance($)
   })
+  // A step not sent yet, left out ahead of its turn: the one with Claude stays the current.
+  const skipAhead = (step: StepId) => act(() => changeRun($, now => (now.steps[step].status === 'waiting' && now.current !== step ? setStep(now, step, { status: 'skipped' }) : undefined)))
   const again = (step: StepId) => act(async () => {
     await changeRun($, now => ({ ...setStep(now, step, { status: 'waiting' }), current: null }))
     await advance($)
@@ -1051,7 +1186,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const commitDone = () => changeRun($, now => (now.isCommitDone ? undefined : { ...now, isCommitDone: true }))
   const commit = act(async () => {
     if (!(await commitDone())) return
-    const r = await $.prompt.submit({ text: w.commitPrompt, asUser: true })
+    const r = await send($, { from: 'setup', tag: 'commit' }, w.commitPrompt)
     if (r.drop !== undefined) await changeRun($, ({ isCommitDone: _, ...now }) => now)
   })
   const fix = (step: StepId) => act(async () => {
@@ -1071,8 +1206,9 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
                 <Box flexDirection="row" gap={1}>
                   <Text color={color}>{mark}</Text>
                   <Text bold={step === current}>{`${i + 1}. ${w.steps[step]}`}</Text>
-                  <Text dimColor>{`· ${w.status[s.status]}${s.isFixSent && s.status === 'sent' ? ` · ${w.fixSent}` : ''}`}</Text>
+                  <Text dimColor>{`· ${w.status[s.status]}${s.isFixSent && s.status === 'sent' ? ` · ${w.fixSent}` : ''}${s.status === 'waiting' && w.costs[step] ? ` · ${w.costs[step]}` : ''}`}</Text>
                   {isRerunnable(s, step) ? <Button key={`setup-rerun-${step}`} label={w.rerun} plain dimColor onPress={rerun(step)} /> : null}
+                  {s.status === 'waiting' && step !== current ? <Button key={`setup-skip-${step}`} label={w.skip} plain dimColor onPress={skipAhead(step)} /> : null}
                 </Box>
                 {s.error ? (
                   <Text color="error" wrap="wrap">
@@ -1095,7 +1231,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Box flexDirection="row" gap={1}>
           {isIdle && hasWaiting ? keyed('setup-next', w.next, 'n', act(() => advance($)), true) : null}
           {current && state?.status === 'failed' ? keyed('setup-fix', w.fix, 'f', fix(current), true) : null}
-          {current && state && state.status !== 'done' && state.status !== 'skipped' ? keyed('setup-again', w.again, 'a', again(current)) : null}
+          {current && state && state.status !== 'done' && state.status !== 'skipped' ? keyed('setup-again', w.again, 'w', again(current)) : null}
           {current && state && state.status !== 'done' && state.status !== 'skipped' ? keyed('setup-skip', w.skip, 's', skip(current)) : null}
         </Box>
       ) : null}
@@ -1115,7 +1251,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Box flexDirection="column">
           <Box flexDirection="row" gap={1}>
             <Text bold>{w.judgeTitle}</Text>
-            {judge.status === 'done' && judge.findings.length > 0 && !judge.isSent ? keyed('setup-judge-send', w.judgeSend(judge.findings.length), 'j', act(() => sendFindings($)), true) : null}
+            {judge.status === 'done' && judge.findings.some(f => !f.isTaken) && !judge.isSent ? keyed('setup-judge-send', w.judgeSend(judge.findings.filter(f => !f.isTaken).length), 'j', act(() => sendFindings($)), true) : null}
             {judge.isSent ? <Text dimColor>{`→ ${w.judgeSent}`}</Text> : null}
           </Box>
           {judge.status === 'running' ? (
@@ -1125,7 +1261,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           ) : judge.findings.length === 0 ? (
             <Text color="success">{`✓ ${w.judgeNone}`}</Text>
           ) : judge.isSent ? null : (
-            judge.findings.map((f: Finding, i) => (
+            judge.findings.filter(f => !f.isTaken).map((f: Finding, i) => (
               <Box key={`finding-${i}`} flexDirection="column" paddingLeft={2}>
                 <Text color={f.isMinor ? undefined : 'warning'} wrap="wrap">{`• ${f.file}: ${f.text}${f.isMinor ? ` (${w.minor})` : ''}`}</Text>
                 {f.fix ? <Text dimColor wrap="wrap">{`  → ${f.fix}`}</Text> : null}
@@ -1145,7 +1281,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
               </Text>
               <Box flexDirection="row" gap={1}>
                 {keyed('setup-term-kept', w.termKept, 'u', act(() => answerTerm($, questions[0]!, 'kept')), true)}
-                {keyed('setup-term-drop', w.termDrop, 'r', act(() => answerTerm($, questions[0]!, 'drop')))}
+                {keyed('setup-term-drop', w.termDrop, 'x', act(() => answerTerm($, questions[0]!, 'drop')))}
                 {keyed('setup-term-later', w.termLater, 'l', act(() => answerTerm($, questions[0]!, 'later')))}
                 {questions.length > 1 ? <Text dimColor>{w.termsMore(questions.length - 1)}</Text> : null}
               </Box>

@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { stuckOf } from '../hooks/guard/guard'
+import { spanned, stuckOf } from '../hooks/guard/guard'
+import { loosens } from '../hooks/parts/parts'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const BAND = {
@@ -177,4 +178,49 @@ test('each subagent has its own count, shown by its task; the guard turned off h
   for (let i = 0; i < 6; i++) expect(await w.grep('same')).toMatchObject({ text: 'Grep ran' })
   expect((await w.changes('guard nonsense')).text).toMatch(/^Usage: \/changes guard on/)
   expect((await w.changes('guard on')).text).toMatch(/^The guard is on\. Past 30 min or 2 tool calls/)
+})
+
+test('subagents side by side take their time once, not once each', () => {
+  expect(spanned([[0, 40], [0, 40]])).toBe(40)
+  expect(spanned([[0, 40], [30, 50], [60, 70]])).toBe(60)
+  expect(spanned([])).toBe(0)
+})
+
+test('a call retried under another name or pace is the same call; a command that polls is no loop', async ($, on) => {
+  const w = await world($, on)
+  await w.start()
+  for (let i = 0; i < 3; i++) await $.tool.call({ tool: 'Bash', command: 'npm test', description: `try ${i}`, timeout: 1000 * (i + 1) } as never)
+  expect(await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'once more' } as never)).toMatchObject({ deny: expect.stringMatching(/same call with the same input/) })
+  for (let i = 0; i < 6; i++) expect(await $.tool.call({ tool: 'Bash', command: 'sleep 30 && gh pr checks 12' } as never)).toMatchObject({ text: 'Bash ran' })
+  for (let i = 0; i < 6; i++) expect(await $.tool.call({ tool: 'Bash', command: 'until curl -sf localhost:3000/health; do sleep 2; done' } as never)).toMatchObject({ text: 'Bash ran' })
+  for (let i = 0; i < 6; i++) expect(await $.tool.call({ tool: 'Bash', command: 'cd app && while true\ndo\n  GH_PAGER= gh run view 7 | tail -3\n  sleep 20\ndone' } as never)).toMatchObject({ text: 'Bash ran' })
+  // A wait before the same work is the work again.
+  for (let i = 0; i < 3; i++) await $.tool.call({ tool: 'Bash', command: 'sleep 5 && npm run build' } as never)
+  expect(await $.tool.call({ tool: 'Bash', command: 'sleep 5 && npm run build' } as never)).toMatchObject({ deny: expect.stringMatching(/same call with the same input/) })
+})
+
+test('a subagent continued by a message goes on with its count', async ($, on) => {
+  const w = await world($, on)
+  await w.changes('guard 60 4')
+  await w.start('worker-1')
+  for (const p of ['a', 'b', 'c']) await w.grep(p, 'worker-1')
+  await w.end('worker-1')
+  await w.start('worker-1')
+  expect(await w.grep('d', 'worker-1')).toMatchObject({ text: 'Grep ran' })
+  expect(await w.grep('e', 'worker-1')).toMatchObject({ deny: expect.any(String) })
+})
+
+test('the guard is turned off only by the person: the same command from the model or a plugin changes nothing', async ($, on) => {
+  const w = await world($, on)
+  const run = (kind: string) => $.command.run({ command: 'changes', args: 'guard off', origin: { kind } as never, presentation: { isFullscreen: false, columns: 100 } })
+  expect((await run('unclassified')).text).toBe('Only you can change this: a command the agent or another plugin ran does not loosen the checks.')
+  expect((await run('plugin')).text).toMatch(/^Only you can change this/)
+  expect(w.store.get('guard')).toBeUndefined()
+  expect((await run('composer')).text).toMatch(/off/i)
+  expect(w.store.get('guard')).toMatchObject({ isOn: false })
+})
+
+test('what loosens a check: the guard and the critic set, the baseline kept, the router changed or off', () => {
+  for (const [command, args] of [['changes', 'guard off'], ['spec', 'critic off'], ['setup-project', 'baseline'], ['router', 'rm x'], ['router', 'off']] as const) expect([command, args, loosens(command, args)]).toEqual([command, args, true])
+  for (const [command, args] of [['changes', 'guard'], ['spec', 'critic'], ['router', 'list'], ['router', 'auto'], ['setup-project', 'check']] as const) expect([command, args, loosens(command, args)]).toEqual([command, args, false])
 })

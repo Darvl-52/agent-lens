@@ -1,15 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions } from 'claude-code'
 
-import type { LensReview } from '../../types'
+import type { LensFinding, LensReview } from '../../types'
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { ownerNow, send } from '../core/outbox'
 import { nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
+import { acceptanceOf, flush, isAutoNow, type Point, sendPoints, settledPoints } from '../ledger/ledger'
+import { ownAgent, spendOn } from '../core/spend'
 import { isOn } from '../parts/parts'
 import { below, joinPath } from '../review/diff'
-import { parseLensReport, sendsOut } from './report'
-import { type Catalog, type RepoChanges, WORDS } from './words'
+import { sessionRequests } from '../review/review'
+import { specInView } from '../spec/lens'
+import { aliasesOf, parseLensReport, pushedRefs, sendsOut } from './report'
+import { type Catalog, type LensContext, type RepoChanges, WORDS } from './words'
 
 // The review of the branch by lenses: the kinds of mistake reviews catch, each looked for across the
 // whole change by an agent that made none of it, its findings shown and sent to Claude on the
@@ -26,10 +31,10 @@ const offeredKey = (root: string) => `lenses:offered:${root}`
 // for that read may go once whatever came after it: in `auto` a push of other commits waits for
 // them. Kept across sessions, as the work is.
 const reviewedKey = (root: string) => `lenses:reviewed:${root}`
-type Reviewed = { heads: string; passUntil?: number }
-// How long a push held for the review may go once past the fixes its findings bring: the turn or two
-// that settles them, not the work of the days after.
-const PASS_MS = 2 * 60 * 60_000
+type Reviewed = { heads: string }
+// The turn of the findings a held push waits on: the fixes it commits go out with the push, as
+// commits after those read; past that turn, new commits are read first.
+const PUSH_TAG = 'lenses-push'
 export const PANE = 'agent-lens-lenses'
 // The project's lenses, and the person's, beside the mod's own.
 const LENSES = 'LENSES.md'
@@ -40,8 +45,15 @@ const STALE_MS = 30 * 60_000
 const CATALOG_LIMIT = 20_000
 const FILES_LIMIT = 200
 // The model that reads the branch through the lenses: a look this wide wants more than the haiku of
-// each edit, as the docs agent does.
+// each edit, as the docs agent does; it reads code, so a general agent, not one that skims.
 const MODEL = 'sonnet'
+const AGENT_TYPE = 'general-purpose'
+// The second look at the findings not shown from the code: the small model, on the lines named.
+const CHECK_MODEL = 'haiku'
+const CHECK_LINES = 12
+const CHECK_LIMIT = 40_000
+// How much of the session the review is told of.
+const CONTEXT_ITEMS = 30
 // Where the branch most likely forks from, where the remote names no default.
 const BASES = ['main', 'master', 'develop', 'trunk']
 
@@ -92,7 +104,8 @@ type Looked = { folder: string; isAsked: boolean } & ({ read?: undefined } | { r
 const labelOf = (base: string, folder: string) => (folder === '.' ? base : `${base} (${folder})`)
 
 const lines = (out: string | null) => (out ?? '').split('\n').map(s => s.trim()).filter(Boolean)
-const countOf = (review: Pick<LensReview, 'results' | 'outside'>) => review.results.reduce((n, r) => n + r.findings.length, 0) + review.outside.length
+const countOf = (review: Pick<LensReview, 'results' | 'outside'>) => review.results.reduce((n, r) => n + r.findings.filter(f => !f.dropped).length, 0) + review.outside.length
+const placeText = (p: { file: string; line?: number }) => `${p.file}${p.line ? `:${p.line}` : ''}`
 
 // What the review reads beside the mod's own lenses: the project's file, and the person's where
 // they turned it on.
@@ -139,7 +152,7 @@ export async function lensesCommand($: EngineInterface, args: string) {
     await update($, reviewAtom, cur => (isOurs(cur) ? was : cur))
     if (pushFor === STARTING) {
       pushFor = null
-      await $.prompt.submit({ text: w.pushFree, asUser: true })
+      await send($, { from: 'lenses' }, w.pushFree)
     }
     return { text }
   }
@@ -172,12 +185,13 @@ export async function lensesCommand($: EngineInterface, args: string) {
   if (found.length === 0) return stop(w.nothing(based.map(l => l.label).join(', ')))
   const base = found.map(l => l.label).join(', ')
   const unread = looked.filter(l => l.read === undefined).map(l => (l.folder === '.' ? w.ownRepo : l.folder))
-  const prompt = w.prompt(root, found.map(l => l.read), await catalogsOf($, root))
-  const spawned = await $.agent.spawn({ prompt, description: w.task, subagentType: 'Explore', model: MODEL }).catch(() => undefined)
+  const prompt = w.prompt(root, found.map(l => l.read), await catalogsOf($, root), await contextOf($, found.map(l => l.read)))
+  const spawned = await $.agent.spawn({ prompt, description: w.task, subagentType: AGENT_TYPE, model: MODEL }).catch(() => undefined)
   const agentId =
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === w.task)?.id : undefined)
   if (!agentId) return stop(w.failedSpawn)
   agents.add(agentId)
+  ownAgent(agentId, 'lenses')
   const heads = await headsOf($, root)
   await update($, reviewAtom, cur => (isOurs(cur) ? { ...running, base, agentId, heads } : cur))
   if (pushFor === STARTING) pushFor = agentId
@@ -186,29 +200,149 @@ export async function lensesCommand($: EngineInterface, args: string) {
   return { text: `${w.started(found.reduce((n, l) => n + l.count, 0), base)}${unread.length > 0 ? ` ${w.unread(unread)}` : ''}` }
 }
 
-// A subagent's run ended: the review's, its answer is read.
+// What the review is told beside the diff: what was asked in the session, the change being built,
+// the commits' messages, and what was settled before.
+async function contextOf($: EngineInterface, repos: readonly RepoChanges[]): Promise<LensContext> {
+  const last = (items: readonly string[]) => items.slice(-CONTEXT_ITEMS)
+  const spec = await specInView($).catch(() => undefined)
+  const commits = (await Promise.all(repos.map(r => gitOut($, r.path, ['log', '--format=%s', `${r.base}..HEAD`])))).flatMap(lines)
+  return {
+    requests: last(await sessionRequests($).catch(() => [])),
+    ...(spec ? { spec: { change: spec.change, tasks: spec.tasks.slice(0, CONTEXT_ITEMS), requirements: spec.requirements.map(r => r.name).slice(0, CONTEXT_ITEMS) } } : {}),
+    commits: commits.slice(0, CONTEXT_ITEMS),
+    settled: last(await settledPoints($).catch(() => [])),
+  }
+}
+
+// The findings the agent did not show from the code get a second look by the small model, on the
+// lines they name: one that does not hold is kept aside with why, not shown as a finding.
+async function secondLook($: EngineInterface, root: string, results: LensReview['results']) {
+  const doubtful = results.flatMap((r, i) => r.findings.map((f, j) => ({ f, i, j }))).filter(({ f }) => f.confidence !== 'confirmed' || !f.evidence)
+  if (doubtful.length === 0) return results
+  const w = await wordsIn($)
+  let budget = CHECK_LIMIT
+  const excerpt = async (p: { file: string; line?: number }) => {
+    const text = await $.fs.read(joinPath(root, p.file)).catch(() => undefined)
+    if (text === undefined) return `=== ${placeText(p)} ===\n${w.checkNoFile}`
+    const all = text.split('\n')
+    const from = Math.max(0, (p.line ?? 1) - 1 - CHECK_LINES)
+    const shown = all.slice(from, from + CHECK_LINES * 2 + 1).map((l, k) => `${from + k + 1}  ${l}`).join('\n')
+    const cut = shown.slice(0, Math.max(0, budget))
+    budget -= cut.length
+    return `=== ${placeText(p)} ===\n${cut}`
+  }
+  const items = await Promise.all(
+    doubtful.map(async ({ f }, k) => `[${k + 1}] ${f.problem}${f.risk ? ` (${f.risk})` : ''}${f.evidence ? `\n${w.checkEvidence}: ${f.evidence}` : ''}\n${(await Promise.all([f, ...(f.places ?? [])].slice(0, 3).map(excerpt))).join('\n')}`),
+  )
+  const r = await $.model.complete({ model: CHECK_MODEL, system: w.checkSystem, prompt: items.join('\n\n'), maxTokens: 800 }).catch(() => undefined)
+  spendOn('lenses', r?.usage)
+  if (!r?.isAnswered) return results
+  const verdicts = parseHolds(r.text)
+  if (!verdicts) return results
+  return results.map((res, i) => ({
+    ...res,
+    findings: res.findings.map((f, j): LensFinding => {
+      const k = doubtful.findIndex(d => d.i === i && d.j === j)
+      const why = k >= 0 ? verdicts.get(k + 1) : undefined
+      return why !== undefined ? { ...f, dropped: why || w.checkDropped } : f
+    }),
+  }))
+}
+
+// The small model's answer: the findings that do not hold, by number, each with why.
+function parseHolds(text: string) {
+  const at = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (at < 0 || end < at) return undefined
+  try {
+    const raw = JSON.parse(text.slice(at, end + 1)) as { dropped?: unknown }
+    if (!Array.isArray(raw.dropped)) return undefined
+    const out = new Map<number, string>()
+    for (const d of raw.dropped) {
+      if (typeof d === 'number') out.set(d, '')
+      else if (typeof d === 'object' && d !== null && typeof (d as { n?: unknown }).n === 'number') out.set((d as { n: number }).n, String((d as { why?: unknown }).why ?? '').trim())
+    }
+    return out
+  } catch {
+    return undefined
+  }
+}
+
+// A subagent's run ended: the review's, its answer is read, its doubtful findings looked at again.
 export async function endLensAgent($: EngineInterface, agentId: string, answer: string) {
   const review = await read($, reviewAtom)
   if (review?.status !== 'running' || review.agentId !== agentId) return
-  const report = parseLensReport(answer)
-  await update($, reviewAtom, (): LensReview => ({ ...review, status: report ? 'done' : 'failed', results: report?.results ?? [], outside: report?.outside ?? [], untouched: report?.untouched ?? [] }))
-  const n = report ? countOf(report) : 0
   const root = await $.session.root()
+  const parsed = parseLensReport(answer)
+  const report = parsed ? { ...parsed, results: await secondLook($, root, parsed.results).catch(() => parsed.results) } : undefined
+  // Stopped or started again during the second look: this answer is no one's now.
+  const now = await read($, reviewAtom)
+  if (now?.status !== 'running' || now.agentId !== agentId) return
   const isForPush = pushFor === agentId
-  if (isForPush) pushFor = null
+  await update($, reviewAtom, (cur): LensReview => (cur?.agentId === agentId ? { ...review, status: report ? 'done' : 'failed', results: report?.results ?? [], outside: report?.outside ?? [], untouched: report?.untouched ?? [] } : cur!))
+  const n = report ? countOf(report) : 0
   const w = await wordsIn($)
-  // Read, whatever the agent makes of it: the commits it started on push. A push held for it goes
-  // once, for a while, even past the fixes its findings bring, so a review never follows its own
-  // findings round after round; findings the engine dropped earn no such pass. A review that gave no
-  // list holds no push of the commits it was started on.
-  const isSent = isForPush && n > 0 ? await sendFindings($, w.pushAfter) : false
-  const was = (await $.store.get(reviewedKey(root)).catch(() => undefined)) as Reviewed | undefined
-  const at = await $.clock.now()
-  const passUntil = isSent ? at + PASS_MS : was?.passUntil !== undefined && was.passUntil > at ? was.passUntil : undefined
-  if (report || isForPush) await $.store.set(reviewedKey(root), { heads: review.heads ?? (await headsOf($, root)), ...(passUntil ? { passUntil } : {}) } satisfies Reviewed)
-  if (isForPush && n === 0) await $.prompt.submit({ text: report ? w.pushClean : w.pushFailed, asUser: true })
-  if (!isForPush && n > 0) await $.ui.toast(w.band(n))
+  // Read, whatever the agent makes of it: the commits it started on. A push held for it goes with
+  // the fixes of the turn its findings start, so a review never follows its own findings round after
+  // round. A review that gave no list holds no push of the commits it was started on.
+  if (report || isForPush) await $.store.set(reviewedKey(root), { heads: review.heads ?? (await headsOf($, root)) } satisfies Reviewed)
+  if (isForPush) {
+    if (n > 0) await sendFindings($, { tag: PUSH_TAG, after: w.pushAfter })
+    pushFor = null
+    if (n === 0) await send($, { from: 'lenses' }, report ? w.pushClean : w.pushFailed)
+    return
+  }
+  if (n === 0) return
+  if (!isAutoNow()) await $.ui.toast(w.band(n))
+  else await flush($).catch(() => {})
 }
+
+// The findings open on the pane: not dropped by the second look, not taken to Claude yet. By an id of
+// the review and their place in it.
+function openOf(review: LensReview) {
+  const taken = new Set(review.taken ?? [])
+  const found = review.results.flatMap((r, i) => r.findings.flatMap((f, j) => (f.dropped ? [] : [{ id: `${review.at}:${i}:${j}`, lens: r.lens, f }])))
+  return {
+    findings: found.filter(x => !taken.has(x.id)),
+    outside: review.outside.map((o, k) => ({ id: `${review.at}:o:${k}`, o })).filter(x => !taken.has(x.id)),
+  }
+}
+
+// What the ledger takes to Claude: the findings open, the review done and no push waiting on it.
+export async function lensPoints($: EngineInterface): Promise<Point[]> {
+  const review = await read($, reviewAtom)
+  if (review?.status !== 'done' || (pushFor !== null && pushFor === review.agentId)) return []
+  return lensPointsOf($, review)
+}
+
+async function lensPointsOf($: EngineInterface, review: LensReview): Promise<Point[]> {
+  const w = await wordsIn($)
+  const open = openOf(review)
+  return [
+    ...open.findings.map(({ id, lens, f }) => ({
+      id,
+      where: placeText(f),
+      text: `${lens}: ${f.problem}${f.risk ? ` (${f.risk})` : ''}${f.places?.length ? ` ${w.alsoAt(f.places.map(placeText))}` : ''}`,
+      isMinor: false,
+      ...(f.confidence ? { confidence: f.confidence } : {}),
+    })),
+    ...open.outside.map(({ id, o }) => ({ id, where: w.outsideWhere, text: o, isMinor: false })),
+  ]
+}
+
+// Taken to Claude, or put aside by the person: off the pane's count.
+export async function lensTaken($: EngineInterface, ids: readonly string[]) {
+  await update($, reviewAtom, review => {
+    if (!review) return review
+    const taken = [...new Set([...(review.taken ?? []), ...ids])]
+    const next = { ...review, taken }
+    const open = openOf(next)
+    return open.findings.length === 0 && open.outside.length === 0 ? { ...next, isSent: true as const } : next
+  })
+}
+
+// The commit of each repository in `heads`, by its folder.
+const headsIn = (heads: string) => new Map(heads.split('\n').map(l => [l.slice(0, l.lastIndexOf('@')), l.slice(l.lastIndexOf('@') + 1)] as const))
 
 // The commits of the project's own repository and of each in a top folder, as one string.
 async function headsOf($: EngineInterface, root: string) {
@@ -216,35 +350,64 @@ async function headsOf($: EngineInterface, root: string) {
   return (await Promise.all(repos.map(async repo => `${repo}@${(await gitOut($, repo, ['rev-parse', 'HEAD'])) ?? ''}`))).join('\n')
 }
 
-// In `auto`, the main loop's push of commits the lenses have not read is refused once, the review
-// started, its outcome sent as the next prompt. The same commits push again freely, a pull request
-// opened after its push among them. A subagent's push goes: its outcome would land on the main loop,
-// which did not push. Where the review cannot run (no repository, no fork point, nothing changed),
-// the push goes; a review gone past its time holds nothing.
-export async function lensesBeforePush($: EngineInterface, command: string, agentId: string | undefined) {
-  if (settings.mode !== 'auto' || agentId !== undefined || !sendsOut(command)) return undefined
+// In `auto`, a push of commits the lenses have not read is refused once, the review started, its
+// outcome sent as the next prompt: the main loop's, a subagent's (its outcome lands on the main loop,
+// which is told), or a tool of an MCP server's (`command` null). The same commits push again freely,
+// a pull request opened after its push among them, and so do the fixes made in the turn of the
+// findings a held push waited on. A push of another branch goes where its commit is among those read,
+// and is told to check it out otherwise, as the lenses read the one checked out. Where the review cannot run (no repository, no fork point,
+// nothing changed), the push goes; a review gone past its time holds nothing.
+export async function lensesBeforePush($: EngineInterface, command: string | null, agentId: string | undefined) {
+  if (settings.mode !== 'auto') return undefined
   const root = await $.session.root()
+  // The aliases are read only where git is named: not on every command.
+  const aliases = command === null || !/\bgit\b/.test(command) ? {} : aliasesOf((await gitOut($, root, ['config', '--get-regexp', '^alias\\.'])) ?? '')
+  if (command !== null && !sendsOut(command, aliases)) return undefined
+  const w = await wordsIn($)
+  const head = await gitOut($, root, ['rev-parse', 'HEAD'])
   const reviewed = (await $.store.get(reviewedKey(root)).catch(() => undefined)) as Reviewed | undefined
+  const readHead = reviewed ? headsIn(reviewed.heads).get(root) : undefined
+  const refs = command === null ? [] : pushedRefs(command, aliases)
+  let isOwnPushed = refs.length === 0
+  for (const ref of refs) {
+    const sha = await gitOut($, root, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+    if (sha === null || head === null || sha === head) isOwnPushed = true
+    // Another branch goes as read where its commit is among those the lenses read.
+    else if (!readHead || (sha !== readHead && (await gitOut($, root, ['merge-base', '--is-ancestor', sha, readHead])) === null)) return w.pushOther(ref)
+  }
+  if (!isOwnPushed) return undefined
   const heads = await headsOf($, root)
-  const at = await $.clock.now()
-  const isPassed = reviewed?.passUntil !== undefined && reviewed.passUntil > at
-  if (reviewed && (reviewed.heads === heads || isPassed)) {
-    // The pass is spent on the commits it lets out, not on a push of those already read.
+  if (reviewed && (reviewed.heads === heads || (await isFixOf($, reviewed.heads, heads)))) {
+    // The fixes are read as part of what went: their push spends the pass.
     if (reviewed.heads !== heads) await $.store.set(reviewedKey(root), { heads } satisfies Reviewed)
     return undefined
   }
-  const w = await wordsIn($)
+  const at = await $.clock.now()
   const was = await read($, reviewAtom)
   // One running, its agent known or still starting, is waited for: no second review.
   if (was?.status === 'running' && at - was.at < STALE_MS) {
     pushFor = was.agentId ?? STARTING
-    return w.pushRunning
+    return agentId === undefined ? w.pushRunning : w.pushHeldSub
   }
   await lensesCommand($, 'lenses')
   const review = await read($, reviewAtom)
   if (review?.status !== 'running' || review.agentId === undefined) return undefined
   pushFor = review.agentId
-  return w.pushHeld
+  return agentId === undefined ? w.pushHeld : w.pushHeldSub
+}
+
+// In the turn of the findings a held push waited on, the commits since those read are its fixes:
+// each repository's commit read is under its commit now.
+async function isFixOf($: EngineInterface, was: string, now: string) {
+  const by = ownerNow()
+  if (by?.from !== 'ledger' || by.tag !== PUSH_TAG) return false
+  const before = headsIn(was)
+  for (const [repo, sha] of headsIn(now)) {
+    const old = before.get(repo)
+    if (old === undefined || old === '' || sha === '') return false
+    if (old !== sha && (await gitOut($, repo, ['merge-base', '--is-ancestor', old, sha])) === null) return false
+  }
+  return true
 }
 
 // The review's report the engine hands back as it ends is the pane's, not Claude's to read.
@@ -253,14 +416,12 @@ export async function lensReport($: EngineInterface, text: string) {
   return [...agents, ...(kept ? [kept] : [])].some(id => text.includes(id)) ? (await wordsIn($)).task : undefined
 }
 
-// Whether the findings went to Claude: not where they went before, or the engine dropped them.
-async function sendFindings($: EngineInterface, after = '') {
+// Whether the findings open went to Claude, through the ledger, numbered for Claude's answer.
+async function sendFindings($: EngineInterface, opts: { tag?: string; after?: string } = {}) {
   const review = await read($, reviewAtom)
-  if (!review || review.status !== 'done' || review.isSent || countOf(review) === 0) return false
-  await update($, reviewAtom, () => ({ ...review, isSent: true as const }))
-  const r = await $.prompt.submit({ text: `${(await wordsIn($)).sendText(review.results, review.outside)}${after}`, asUser: true })
-  if (r.drop !== undefined) await update($, reviewAtom, () => review)
-  return r.drop === undefined
+  if (!review || review.status !== 'done') return false
+  const points = await lensPointsOf($, review)
+  return sendPoints($, 'lenses', points, opts)
 }
 
 // An OpenSpec change with every task ticked: before its archive, the row offers the branch read
@@ -300,7 +461,8 @@ export async function openPane($: EngineInterface) {
 export async function lensesLine($: EngineInterface) {
   const review = await read($, reviewAtom)
   if (review?.status !== 'done' || review.isSent) return null
-  const n = countOf(review)
+  const open = openOf(review)
+  const n = open.findings.length + open.outside.length
   return n > 0 ? (await wordsIn($)).band(n) : null
 }
 
@@ -311,7 +473,12 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const act = (fn: () => Promise<unknown>) => () => void fn().catch(() => {})
   if (!review) return <Text dimColor>/changes lenses</Text>
   const n = countOf(review)
-  const lensCount = review.results.filter(r => r.status === 'findings').length
+  const open = openOf(review)
+  const toSend = open.findings.length + open.outside.length
+  const lensCount = review.results.filter(r => r.findings.some(f => !f.dropped)).length
+  // What the second look did not hold is not the person's to read: its count, so the look shows.
+  const dropped = review.results.reduce((n, r) => n + r.findings.filter(f => f.dropped).length, 0)
+  const { answered, held } = await acceptanceOf($, 'lenses')
   return (
     <Box flexDirection="column" gap={1}>
       {review.status === 'running' ? (
@@ -327,12 +494,15 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Box key={`lens-${i}`} flexDirection="column">
           <Text color={r.status === 'findings' ? 'warning' : r.status === 'clean' ? 'success' : undefined} wrap="wrap">{`${w.status[r.status]} ${r.lens}`}</Text>
           {r.status === 'findings' ? (
-            r.findings.map((f, j) => (
-              <Box key={`lens-${i}-${j}`} flexDirection="column" paddingLeft={2}>
-                <Text wrap="wrap">{`• ${f.file}${f.line ? `:${f.line}` : ''} — ${f.problem}`}</Text>
-                {f.risk ? <Text dimColor wrap="wrap">{`  → ${f.risk}`}</Text> : null}
-              </Box>
-            ))
+            r.findings.map((f, j) =>
+              f.dropped ? null : (
+                <Box key={`lens-${i}-${j}`} flexDirection="column" paddingLeft={2}>
+                  <Text wrap="wrap">{`• ${placeText(f)} — ${f.problem}`}</Text>
+                  {f.places?.length ? <Text dimColor wrap="wrap">{`  ${w.alsoAt(f.places.map(placeText))}`}</Text> : null}
+                  {f.risk ? <Text dimColor wrap="wrap">{`  → ${f.risk}`}</Text> : null}
+                </Box>
+              ),
+            )
           ) : r.checked ? (
             <Text dimColor wrap="wrap">{`  ${r.checked}`}</Text>
           ) : null}
@@ -346,6 +516,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           ))}
         </Box>
       ) : null}
+      {dropped > 0 ? <Text dimColor>{w.droppedTitle(dropped)}</Text> : null}
       {review.untouched.length > 0 ? (
         <Box flexDirection="column">
           <Text bold>{w.untouched}</Text>
@@ -355,10 +526,10 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         </Box>
       ) : null}
       <Box flexDirection="row" gap={1}>
-        {review.status === 'done' && n > 0 && !review.isSent ? (
-          <Button key="lenses-send" label={w.send(n)} hotkey="j" variant="primary" onPress={act(() => sendFindings($))}>
+        {review.status === 'done' && toSend > 0 && !review.isSent ? (
+          <Button key="lenses-send" label={w.send(toSend)} hotkey="j" variant="primary" onPress={act(() => sendFindings($))}>
             <Text dimColor>j</Text>
-            {` ${w.send(n)}`}
+            {` ${w.send(toSend)}`}
           </Button>
         ) : null}
         {review.isSent ? <Text dimColor>{`→ ${w.sent}`}</Text> : null}
@@ -372,6 +543,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
           </Button>
         ) : null}
       </Box>
+      {answered > 0 ? <Text dimColor>{w.acceptance(held, answered)}</Text> : null}
     </Box>
   )
 }

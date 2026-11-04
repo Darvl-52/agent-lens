@@ -39,6 +39,27 @@ export async function offText($: EngineInterface, part: Part) {
   return { text: words.isOff(words.parts[part].name) }
 }
 
+// Whether a command came from the person (typed, from the phone, or the host's own turn), not from
+// the model or another plugin: what holds the agent to the rules is the person's to loosen.
+const BY_PERSON = new Set(['composer', 'bridge', 'sdk'])
+export const isByPerson = (origin: { kind: string } | undefined) => origin === undefined || BY_PERSON.has(origin.kind)
+
+// Of a command's arguments, whether they loosen a check: the guard set, the critic changed, the red
+// of now kept as the baseline, the router's rules changed.
+export function loosens(command: string, args: string) {
+  const [verb = '', arg = ''] = args.trim().toLowerCase().split(/\s+/)
+  if (command === 'changes') return verb === 'guard' && arg !== ''
+  if (command === 'spec') return verb === 'critic' && arg !== ''
+  if (command === 'setup-project') return verb === 'baseline'
+  // The router's own mode too: `off` stops it whole.
+  if (command === 'router') return ['rm', 'add', 'when', 'ignore', 'unignore', 'off'].includes(verb)
+  return false
+}
+
+export async function notByPerson($: EngineInterface) {
+  return { text: (await wordsIn($)).personOnly }
+}
+
 export async function offIn($: EngineInterface): Promise<readonly Part[]> {
   return (await read($, offAtom)) ?? off
 }

@@ -317,9 +317,26 @@ function withoutComment(line: string) {
 }
 
 // A rule that has OpenSpec's tasks name the lenses they touch: told by the word, in whatever language
-// the config is written, under `rules` only, as its `context` names LENSES.md and agent-lens whatever
-// its rules say.
-export const hasTaskRules = (config: string) => /lens|линз/i.test(rulesSection(config) ?? '')
+// the config is written, under the rules of `tasks` only, as its `context` names LENSES.md and
+// agent-lens whatever its rules say, and a rule of the proposal or the design is no rule of a task.
+export const hasTaskRules = (config: string) => /lens|линз/i.test(tasksRules(rulesSection(config) ?? ''))
+
+// What `rules` holds under `tasks`, comments out: its key's line and those below it, up to the next
+// key as far in or further out; a list may stand as far in as its key.
+function tasksRules(rules: string) {
+  const lines = rules.split('\n')
+  const at = lines.findIndex(l => /^\s*tasks:/.test(l))
+  // Written in flow style, on one line: `{tasks: [...], design: [...]}`.
+  if (at < 0) return rules.match(/[{,]\s*tasks:\s*(\[[^\]]*\]|[^,}]*)/)?.[1] ?? ''
+  const indentOf = (line: string) => line.length - line.trimStart().length
+  const indent = indentOf(lines[at]!)
+  const out = [lines[at]!.replace(/^\s*tasks:/, '')]
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() !== '' && indentOf(line) <= indent && !/^\s*-/.test(line)) break
+    out.push(line)
+  }
+  return out.join('\n')
+}
 
 // The section of CODING_STANDARDS.md the step of the security rules writes: told by its heading, in
 // either language, and that heading alone: `### Cookie security` is not the step done.

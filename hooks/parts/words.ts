@@ -10,15 +10,26 @@ export type Words = {
   parts: Record<Part, { name: string; what: string }>
   turned: (name: string, isOn: boolean) => string
   isOff: (name: string) => string
+  personOnly: string
+  spentTitle: string
+  openDecide: string
+  openLenses: string
+  showGuard: string
+  ledgerName: string
+  spent: (name: string, fresh: number, cached: number, calls: number, turns: number) => string
+  budget: (fresh: number, budget: number, isOver: boolean) => string
   list: (lines: string[]) => string
 }
+
+// Tokens as the person reads them: 1.2k, 340k.
+const kilo = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1)}k` : String(n))
 
 export const WORDS: Record<Lang, Words> = {
   en: {
     title: 'agent-lens',
     summary: 'Turn the parts of agent-lens on and off',
     opened: 'agent-lens parts opened.',
-    keysHelp: count => `1-${count}: turn a part on or off · Esc: close`,
+    keysHelp: count => `1-${count}: turn a part on or off · a: autonomy · d: to decide · l: lenses · g: guard limits · Esc: close`,
     on: '● on ',
     off: '○ off',
     parts: {
@@ -32,13 +43,22 @@ export const WORDS: Record<Lang, Words> = {
     },
     turned: (name, isOn) => `${name}: ${isOn ? 'on' : 'off'}.`,
     isOff: name => `${name} is off. Turn it on in /agent-lens.`,
+    personOnly: 'Only you can change this: a command the agent or another plugin ran does not loosen the checks.',
+    spentTitle: 'Spent this session',
+    openDecide: 'd: what waits for you',
+    openLenses: 'l: the branch through lenses (/changes lenses)',
+    showGuard: 'g: the guard’s limits (/changes guard)',
+    ledgerName: 'Points sent to Claude',
+    spent: (name, fresh, cached, calls, turns) =>
+      `${name}: ${kilo(fresh)} tokens${cached > 0 ? `, ${kilo(cached)} from the cache` : ''}${calls > 0 ? ` · ${calls} ${calls === 1 ? 'call' : 'calls'}` : ''}${turns > 0 ? ` · ${turns} ${turns === 1 ? 'turn' : 'turns'} of Claude` : ''}`,
+    budget: (fresh, budget, isOver) => `Budget: ${kilo(fresh)} of ${kilo(budget)}${isOver ? ': spent, all by hand now' : ''}`,
     list: lines => `agent-lens parts:\n${lines.join('\n')}`,
   },
   ru: {
     title: 'agent-lens',
     summary: 'Включить и выключить части agent-lens',
     opened: 'Открыты части agent-lens.',
-    keysHelp: count => `1–${count} — включить или выключить часть · Esc — закрыть`,
+    keysHelp: count => `1–${count} — включить или выключить часть · a — автономность · d — вам решить · l — линзы · g — лимиты guard · Esc — закрыть`,
     on: '● вкл ',
     off: '○ выкл',
     parts: {
@@ -52,6 +72,15 @@ export const WORDS: Record<Lang, Words> = {
     },
     turned: (name, isOn) => `${name}: ${isOn ? 'включено' : 'выключено'}.`,
     isOff: name => `${name}: выключено. Включить — /agent-lens.`,
+    personOnly: 'Это меняете только вы: команда, которую запустил агент или другой плагин, проверки не ослабляет.',
+    spentTitle: 'Потрачено за сессию',
+    openDecide: 'd — что ждёт вас',
+    openLenses: 'l — ветка через линзы (/changes lenses)',
+    showGuard: 'g — пределы стража (/changes guard)',
+    ledgerName: 'Пункты, отправленные Claude',
+    spent: (name, fresh, cached, calls, turns) =>
+      `${name}: ${kilo(fresh)} токенов${cached > 0 ? `, ${kilo(cached)} из кэша` : ''}${calls > 0 ? ` · вызовов: ${calls}` : ''}${turns > 0 ? ` · ходов Claude: ${turns}` : ''}`,
+    budget: (fresh, budget, isOver) => `Бюджет: ${kilo(fresh)} из ${kilo(budget)}${isOver ? ': исчерпан, теперь всё вручную' : ''}`,
     list: lines => `Части agent-lens:\n${lines.join('\n')}`,
   },
 }

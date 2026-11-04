@@ -3,6 +3,8 @@ import type { ModelCompleteInput } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 
 import { below, canonical, changedSpan, fileDiff, fileText, filesText, fingerprintOf, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, whereIn, withWhere } from '../hooks/review/diff'
+import { verdictsIn } from '../hooks/ledger/ledger'
+import { clearOutbox, isWaiting, send, startTurn } from '../hooks/core/outbox'
 import { WORDS } from '../hooks/review/words'
 
 // Where a file of the project's own repository is shown.
@@ -201,7 +203,8 @@ const posix = (path: string) => path.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/
 
 // A project in /proj, one repository, its files on a disk kept here; Write edits it, and the model,
 // git, the prompts sent and the toasts are answered and kept here, so a test reads what the mod did.
-const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], files: Record<string, string>) => {
+// What the checks find waits for the person here, as by hand, unless `autonomy` says otherwise.
+const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], files: Record<string, string>, opts: { autonomy?: 'manual' | 'auto' | 'full' } = {}) => {
   // The project folder as the platform spells it, answered as the session's root: learned from an
   // edit the mod is handed before the session starts, none of whose writes is kept.
   let probing = true
@@ -229,7 +232,7 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   // Every command the mod ran.
   const runs: string[][] = []
   const clock = mock.clock(on, { now: 10_000 })
-  const store = new Map<string, unknown>()
+  const store = new Map<string, unknown>([['autonomy', opts.autonomy ?? 'manual']])
   on('state.set', ($, e, next) => (probing ? { value: { isSet: true as const, version: 0 } } : next(e)))
   on('session.root', () => ({ value: root }))
   on('fs.exists', ($, e) => {
@@ -1099,6 +1102,16 @@ test('CODING_STANDARDS.md is a rule file: the standards /setup-project writes ar
   expect(checked[0]!.promptBlocks?.[0]?.text).toMatch(/^=== CODING_STANDARDS\.md ===\nNo comments in code\./)
 })
 
+// Standards may run long, past what a rule file is read up to, and the security rules
+// /setup-project writes go last: they are read whole whatever the rest.
+test('the security rules at the end of long standards reach the check of each edit', async ($, on) => {
+  const standards = Array.from({ length: 600 }, (_, i) => `- Rule ${i + 1}: a rule of this project, why it holds, where it shows, and what checks it.`).join('\n')
+  const { checked, turn } = await project($, on, { 'src/app.ts': APP, 'CODING_STANDARDS.md': `# Coding standards\n\n${standards}\n\n## Security\n\n- Never assign innerHTML.\n` })
+  await turn('say why', { 'src/app.ts': COMMENTED })
+  expect(checked).toHaveLength(1)
+  expect(checked[0]!.promptBlocks?.[0]?.text).toContain('Never assign innerHTML.')
+})
+
 test('an edit to the OpenSpec change is not checked against the rules: /spec reads it', async ($, on) => {
   const { checked, turn } = await project($, on, { ...RULES, 'src/app.ts': APP })
   await turn('write the decisions in', { 'openspec/changes/door/design.md': '# Design\n// a note\n' })
@@ -1173,14 +1186,22 @@ test('/changes before Claude edits anything opens on what is uncommitted; the fi
 })
 
 test('block lets an edit refused twice for one rule through on the next try, for the person to judge', { options: { live: 'block' } }, async ($, on) => {
-  const { disk, native, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  const { disk, native, setViolations, toasts, submitted } = await project($, on, { ...RULES, 'src/app.ts': APP })
   setViolations(COMMENT)
   const write = () => $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
   expect((await write()).deny).toMatch(/^agent-lens refused/)
   expect((await write()).deny).toMatch(/^agent-lens refused/)
   expect((await write()).deny).toBeUndefined()
   expect(disk.get('/proj/src/app.ts')).toBe(COMMENTED)
-  expect(toasts.at(-1)).toBe('app.ts: an edit refused twice for one rule went through. It is on Findings for you to decide.')
+  expect(toasts.at(-1)).toBe('app.ts: an edit refused twice for one rule went through. It waits for you in /agent-lens decide.')
+  // It waits with the others the person decides, the mod's word on it, not Claude's.
+  expect(await decideRow($)).toBe('1 to decide')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...DECIDE })
+  expect(await pane.find({ type: 'Text', text: /^  Refused twice for this rule, the agent made the edit a third time/ })).toBeDefined()
+  expect(await pane.find({ key: 'agree-1' })).toMatchObject({ props: { label: 'leave it' } })
+  await pane.press({ key: 'insist-1' })
+  await pane.unmount()
+  expect(submitted.at(-1)).toMatch(/^I looked at this and it does not stay: fix it\.\n#1 src\/app\.ts — No comments in code/)
 })
 
 test('a check that gives no answer is said once a turn, and counted by /changes rules', async ($, on) => {
@@ -1307,4 +1328,231 @@ test('after a /clear the parts read back what they show on the classic SessionSt
   store.set('lang', 'ru')
   await $.classic.SessionStart({ source: 'clear' })
   expect(await bandText($)).toMatch(/^✎ 1 файл/)
+})
+
+// The ledger: what the review finds goes to Claude by itself, and only a dispute waits for the person.
+const TWO_BUGS =
+  '[{"file":"src/app.ts","line":1,"severity":"bug","text":"The theme no longer follows the system."},{"file":"src/app.ts","line":2,"severity":"bug","text":"The contrast is not read anywhere."},{"file":"src/app.ts","severity":"note","text":"No test for the dark theme."}]'
+const DECIDE = {
+  component: 'Pane' as const,
+  requestId: 'agent-lens-decide',
+  props: { title: 'To decide', isFocused: true, bodyColumns: 100, placement: 'inline' as const, scroll: { offset: 0, bodyRows: 40 }, view: {} },
+}
+const decideRow = async ($: Parameters<TestBody>[0]) => {
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND })
+  const row = await ui.find({ type: 'Text', text: /to decide$/ })
+  await ui.unmount()
+  return row?.text
+}
+// A main turn of `text` that ends with `answer`.
+const answered = async ($: Parameters<TestBody>[0], p: Awaited<ReturnType<typeof project>>, text: string, answer: string) => {
+  await $.turn.start({ text, turnId: text })
+  await p.clock.advance(1)
+  await $.turn.complete({ answer, durationMs: 1, isAborted: false, turnId: text, reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  await p.clock.advance(10)
+}
+
+test('in auto, what the review finds goes to Claude in one numbered prompt, the notes stay, and a rejected point waits for the person', async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP }, { autonomy: 'auto' })
+  p.setReviewed(TWO_BUGS)
+  p.setKept('[1, 2, 3]')
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  const sent = p.submitted.filter(s => s.startsWith('agent-lens: the checks of your work found these'))
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toMatch(/#1 src\/app\.ts:1 — The theme no longer follows the system\./)
+  expect(sent[0]).toMatch(/#2 src\/app\.ts:2 — The contrast is not read anywhere\./)
+  // A note is minor: it stays in /changes.
+  expect(sent[0]).not.toMatch(/No test for the dark theme/)
+  expect(await decideRow($)).toBeUndefined()
+
+  // Claude fixes one and rejects the other: the rejected one waits for the person.
+  await answered($, p, sent[0]!, 'Done.\n\n**#1 fixed**\n- #2 rejected: the contrast goes to the CSS build')
+  expect(await decideRow($)).toBe('1 to decide')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...DECIDE })
+  expect(await pane.find({ type: 'Text', text: /^#2 src\/app\.ts:2 — The contrast is not read anywhere\.$/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Claude: the contrast goes to the CSS build/ })).toBeDefined()
+  // The person says fix it anyway: Claude is told, and the point is no longer waiting.
+  await pane.press({ key: 'insist-2' })
+  expect(p.submitted.at(-1)).toMatch(/^I read why you rejected #2 \(the contrast goes to the CSS build\) and the point holds: fix it\./)
+  expect(await decideRow($)).toBeUndefined()
+  await pane.unmount()
+})
+
+test('in auto, the person agreeing with Claude puts the point aside in /changes too', async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP }, { autonomy: 'auto' })
+  p.setReviewed(TWO_BUGS)
+  p.setKept('[1, 2, 3]')
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  const sent = p.submitted.find(s => s.startsWith('agent-lens: the checks'))!
+  await answered($, p, sent, '#1 rejected: the system theme is read in main.ts\n#2 fixed')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...DECIDE })
+  await pane.press({ key: 'agree-1' })
+  expect(await pane.find({ type: 'Text', text: /^✓ Nothing waits for you/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^This session: 2 sent to Claude, 1 fixed, 1 rejected\.$/ })).toBeDefined()
+  await pane.unmount()
+  expect(await decideRow($)).toBeUndefined()
+  // Nothing goes again: what was sent and answered is known.
+  const before = p.submitted.length
+  await p.turn('and now?', {})
+  expect(p.submitted).toHaveLength(before)
+})
+
+test('in auto, the ledger sends at most two rounds after a prompt of the person, and a new prompt starts the count again', async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP }, { autonomy: 'auto' })
+  p.setKept('[1]')
+  const ledgerPrompts = () => p.submitted.filter(s => s.startsWith('agent-lens: the checks'))
+  const finding = (n: number) => `[{"file":"src/app.ts","line":1,"severity":"bug","text":"Bug number ${n}."}]`
+  const version = (n: number) => DARK.replace('"blue"', `"blue${n}"\nexport const k${n} = ${n}\nexport const j${n} = ${n}`)
+  p.setReviewed(finding(1))
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  expect(ledgerPrompts()).toHaveLength(1)
+  // Claude's fix is a diff the review reads again, and it finds a new point: a second round.
+  p.setReviewed(finding(2))
+  await p.turn(ledgerPrompts()[0]!, { 'src/app.ts': version(2) })
+  expect(ledgerPrompts()).toHaveLength(2)
+  // The third stops: the person is asked first.
+  p.setReviewed(finding(3))
+  await p.turn(ledgerPrompts()[1]!, { 'src/app.ts': version(3) })
+  expect(ledgerPrompts()).toHaveLength(2)
+  // A prompt of the person's: what waits goes again.
+  await p.turn('go on', {})
+  expect(ledgerPrompts()).toHaveLength(3)
+  expect(ledgerPrompts()[2]).toMatch(/Bug number 3\./)
+})
+
+test('in manual, nothing goes to Claude unasked', async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP })
+  p.setReviewed(TWO_BUGS)
+  p.setKept('[1, 2, 3]')
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  expect(p.submitted.filter(s => s.startsWith('agent-lens: the checks'))).toHaveLength(0)
+})
+
+test("Claude's verdict lines are read bold, listed, quoted or in Russian", () => {
+  const said = verdictsIn('All done.\n\n**#1 fixed**\n- #2 rejected: not used\n> `#3` — отклонено: уже есть тест\n#4: исправил\nsee #5 fixed later in text')
+  expect([...said.entries()]).toEqual([
+    [1, { isFixed: true, reason: '' }],
+    [2, { isFixed: false, reason: 'not used' }],
+    [3, { isFixed: false, reason: 'уже есть тест' }],
+    [4, { isFixed: true, reason: '' }],
+  ])
+  // A table, as the steps of setup ask for, and other dashes.
+  const table = verdictsIn('| # | verdict |\n|---|---|\n| #6 | fixed |\n| #7 | rejected | not used |\n#8 – fixed\n#9 → rejected: the test has it')
+  expect([...table.entries()]).toEqual([
+    [6, { isFixed: true, reason: '' }],
+    [7, { isFixed: false, reason: 'not used' }],
+    [8, { isFixed: true, reason: '' }],
+    [9, { isFixed: false, reason: 'the test has it' }],
+  ])
+})
+
+test('in auto, a point Claude ends with no line for, or a turn stopped, waits for the person, not lost', async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP }, { autonomy: 'auto' })
+  p.setReviewed(TWO_BUGS)
+  p.setKept('[1, 2, 3]')
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  const sent = p.submitted.filter(s => s.startsWith('agent-lens: the checks of your work found these'))
+  expect(sent).toHaveLength(1)
+  await answered($, p, sent[0]!, 'Done.\n\n#1 fixed')
+  expect(await decideRow($)).toBe('1 to decide')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...DECIDE })
+  expect(await pane.find({ type: 'Text', text: '  Claude ended with no line for it.' })).toBeDefined()
+  expect(await pane.find({ key: 'agree-2' })).toMatchObject({ props: { label: 'leave it' } })
+  await pane.unmount()
+})
+
+test('a /clear keeps what the mod raised itself waiting: the rule is out of the file still', async ($, on) => {
+  const { native } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  await $.turn.start({ text: 'tidy the rules', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/CLAUDE.md'), content: '# Project\nKeep files short.\n' })
+  expect(await decideRow($)).toBe('1 to decide')
+  await $.session.end({ reason: 'clear', sessionId: 'one', resume: { id: 'one' } })
+  expect(await decideRow($)).toBe('1 to decide')
+})
+
+test('an edit that takes a rule out of a rule file waits for the person; one that only adds does not', async ($, on) => {
+  const { native } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  await $.turn.start({ text: 'tidy the rules', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/CLAUDE.md'), content: '# Project\nNo comments in code.\nKeep files short.\n' })
+  expect(await decideRow($)).toBeUndefined()
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/CLAUDE.md'), content: '# Project\nKeep files short.\n' })
+  expect(await decideRow($)).toBe('1 to decide')
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...DECIDE })
+  expect(await pane.find({ type: 'Text', text: '#1 CLAUDE.md — the agent takes out of the rules: "No comments in code."' })).toBeDefined()
+  await pane.press({ key: 'agree-1' })
+  await pane.unmount()
+  expect(await decideRow($)).toBeUndefined()
+})
+
+test('a check whose answer holds no list is a check that failed, not a clean edit', async ($, on) => {
+  const { native, settle, setViolations, toasts } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations('Looks fine to me.')
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: DARK })
+  await settle()
+  expect(toasts).toContain('The rule check of an edit gave no answer (its answer held no list): it went unchecked. /changes rules says more.')
+})
+
+test('a file the shell writes is checked against the rules as an edit is, by what changed since its commit', async ($, on) => {
+  const { shellTurn, setViolations, submitted, checked } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  await shellTurn('add dark mode', [disk => disk.set('/proj/src/app.ts', COMMENTED)])
+  expect(checked).toHaveLength(1)
+  expect(checked[0]!.promptBlocks?.at(-1)?.text ?? JSON.stringify(checked[0]!.prompt)).toMatch(/app\.ts[\s\S]*\/\/ dark by default/)
+  expect(submitted.some(s => /^agent-lens: your edit to .*app\.ts breaks/.test(s))).toBe(true)
+})
+
+test('block checks a notebook cell as it checks a file', { options: { live: 'block' } }, async ($, on) => {
+  const { native, setViolations } = await project($, on, { ...RULES, 'src/app.ipynb': '{}' })
+  setViolations(COMMENT)
+  const ran = await $.tool.call({ tool: 'NotebookEdit', notebook_path: native('/proj/src/app.ipynb'), new_source: '// dark by default', edit_mode: 'replace', cell_id: 'c1' } as never)
+  expect(ran.deny).toMatch(/^agent-lens refused this edit to .*app\.ipynb/)
+})
+
+test('/changes rules says which rule file is past what the check reads', async ($, on) => {
+  const { review } = await project($, on, { 'CLAUDE.md': `# Project\n${'No comments in code.\n'.repeat(1000)}`, 'src/app.ts': APP })
+  expect((await review('rules')).text).toMatch(/CLAUDE\.md \(21010 characters: the check reads the first 16000, and the Security section whole\)/)
+})
+
+test('/agent-lens shows what each part spent this session', async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP })
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  await $.command.run({ command: 'agent-lens', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane', requestId: 'agent-lens-parts', props: { title: 'agent-lens', isFocused: true, bodyColumns: 120, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  expect(await pane.find({ type: 'Text', text: 'Spent this session' })).toBeDefined()
+  // Two calls of the review: 300 in and 700 out each, 1500 read from the cache.
+  expect(await pane.find({ type: 'Text', text: 'Review of changes: 2.0k tokens, 3.0k from the cache · 2 calls' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('past the session’s budget nothing goes to Claude unasked, and the row says so', { options: { budget: 1500 } }, async ($, on) => {
+  const p = await project($, on, { ...RULES, 'src/app.ts': APP }, { autonomy: 'auto' })
+  p.setReviewed(TWO_BUGS)
+  p.setKept('[1, 2, 3]')
+  await p.turn('add dark mode', { 'src/app.ts': DARK })
+  expect(p.submitted.filter(s => s.startsWith('agent-lens: the checks'))).toHaveLength(0)
+  expect(await decideRow($)).toBeUndefined()
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: 'agent-lens spent its 1500 tokens: by hand till the session ends' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a prompt the engine ran within another turn, or lost, waits no more', async () => {
+  clearOutbox()
+  const engine = { prompt: { submit: async () => ({}) } } as never
+  await send(engine, { from: 'setup', tag: 'map' }, 'agent-lens: write the map')
+  await send(engine, { from: 'ledger' }, 'agent-lens: the checks of your work found these')
+  expect(startTurn('agent-lens: write the map\n\nagent-lens: the checks of your work found these')).toEqual({ from: 'setup', tag: 'map' })
+  expect(isWaiting()).toBe(false)
+  await send(engine, { from: 'ledger' }, 'agent-lens: the checks again')
+  for (let i = 0; i < 5; i++) startTurn(`a prompt of the person ${i}`)
+  expect(isWaiting('ledger')).toBe(true)
+  startTurn('one more')
+  expect(isWaiting()).toBe(false)
+  // The same text sent twice is two turns.
+  await send(engine, { from: 'ledger', tag: 'insist' }, 'agent-lens: fix #2')
+  await send(engine, { from: 'ledger', tag: 'insist' }, 'agent-lens: fix #2')
+  expect(startTurn('agent-lens: fix #2')).toEqual({ from: 'ledger', tag: 'insist' })
+  expect(startTurn('agent-lens: fix #2')).toEqual({ from: 'ledger', tag: 'insist' })
+  clearOutbox()
 })

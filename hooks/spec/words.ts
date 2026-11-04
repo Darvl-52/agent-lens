@@ -219,12 +219,12 @@ End your answer with JSON alone: [{"hole": "what is missing or wrong", "where": 
   criticFailed: 'The agent gave no list of holes.',
   criticNone: 'The agent found no holes.',
   criticReady: 'No blocking holes: the change can be built.',
-  criticResting: 'The critic looks again on f, not by itself.',
+  criticResting: 'The critic looks again on h, not by itself.',
   minorHoles: 'Details the code can settle; they do not go to Claude by themselves:',
   criticFound: (n: number) => `The agent found ${n} ${n === 1 ? 'hole' : 'holes'}:`,
   holes: (n: number) => `${n} ${n === 1 ? 'hole' : 'holes'}`,
   holesSent: (round: number, of: number) => `sent to Claude to close · round ${round} of ${of}`,
-  criticCapped: (of: number) => `${of} rounds of holes went to Claude: what they changed is yours to look at. The critic looks again on f, not by itself.`,
+  criticCapped: (of: number) => `${of} rounds of holes went to Claude: what they changed is yours to look at. The critic looks again on h, not by itself.`,
   sentHoles: 'Sent to Claude to close:',
   round: (n: number) => `round ${n}`,
   findHoles: 'find holes',
@@ -235,8 +235,8 @@ End your answer with JSON alone: [{"hole": "what is missing or wrong", "where": 
     mode === 'off'
       ? 'The critic is off.'
       : mode === 'button'
-        ? 'The critic reads the change for holes when you press f on Decide.'
-        : 'The critic reads the change for holes after each turn that changes it, and sends the blockers it finds to Claude to close, until a look finds none: three rounds at most, then it waits for f.',
+        ? 'The critic reads the change for holes when you press h on Decide.'
+        : 'The critic reads the change for holes after each turn that changes it, and sends the blockers it finds to Claude to close, until a look finds none: three rounds at most, then it waits for h.',
   decideAllPrompt: (change: string, dir: string, points: readonly string[]) =>
     `Decide these open points of the OpenSpec change "${change}" (${dir}) yourself:\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nFirst read proposal.md, design.md, tasks.md and the change's specs, and the project's code where a point turns on it. For each point take the answer the change and the code argue for best, write it where it belongs (proposal.md, design.md, the specs, tasks.md) with its reason in a sentence, and take it out of the open questions and assumptions. Where a point cannot be settled without me (a product choice, a cost, something no file says), leave it open and ask me about it at the end. Touch nothing else, and end with a line per point: what you decided, or what you need from me.`,
   applyPrompt: (change: string, dir: string, items: { point: string; answer: string }[]) =>
@@ -447,12 +447,12 @@ const RU: typeof EN = {
   criticFailed: 'Агент не вернул список дыр.',
   criticNone: 'Агент дыр не нашёл.',
   criticReady: 'Блокирующих дыр нет: изменение можно делать.',
-  criticResting: 'Критик посмотрит снова по f, сам не запустится.',
+  criticResting: 'Критик посмотрит снова по h, сам не запустится.',
   minorHoles: 'Мелочи, которые решатся в коде; к Claude сами не уходят:',
   criticFound: n => `Агент нашёл ${n} ${plural(n, 'дыру', 'дыры', 'дыр')}:`,
   holes: n => `${n} ${plural(n, 'дыра', 'дыры', 'дыр')}`,
   holesSent: (round, of) => `отправлено Claude закрыть · круг ${round} из ${of}`,
-  criticCapped: of => `Прошло ${of} круга: что они поменяли, посмотри сам. Критик посмотрит снова по f, сам не запустится.`,
+  criticCapped: of => `Прошло ${of} круга: что они поменяли, посмотри сам. Критик посмотрит снова по h, сам не запустится.`,
   sentHoles: 'Ушло Claude закрыть:',
   round: n => `круг ${n}`,
   findHoles: 'найти дыры',
@@ -463,8 +463,8 @@ const RU: typeof EN = {
     mode === 'off'
       ? 'Критик выключен.'
       : mode === 'button'
-        ? 'Критик ищет дыры, когда нажмёшь f на вкладке «Решить».'
-        : 'Критик ищет дыры после каждого хода, который меняет спеку, и отправляет найденные блокеры Claude закрыть, пока не найдёт ни одного: не больше трёх кругов, дальше ждёт f.',
+        ? 'Критик ищет дыры, когда нажмёшь h на вкладке «Решить».'
+        : 'Критик ищет дыры после каждого хода, который меняет спеку, и отправляет найденные блокеры Claude закрыть, пока не найдёт ни одного: не больше трёх кругов, дальше ждёт h.',
   decideAllPrompt: (change, dir, points) =>
     `Реши сам эти открытые пункты изменения OpenSpec «${change}» (${dir}):\n\n${points.map((p, i) => `${i + 1}. ${p}`).join('\n')}\n\nСначала прочитай proposal.md, design.md, tasks.md и specs изменения, а где пункт упирается в код проекта, и код. Для каждого пункта выбери ответ, за который больше говорят изменение и код, впиши его туда, где ему место (proposal.md, design.md, specs, tasks.md), с причиной в одном предложении, и убери пункт из открытых вопросов и допущений. Если пункт без меня не решить (продуктовый выбор, деньги, то, чего нет ни в одном файле), оставь его открытым и спроси меня о нём в конце. Больше ничего не трогай и в конце напиши по строке на пункт: что решил или что тебе нужно от меня.`,
   applyPrompt: (change, dir, items) =>

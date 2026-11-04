@@ -4,6 +4,9 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions, TurnCompleteRea
 import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Hole, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
+import { isWaiting, ownerNow, send as sendPrompt } from '../core/outbox'
+import { isAutoNow } from '../ledger/ledger'
+import { isOverBudget, ownAgent, spendOn } from '../core/spend'
 import { sentWithSkill, specSkill, tddSkill } from '../router/catalog'
 import { offerLenses } from '../lenses/lenses'
 import { isOn } from '../parts/parts'
@@ -107,7 +110,7 @@ let jobs = 0
 let briefing: { fingerprint: string; done: Promise<void> } | undefined
 
 // The critic's mode as /config sets it; /spec critic overrides it.
-let criticDefault: CriticMode = 'off'
+let criticDefault: CriticMode = 'auto'
 // Whether the main loop is in a turn: holes found meanwhile wait for its end to go to Claude, for
 // the change named here.
 let isMainTurn = false
@@ -140,7 +143,7 @@ async function pressOnce($: EngineInterface, key: string, fn: () => Promise<unkn
 const criticModeOf = (value: unknown): CriticMode | undefined => (value === 'off' || value === 'button' || value === 'auto' ? value : undefined)
 
 export function configureSpec(options: PluginOptions) {
-  criticDefault = criticModeOf(options.specCritic) ?? 'off'
+  criticDefault = criticModeOf(options.specCritic) ?? 'auto'
 }
 
 async function wordsIn($: EngineInterface) {
@@ -503,6 +506,7 @@ async function briefOf($: EngineInterface, lens: Lens) {
     maxTokens: 3000,
     timeoutMs: TIMEOUT_MS,
   })
+  spendOn('spec', r.usage)
   if (!r.isAnswered) {
     await fail($, w.failed(whyNot(w, r)), { what: 'brief' })
     return
@@ -511,6 +515,41 @@ async function briefOf($: EngineInterface, lens: Lens) {
   await $.store.set(briefKey(lens.root, lang, lens.current), brief)
   // The pane may have moved on to another change, or language, while the model read.
   if ((await read($, lensAtom))?.current === lens.current && (await langIn($)) === lang) await update($, briefAtom, () => brief)
+  else return
+  if (isAutoNow()) await decideByItself($, lens.current, brief)
+}
+
+// The points sent to Claude to decide by itself, by change, and how many times: a point it left open
+// as the person's (a product choice, a cost) stays on the Decide tab, not sent again.
+const decidedByItself = new Map<string, { points: Set<string>; rounds: number }>()
+const DECIDE_ROUNDS = 2
+
+// A /clear or /resume: the rounds of the conversation before are its own.
+export function clearDecided() {
+  decidedByItself.clear()
+}
+
+// In auto, the open points go to Claude by themselves: it settles those the change and the code argue
+// for and leaves the person's open, asking about them at the end.
+async function decideByItself($: EngineInterface, change: string, brief: Brief) {
+  const was = decidedByItself.get(change) ?? { points: new Set<string>(), rounds: 0 }
+  const verdicts = (await decidingOf($, brief)).verdicts
+  const open = brief.decisions.filter((point, i) => !verdicts[i] && !was.points.has(point))
+  if (open.length === 0 || was.rounds >= DECIDE_ROUNDS) return
+  decidedByItself.set(change, { points: new Set([...was.points, ...open]), rounds: was.rounds + 1 })
+  await decideAll($, open)
+}
+
+// The points of the change in view Claude was sent to decide and left open as the person's: they
+// wait on the Decide tab, and To decide counts them.
+export async function specQuestions($: EngineInterface) {
+  const change = (await read($, lensAtom))?.current
+  const brief = await read($, briefAtom)
+  const sent = change ? decidedByItself.get(change)?.points : undefined
+  // Sent and not answered yet, they are Claude's still.
+  if (!brief || !sent || isWaiting('spec') || ownerNow()?.from === 'spec') return 0
+  const verdicts = (await decidingOf($, brief)).verdicts
+  return brief.decisions.filter((point, i) => !verdicts[i] && sent.has(point)).length
 }
 
 function explainChanges($: EngineInterface) {
@@ -527,6 +566,7 @@ function explainChanges($: EngineInterface) {
       maxTokens: 1500,
       timeoutMs: TIMEOUT_MS,
     })
+    spendOn('spec', r.usage)
     if (r.isAnswered) await update($, explainAtom, () => r.text)
     else await fail($, w.failed(whyNot(w, r)), { what: 'explain' })
   })
@@ -565,6 +605,7 @@ async function optionsOf($: EngineInterface, lens: Lens, brief: Brief) {
     maxTokens: 1500,
     timeoutMs: TIMEOUT_MS,
   })
+  spendOn('spec', r.usage)
   if (!r.isAnswered) {
     await fail($, w.failed(whyNot(w, r)), { what: 'options' })
     return
@@ -602,15 +643,15 @@ async function unsettle($: EngineInterface, index: number) {
 // Every point not decided yet goes to the session for Claude to decide: it writes each answer
 // into the change's files, or asks where it cannot decide alone, and the brief is made again from
 // those. The points show as Claude's to decide until then.
-async function decideAll($: EngineInterface) {
+async function decideAll($: EngineInterface, only?: readonly string[]) {
   const lens = await read($, lensAtom)
   const brief = await read($, briefAtom)
   if (!lens || !brief) return
   const w = await wordsIn($)
   const verdicts = (await decidingOf($, brief)).verdicts
-  const open = brief.decisions.flatMap((point, i) => (verdicts[i] ? [] : [{ i, point }]))
+  const open = brief.decisions.flatMap((point, i) => (verdicts[i] || (only && !only.includes(point)) ? [] : [{ i, point }]))
   if (open.length === 0) return
-  const r = await $.prompt.submit({ text: w.decideAllPrompt(lens.current, join(lens.root, 'changes', lens.current), open.map(x => x.point)), asUser: true })
+  const r = await sendPrompt($, { from: 'spec' }, w.decideAllPrompt(lens.current, join(lens.root, 'changes', lens.current), open.map(x => x.point)))
   if (r.drop !== undefined) {
     await fail($, w.notSent(r.drop))
     return
@@ -639,7 +680,7 @@ async function resendDecisions($: EngineInterface) {
   const settled = sent.filter(x => !x.isByClaude)
   const left = sent.filter(x => x.isByClaude).map(x => x.point)
   const text = [...(settled.length > 0 ? [w.applyPrompt(lens.current, dir, settled)] : []), ...(left.length > 0 ? [w.decideAllPrompt(lens.current, dir, left)] : [])].join('\n\n')
-  const r = await $.prompt.submit({ text, asUser: true })
+  const r = await sendPrompt($, { from: 'spec' }, text)
   if (r.drop !== undefined) {
     await fail($, w.notSent(r.drop))
     return
@@ -675,7 +716,7 @@ async function applyDecisions($: EngineInterface) {
     return v && !v.isSent ? [{ i, point, answer: v.answer }] : []
   })
   if (ready.length === 0) return
-  const r = await $.prompt.submit({ text: w.applyPrompt(lens.current, join(lens.root, 'changes', lens.current), ready), asUser: true })
+  const r = await sendPrompt($, { from: 'spec' }, w.applyPrompt(lens.current, join(lens.root, 'changes', lens.current), ready))
   if (r.drop !== undefined) {
     await fail($, w.notSent(r.drop))
     return
@@ -700,7 +741,7 @@ async function send($: EngineInterface, kind: 'task' | 'archive', text: string) 
   const tdd = kind === 'task' ? await tddSkill($).catch(() => undefined) : undefined
   const docs = kind === 'archive' && (await isSetUp($).catch(() => false)) ? w.archiveDocs : undefined
   const lines = [text, ...(docs ? [docs] : []), ...(tdd ? [w.withTdd(tdd)] : []), ...(skill ? [w.withSkill(skill)] : [])]
-  const r = await $.prompt.submit({ text: lines.join('\n\n'), asUser: true })
+  const r = await sendPrompt($, { from: 'spec' }, lines.join('\n\n'))
   if (skill && r.drop === undefined) await sentWithSkill($, skill, text).catch(() => {})
   return r
 }
@@ -761,7 +802,7 @@ async function closeCases($: EngineInterface, ids: readonly string[]) {
     ...(cases.length > 0 ? [w.closePrompt(lens.current, file, cases)] : []),
     ...(scenarios.length > 0 ? [w.coverPrompt(lens.current, file, scenarios, cases.length === 0)] : []),
   ].join('\n\n')
-  const r = await $.prompt.submit({ text, asUser: true })
+  const r = await sendPrompt($, { from: 'spec' }, text)
   if (r.drop !== undefined) {
     await fail($, w.notSent(r.drop))
     return
@@ -839,8 +880,12 @@ async function afterArchive($: EngineInterface) {
   await offerRetro($, archive.change)
 }
 
+// Past the session's budget the critic waits for f.
 async function criticMode($: EngineInterface) {
-  return (await read($, criticModeAtom)) ?? criticDefault
+  const chosen = await read($, criticModeAtom)
+  const mode = chosen ?? criticDefault
+  // Past the budget the critic waits for its key; by hand too, unless the person chose auto for it.
+  return mode === 'auto' && (isOverBudget() || (chosen === null && !isAutoNow())) ? 'button' : mode
 }
 
 // The critic's last look at `change`: this session's, else the one kept from an earlier session.
@@ -898,6 +943,7 @@ async function startCritic($: EngineInterface, isAsked: boolean) {
   const agentId =
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === task)?.id : undefined)
   if (agentId) critics.add(agentId)
+  ownAgent(agentId, 'spec')
   // What the rounds before sent stays in view while they go on.
   const sent = isAsked ? [] : (was?.sent ?? [])
   await keepCritic($, lens.root, { change: lens.current, fingerprint, at, holes: [], round, status: agentId ? 'running' : 'failed', ...(agentId ? { agentId } : {}), ...(sent.length > 0 ? { sent } : {}) })
@@ -944,7 +990,7 @@ async function closeHoles($: EngineInterface, change: string, isAll: boolean) {
   const going = new Set(holes)
   const marked = critic.holes.map(hole => (going.has(hole) ? { ...hole, isSent: true as const } : hole))
   await keepCritic($, lens.root, { ...critic, holes: marked, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes }] })
-  const r = await $.prompt.submit({ text: w.closeHolesPrompt(change, join(lens.root, 'changes', change), holes), asUser: true })
+  const r = await sendPrompt($, { from: 'spec' }, w.closeHolesPrompt(change, join(lens.root, 'changes', change), holes))
   if (r.drop !== undefined) {
     // Taken back, unless a critic started since.
     const now = (await read($, criticAtom))[change]
@@ -1016,6 +1062,7 @@ async function ask($: EngineInterface, question: string) {
       maxTokens: 1500,
       timeoutMs: TIMEOUT_MS,
     })
+    spendOn('spec', r.usage)
     if (r.isAnswered) await update($, answerAtom, () => ({ question: q, text: r.text }))
     else await fail($, w.failed(whyNot(w, r)), { what: 'answer', question: q })
   })
@@ -1328,7 +1375,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Box flexDirection="row" gap={1}>
           <Text color="warning">{w.changedFiles(lens.deltas.length)}</Text>
           {busy === 'explain' || explain ? null : keyed('explain', w.explain, 'e', run(() => explainChanges($)), { variant: 'primary' })}
-          {keyed('mark-read', w.markRead, 's', run(() => markRead($)), explain ? { variant: 'primary' } : { dimColor: true })}
+          {keyed('mark-read', w.markRead, 'v', run(() => markRead($)), explain ? { variant: 'primary' } : { dimColor: true })}
         </Box>
         <Box flexDirection="column" marginTop={1}>
           {lens.deltas.map(d => (
@@ -1386,8 +1433,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             ) : blockers.length > 0 ? (
               <Text color="warning">{w.criticFound(blockers.length)}</Text>
             ) : null}
-            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'h', once('holes', () => closeHoles($, lens.current, true)), { variant: 'primary' }) : null}
-            {critic?.status === 'running' ? null : keyed('find-holes', w.findHoles, 'f', once('critic', () => critique($, true)), { dimColor: true })}
+            {holes.length > 0 ? keyed('close-holes', w.closeHoles(holes.length), 'f', once('holes', () => closeHoles($, lens.current, true)), { variant: 'primary' }) : null}
+            {critic?.status === 'running' ? null : keyed('find-holes', w.findHoles, 'h', once('critic', () => critique($, true)), { dimColor: true })}
           </Box>
           {holeRows(blockers)}
           {minors.length > 0 ? <Text dimColor>{w.minorHoles}</Text> : null}

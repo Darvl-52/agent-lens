@@ -4,6 +4,9 @@ import type { Part } from '../types'
 import type { StopNext } from './core/hooks'
 
 import { configureLang, restoreLang } from './core/lang'
+import { clearOutbox, endTurn, isPerson, startTurn, turnOwner } from './core/outbox'
+import { clearSpend, configureSpend, spendAgent, spendOn } from './core/spend'
+import { clearLedger, configureLedger, decideLine, endLedgerTurn, openDecide, PANE as DECIDE_PANE, pane as decidePane, restoreLedger, startLedgerTurn } from './ledger/ledger'
 import { checkedGuard, clearGuard, configureGuard, endGuardTurn, guardAfter, guardBefore, guardCommand, guardLines, restoreGuard, startGuardTurn } from './guard/guard'
 import {
   aroundShell,
@@ -12,6 +15,8 @@ import {
   beforeWrite,
   checkAfter,
   checkBefore,
+  raiseRemoved,
+  rulesRemovedBy,
   classicStop,
   classicSubagentStop,
   configureReview,
@@ -40,11 +45,12 @@ import {
 } from './router/router'
 import { PANE as ROUTER_PANE, registerCommand as registerRouterCommand } from './router/state'
 import { addTaskRules, afterSetupEdit, dismissRetro, dismissTaskRules, endSetupAgent, endSetupTurn, gateStop, judgeReport, registerSetup, retroLine, rulesLine, runRetro, openSetup, PANE as SETUP_PANE, pane as setupPane, setupCommand, setupLine, startSetup, startSetupTurn } from './setup/setup'
+import { isMcpPush } from './lenses/report'
 import { configureLenses, dismissOffer, endLensAgent, lensesBeforePush, lensesCommand, lensesLine, lensReport, offerLine, openPane as openLenses, PANE as LENSES_PANE, pane as lensesPane, runOffered } from './lenses/lenses'
-import { isOn, offText, PARTS, PANE as PARTS_PANE, registerCommand as registerPartsCommand, restoreParts } from './parts/parts'
+import { isByPerson, isOn, loosens, notByPerson, offText, PARTS, PANE as PARTS_PANE, registerCommand as registerPartsCommand, restoreParts } from './parts/parts'
 import { command as partsCommand, pane as partsPane } from './parts/menu'
 import { langCommand } from './switch'
-import { afterSpecEdit, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, registerCommand as registerSpecCommand, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
+import { afterSpecEdit, clearDecided, configureSpec, endSpecAgent, endSpecTurn, criticReport, openPane as openSpec, registerCommand as registerSpecCommand, rescanSpec, PANE as SPEC_PANE, command as specCommand, pane as specPane, specLine, startSpec, startSpecTurn } from './spec/lens'
 
 // Four parts in one module, each in its own folder, sharing the language: the review of what the
 // agent changed (with the check of each edit as it is made), the OpenSpec change in view, the
@@ -68,6 +74,7 @@ async function readBack($: Parameters<Hook<'session.end'>>[0]) {
   if (isOn('spec')) await rescanSpec($).catch(() => {})
   if (isOn('router')) await restoreRouter($).catch(() => {})
   await restoreGuard($).catch(() => {})
+  await restoreLedger($).catch(() => {})
   if (isOn('setup')) await startSetup($).catch(() => {})
 }
 
@@ -84,12 +91,16 @@ export const register: Register = (on, options) => {
   configureRouter(options)
   configureGuard(options)
   configureLenses(options)
+  // What the review and the docs agent find goes to Claude by itself, the disputes to the person.
+  configureLedger(options)
+  configureSpend(options)
 
   // A part turned off in /agent-lens still has its command, which says so, and does none of its work.
   on('session.start', async ($, e, next) => {
     await restoreLang($).catch(() => {})
     await restoreParts($).catch(() => {})
     await restoreGuard($).catch(() => {})
+    await restoreLedger($).catch(() => {})
     await registerPartsCommand($).catch(() => {})
     await startReview($).catch(() => {})
     await (isOn('spec') ? startSpec($, e.isInteractive) : registerSpecCommand($)).catch(() => {})
@@ -106,6 +117,10 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
     if (e.reason === 'clear' || e.reason === 'resume') {
+      clearOutbox()
+      clearSpend()
+      await clearLedger($).catch(() => {})
+      clearDecided()
       await restartReview($).catch(() => {})
       await clearRouter($).catch(() => {})
       await clearGuard($).catch(() => {})
@@ -134,8 +149,10 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, e, next) => {
     begun.set(e.agentId ?? MAIN, PARTS.filter(isOn))
     if (e.agentId === undefined) {
+      // Whose prompt started it, the person's or a part's: each part judges only its own turns.
+      startLedgerTurn(startTurn(e.text))
       if (isOn('spec')) startSpecTurn()
-      if (isOn('setup')) startSetupTurn($, e.text)
+      if (isOn('setup')) startSetupTurn($)
     }
     if (isOn('guard')) await startGuardTurn($, e.agentId).catch(() => {})
     return isOn('review') ? turnStart($, e, next) : next(e)
@@ -149,10 +166,11 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     // A turn whose start this module missed (a reload) ends as the switches are now.
     const began = (part: Part) => begun.get(e.agentId ?? MAIN)?.includes(part) ?? isOn(part)
+    const owner = turnOwner()
     endRouterTurn(e.agentId, e.answer)
     if (e.agentId === undefined) {
       if (began('spec')) endSpecTurn($, e.reason)
-      if (began('setup')) endSetupTurn($, e.reason)
+      if (began('setup')) endSetupTurn($, e.reason, isOn('setup'))
     } else {
       endSpecAgent($, e.agentId, e.answer)
       void endSetupAgent($, e.agentId, e.answer).catch(() => {})
@@ -160,7 +178,15 @@ export const register: Register = (on, options) => {
     }
     await endGuardTurn($, e.agentId).catch(() => {})
     const result = await next(e)
-    if (began('review')) await endReviewTurn($, e.agentId, e.reason).catch(() => {})
+    if (began('review')) await endReviewTurn($, e.agentId, e.reason, isOn('review')).catch(() => {})
+    // What the turn cost: a subagent's is the part's that started it; a main turn its prompt
+    // started is the part's too, as the main model pays for it.
+    if (e.agentId !== undefined) spendAgent(e.agentId, e.usage)
+    else if (!isPerson(owner)) spendOn(owner.from, e.usage, true)
+    if (e.agentId === undefined) {
+      endTurn()
+      await endLedgerTurn($, owner, e.answer, e.reason).catch(() => {})
+    }
     begun.delete(e.agentId ?? MAIN)
     return result
   })
@@ -186,10 +212,13 @@ export const register: Register = (on, options) => {
     if (held?.deny !== undefined) return { deny: held.deny }
     const refusal = isOn('review') ? await checkBefore($, e).catch(() => undefined) : undefined
     if (refusal !== undefined) return { deny: refusal }
+    // A rule taken out of a rule file waits for the person, once the edit that takes it landed.
+    const removed = isOn('review') ? await rulesRemovedBy($, e).catch(() => undefined) : undefined
     // In Lenses: auto, work not read through the lenses since the last push waits for them.
-    const unread = e.tool === 'Bash' && isOn('lenses') ? await lensesBeforePush($, e.command, e.agentId).catch(() => undefined) : undefined
+    const unread = isOn('lenses') && (e.tool === 'Bash' || isMcpPush(e.tool)) ? await lensesBeforePush($, e.tool === 'Bash' ? e.command : null, e.agentId).catch(() => undefined) : undefined
     if (unread !== undefined) return { deny: unread }
     const ran = await next(e)
+    if (removed && !ran.isError) await raiseRemoved($, removed).catch(() => {})
     if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) {
       if (isOn('spec')) afterSpecEdit($, e.file_path)
       if (isOn('setup')) afterSetupEdit($, e.file_path)
@@ -207,6 +236,8 @@ export const register: Register = (on, options) => {
 
   // `lang` after any of them switches every part.
   // A part turned off answers its verb with where to turn it on.
+  // What loosens the checks runs only on the person's word, whatever runs the command.
+  on('command.run', async ($, e, next) => (loosens(e.command, e.args) && !isByPerson(e.origin) ? notByPerson($) : next(e)))
   on('command.run', { command: 'changes' }, async ($, e) => {
     const verb = e.args.trim().split(/\s+/)[0]?.toLowerCase()
     const part = verb === 'guard' ? 'guard' : verb === 'lenses' ? 'lenses' : 'review'
@@ -216,7 +247,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'spec' }, async ($, e) => (await langCommand($, 'spec', e.args)) ?? (isOn('spec') ? specCommand($, e) : offText($, 'spec')))
   on('command.run', { command: 'setup-project' }, ($, e) => (isOn('setup') ? setupCommand($, e.args) : offText($, 'setup')))
   on('command.run', { command: 'router' }, async ($, e) => (await langCommand($, 'router', e.args)) ?? (isOn('router') ? routerCommand($, e) : offText($, 'router')))
-  on('command.run', { command: 'agent-lens' }, $ => partsCommand($))
+  on('command.run', { command: 'agent-lens' }, ($, e) => (e.args.trim().toLowerCase() === 'decide' ? openDecide($) : partsCommand($)))
 
   // One row above the prompt: the OpenSpec change in view, then what the agent's last turn changed,
   // each opening its pane. Where the change cannot keep its name beside the turn, each has a row.
@@ -280,6 +311,8 @@ export const register: Register = (on, options) => {
       )
     const lenses = isOn('lenses') ? await lensesLine($).catch(() => null) : null
     if (lenses) rows.unshift(row('lenses-row', <Text color="warning">{lenses}</Text>, <Button key="open-lenses" label="/changes lenses" plain dimColor onPress={() => void openLenses($).catch(() => {})} />))
+    const decide = await decideLine($).catch(() => null)
+    if (decide) rows.unshift(row('decide-row', <Text color="warning">{decide}</Text>, <Button key="open-decide" label="/agent-lens decide" plain dimColor onPress={() => void openDecide($).catch(() => {})} />))
     const docs = isOn('setup') ? await setupLine($).catch(() => null) : null
     if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(() => {})} />))
     rows.unshift(...guarded)
@@ -298,4 +331,5 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: SETUP_PANE }, ($, e) => setupPane($, e))
   on('ui.render', { component: 'Pane', requestId: LENSES_PANE }, ($, e) => lensesPane($, e))
   on('ui.render', { component: 'Pane', requestId: PARTS_PANE }, ($, e) => partsPane($, e))
+  on('ui.render', { component: 'Pane', requestId: DECIDE_PANE }, ($, e) => decidePane($, e))
 }

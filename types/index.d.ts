@@ -287,7 +287,8 @@ export type SetupDocIssue = { file: string; line?: number; kind: SetupDocIssueKi
 
 // What the docs agent found in a turn's edits to the files: what is wrong, where, how to fix it,
 // whether it blocks.
-export type SetupFinding = { file: string; text: string; fix: string; isMinor?: true }
+// `isTaken` once the ledger took it to Claude.
+export type SetupFinding = { file: string; text: string; fix: string; isMinor?: true; isTaken?: true }
 
 // The docs agent's last look: running (its id), done with its findings, or failed; `isSent` once
 // they went to Claude.
@@ -337,7 +338,16 @@ export type SetupBaseline = { sha: string; red: string[] }
 
 // What the review by lenses found under one lens: what was wrong where and what it risks, or that
 // it was clean and what was checked, with numbers, or that it does not apply and why.
-export type LensFinding = { file: string; line?: number; problem: string; risk: string }
+// A point a part's checks found, as the ledger takes it to Claude: its id in the part, where it is,
+// what is wrong, how to fix it, whether it is minor, and how sure the look that found it is.
+export type LedgerPoint = { id: string; where: string; text: string; fix?: string; isMinor: boolean; confidence?: 'confirmed' | 'likely' }
+// A point sent, numbered across the conversation: by which part (`source`), and what came of it.
+export type LedgerEntry = LedgerPoint & { key: string; source: 'review' | 'docs' | 'terms' | 'lenses' | 'rules'; n: number; status: 'sent' | 'fixed' | 'rejected' | 'agreed' | 'insisted'; reason?: string; byMod?: true; isUnanswered?: true; batch?: number }
+
+// One kind of mistake the lenses found: its first place and the others of the same shape, what the
+// agent read that shows it, how sure it is, and, where the second look did not hold it, why.
+export type LensPlace = { file: string; line?: number }
+export type LensFinding = LensPlace & { problem: string; risk: string; places?: LensPlace[]; evidence?: string; confidence?: 'confirmed' | 'likely'; dropped?: string }
 export type LensResult = { lens: string; status: 'findings' | 'clean' | 'na'; checked: string; findings: LensFinding[] }
 
 // The last review of the branch by lenses: running (its agent), done with what each lens found,
@@ -356,6 +366,8 @@ export type LensReview = {
   outside: string[]
   untouched: string[]
   isSent?: true
+  // The findings taken to Claude one by one, by their ids, as the ledger takes them.
+  taken?: string[]
 }
 
 // An OpenSpec change in progress: its folder's name and its ticked tasks out of all of them.
@@ -498,6 +510,9 @@ declare module 'claude-code' {
 
       // The parts turned off in /agent-lens, for its pane; null until read.
       'parts.off': Part[] | null
+
+      // The points the ledger sent to Claude this conversation, and what came of each.
+      ledger: LedgerEntry[]
     }
   }
 }

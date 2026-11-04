@@ -127,10 +127,12 @@ async function gitIn(exec: Exec, cwd: string, args: string[]) {
 }
 const namesOf = (out: string | null) => (out ?? '').split('\n').map(s => s.trim()).filter(Boolean)
 
-// The files of a folder changed against its commit and not deleted, from the folder, and those git
-// does not know of yet. Outside a repository: none.
-async function changedIn(exec: Exec, cwd: string) {
-  const [diff, untracked] = await Promise.all([gitIn(exec, cwd, ['diff', 'HEAD', '--name-only', '--relative', '--diff-filter=d']), gitIn(exec, cwd, ['ls-files', '--others', '--exclude-standard'])])
+// The files of a folder changed against its commit, or against the one it was on as the turn
+// started (a turn that commits leaves nothing against its own), and not deleted, from the folder,
+// and those git does not know of yet. Outside a repository: none.
+async function changedIn(exec: Exec, cwd: string, since?: string) {
+  const base = since && since !== '' ? since : 'HEAD'
+  const [diff, untracked] = await Promise.all([gitIn(exec, cwd, ['diff', base, '--name-only', '--relative', '--diff-filter=d']), gitIn(exec, cwd, ['ls-files', '--others', '--exclude-standard'])])
   return [...new Set([...namesOf(diff), ...namesOf(untracked)])]
 }
 
@@ -152,14 +154,14 @@ export async function fingerprintOf(exec: Exec, cwd: string) {
 // One tier run, folder by folder, each command in turn: what went red, how long each took, and the
 // commands that take files and had none, which did not run. A fast command that takes files runs on
 // the folder's changed ones; a full one on the whole folder.
-export async function runTier(exec: Exec, root: string, tier: Record<string, string[]>, opts: { isFast: boolean; now: () => Promise<number> | number }) {
+export async function runTier(exec: Exec, root: string, tier: Record<string, string[]>, opts: { isFast: boolean; now: () => Promise<number> | number; since?: Readonly<Record<string, string>> }) {
   const shell = await shellOf(exec, root)
   const failures: GateFailure[] = []
   const timings: Timing[] = []
   const skipped: { folder: string; command: string }[] = []
   for (const [folder, commands] of Object.entries(tier)) {
     const cwd = joinRel(root, folder)
-    const files = opts.isFast && commands.some(takesFiles) ? await changedIn(exec, cwd) : []
+    const files = opts.isFast && commands.some(takesFiles) ? await changedIn(exec, cwd, opts.since?.[folder]) : []
     for (const command of commands) {
       const line = opts.isFast ? expand(command, files, shell) : command.replace(FILES, '.')
       if (line === null) {

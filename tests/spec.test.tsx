@@ -227,7 +227,15 @@ const project = async (
   // The project's folder as the engine spells it; the commands not on the PATH by that name; the
   // changes whose folder is gone by the time the scan lists it.
   // `slow`: the commands that run past their time. `commands`: skills installed beside OpenSpec's.
-  { root = '/proj', missing = [] as readonly string[], gone = [] as readonly string[], slow = [] as readonly string[], commands = [] as readonly string[] } = {},
+  // `autonomy`: what goes to Claude unasked; by hand here, unless a test says otherwise.
+  {
+    root = '/proj',
+    missing = [] as readonly string[],
+    gone = [] as readonly string[],
+    slow = [] as readonly string[],
+    commands = [] as readonly string[],
+    autonomy = 'manual' as 'manual' | 'auto' | 'full',
+  } = {},
 ) => {
   // The disk is kept by POSIX path, however the engine spells one: on Windows it hands the hooks
   // `C:\proj\openspec\changes` for `/proj/openspec/changes`, and elsewhere a `C:\proj` the mod was
@@ -252,7 +260,8 @@ const project = async (
   // The test TC-01 of the door change names: there, so its case has a test.
   disk.set(`${at(root).replace(/\/$/, '')}/e2e/door.spec.ts`, "test('TC-01 grant access', async () => {})\n")
   const isDir = (path: string) => [...disk.keys()].some(p => p.startsWith(`${at(path)}/`))
-  const store = new Map<string, unknown>()
+  // The critic off, as each test turns it on where it is about it.
+  const store = new Map<string, unknown>([['critic-mode', 'off'], ['autonomy', autonomy]])
   const asked: ModelCompleteInput[] = []
   const opened: string[] = []
   const submitted: { text: string; asUser?: true; context?: readonly string[] }[] = []
@@ -1310,8 +1319,8 @@ test('in auto mode the details the code can settle stay on the tab, and a look w
   await settle()
   expect(submitted).toHaveLength(1)
   expect(await pane.find({ type: 'Text', text: /^✓ No blocking holes: the change can be built\.$/ })).toBeDefined()
-  expect(await pane.find({ type: 'Text', text: /^The critic looks again on f, not by itself\.$/ })).toBeDefined()
-  // A change to the text after it starts no critic; h sends the details on the person's word.
+  expect(await pane.find({ type: 'Text', text: /^The critic looks again on h, not by itself\.$/ })).toBeDefined()
+  // A change to the text after it starts no critic; f sends the details on the person's word.
   put('door', 'design.md', '# Design\n\nMore.\n')
   await turn()
   await settle()
@@ -1386,7 +1395,7 @@ test('a critic started while the holes before wait in the queue reads the next r
   await pane.unmount()
 })
 
-test('the critic on a button: f looks for holes, h sends them; off, the tab says how to turn it on', async ($, on) => {
+test('the critic on a button: h looks for holes, f sends them; off, the tab says how to turn it on', async ($, on) => {
   const { spec, settle, submitted, turn, spawned, agentDone } = await project($, on, { door: DOOR })
   await spec()
   await settle()
@@ -1474,4 +1483,32 @@ test('in a project set up, the archive moves the change’s terms and decisions 
   b = await band()
   expect(b.row).toBeUndefined()
   await b.ui.unmount()
+})
+
+test('by hand, the critic with no word of the person waits for its key', async ($, on) => {
+  const { spec, store } = await project($, on, { door: DOOR })
+  store.delete('critic-mode')
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  expect((await spec('critic')).text).toMatch(/^The critic is button\./)
+})
+
+test('with no word of the person, the critic is in auto: what it finds goes to Claude by itself', async ($, on) => {
+  const { spec, store } = await project($, on, { door: DOOR }, undefined, { autonomy: 'auto' })
+  store.delete('critic-mode')
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  expect((await spec('critic')).text).toMatch(/^The critic is auto\./)
+})
+
+test('in auto, the open points go to Claude to decide by itself once: what it leaves open as the person’s is not sent again', async ($, on) => {
+  const { spec, settle, submitted, put, turn } = await project($, on, { door: DOOR }, undefined, { autonomy: 'auto' })
+  await spec()
+  await settle()
+  const decide = submitted.filter(s => /^Decide these open points/.test(s.text))
+  expect(decide).toHaveLength(1)
+  expect(decide[0]!.text).toMatch(/1\. Pick the expiry \(design\.md\)\n2\. Who may revoke \(proposal\.md\)[\s\S]*Where a point cannot be settled without me \(a product choice, a cost, something no file says\), leave it open/)
+  // Claude settles one and leaves the other as the person's: the brief made again sends nothing more.
+  put('door', 'design.md', '# Design\n\nThe access expires at midnight.\n')
+  await turn()
+  await settle()
+  expect(submitted.filter(s => /^Decide these open points/.test(s.text))).toHaveLength(1)
 })

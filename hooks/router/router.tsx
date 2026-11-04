@@ -2,6 +2,7 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-c
 
 import type { Change, Decision, Pick, Setup, Skill } from '../../types/router'
 import type { PaneHook } from '../core/hooks'
+import { spendOn } from '../core/spend'
 import { catalogNow, changesIn, isLoaded, KEPT_DECISIONS, lookAround, manualNow, oneLine } from './catalog'
 import { drawPane } from './pane'
 import { SYSTEM, directiveOf, isTerse, kindOf, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf } from './route'
@@ -80,6 +81,7 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
     },
     { signal },
   )
+  spendOn('router', reply.usage)
   if (!reply.isAnswered) {
     // Cut by the person (escape on the prompt) the model did not fail; by its time, it did.
     if (signal.aborted) return { picks: [] as Pick[] }

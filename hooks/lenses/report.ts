@@ -1,4 +1,4 @@
-import type { LensFinding, LensResult } from '../../types'
+import type { LensFinding, LensPlace, LensResult } from '../../types'
 
 // The agent's answer, from the JSON object it ends with; undefined where it holds none.
 export function parseLensReport(answer: string): { results: LensResult[]; outside: string[]; untouched: string[] } | undefined {
@@ -13,12 +13,30 @@ export function parseLensReport(answer: string): { results: LensResult[]; outsid
     const lenses = (raw as { lenses?: unknown } | null)?.lenses
     if (!Array.isArray(lenses)) continue
     const said = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
-    const findingOf = (f: Record<string, unknown>): LensFinding => ({
-      file: said(f.file),
-      ...(typeof f.line === 'number' && f.line > 0 ? { line: f.line } : {}),
-      problem: said(f.problem),
-      risk: said(f.risk),
-    })
+    // A place as {file, line} or as "path:line".
+    const placeOf = (p: unknown): LensPlace | undefined => {
+      if (typeof p === 'string') {
+        const m = p.trim().match(/^(.+?)(?::(\d+))?$/)
+        return m?.[1] ? { file: m[1], ...(m[2] && Number(m[2]) > 0 ? { line: Number(m[2]) } : {}) } : undefined
+      }
+      if (typeof p !== 'object' || p === null) return undefined
+      const o = p as Record<string, unknown>
+      return said(o.file) ? { file: said(o.file), ...(typeof o.line === 'number' && o.line > 0 ? { line: o.line } : {}) } : undefined
+    }
+    const findingOf = (f: Record<string, unknown>): LensFinding => {
+      const places = (Array.isArray(f.places) ? f.places : []).map(placeOf).filter((p): p is LensPlace => p !== undefined)
+      const first = placeOf({ file: f.file, line: f.line }) ?? places[0] ?? { file: '' }
+      const rest = places.filter(p => p.file !== first.file || p.line !== first.line)
+      const confidence = said(f.confidence).toLowerCase()
+      return {
+        ...first,
+        problem: said(f.problem),
+        risk: said(f.risk),
+        ...(rest.length > 0 ? { places: rest } : {}),
+        ...(said(f.evidence) ? { evidence: said(f.evidence) } : {}),
+        ...(confidence === 'confirmed' || confidence === 'likely' ? { confidence } : {}),
+      }
+    }
     const results = lenses
       .filter((l): l is Record<string, unknown> => typeof l === 'object' && l !== null)
       .map((l): LensResult => {
@@ -44,35 +62,108 @@ const VALUED: Record<string, Set<string>> = {
   glab: new Set(['-R', '--repo']),
 }
 // Words that run the command after them: a prefix, not the tool; and those of their options that
-// take a value of their own.
-const PREFIXES = new Set(['command', 'exec', 'sudo', 'env', 'time', 'nohup', 'nice', 'then', 'do', 'else', '!'])
-const PREFIX_VALUED = new Set(['-u', '-g', '-n', '-C', '-S', '-h', '-p', '-U'])
+// take a value of their own. `timeout` takes its time too, before the command.
+const PREFIXES = new Set(['command', 'exec', 'sudo', 'env', 'time', 'nohup', 'nice', 'then', 'do', 'else', '!', 'eval', 'timeout'])
+// Each prefix's own: `sudo -k` takes none, `timeout -k 5` does.
+const PREFIX_VALUED: Record<string, Set<string>> = {
+  sudo: new Set(['-u', '-g', '-C', '-h', '-p', '-U']),
+  env: new Set(['-u', '-C', '-S']),
+  nice: new Set(['-n']),
+  timeout: new Set(['-s', '-k']),
+}
+// A shell handed a command as text: `sh -c '…'`, `bash -lc "…"`, `bash --login -c '…'`; and `eval '…'`.
+const INNER = /(?:^|[\s;&|(])(?:(?:\/\S*\/)?(?:ba|z|da|k)?sh\s+(?:--?[a-z-]+\s+)*?-[a-z]*c[a-z]*|eval)\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)")/g
+const QUOTED = /'[^']*'|"(?:[^"\\]|\\.)*"/g
+// A heredoc: its marker, the rest of its first line (commands still), its body and end (text).
+const HEREDOC = /(<<-?\s*(['"]?)(\w+)\2)([^\n]*\n)([\s\S]*?\n\s*\3\s*)(?=\n|$)/g
+// The heredocs' bodies blanked, the length kept, so what is found in the text is where it stands.
+const blankHeredocs = (command: string) => command.replace(HEREDOC, (_m, marker: string, _quote: string, _tag: string, rest: string, body: string) => `${' '.repeat(marker.length)}${rest}${body.replace(/[^\n]/g, ' ')}`)
 
-// Whether a shell command sends the work out of the machine, to people: a push that is not a dry
-// run, a pull or merge request opened. Read by its words, not by a pattern: what is in quotes is
-// text (a commit message that speaks of a push pushes nothing), the prefixes, groups and variables
-// before a command are passed over, and so are the options git and gh take before theirs.
-export function sendsOut(command: string) {
+// git's aliases, as `git config --get-regexp ^alias\.` gives them: by name, what each runs.
+export type Aliases = Record<string, string>
+export const aliasesOf = (out: string): Aliases =>
+  Object.fromEntries(
+    out
+      .split('\n')
+      .map(l => l.match(/^alias\.(\S+)\s+(.+)$/))
+      .flatMap(m => (m ? [[m[1]!, m[2]!.trim()]] : [])),
+  )
+
+type Run = { tool: string; words: string[] }
+
+// Each command a shell command line runs, by its tool and the words after its own options: what is in
+// quotes is text, a heredoc's body too, save a command handed to a shell or eval as text, which is
+// read as a command line of its own; a git alias is read as what it runs.
+function runsOf(command: string, aliases: Aliases, depth = 0): Run[] {
+  if (depth > 3) return []
+  // A shell named inside the text of another quote (a commit message) runs nothing.
+  // A heredoc's body is text: blanked where it stands, so its apostrophes open no quote.
+  const plain = blankHeredocs(command)
+  const quoted = [...plain.matchAll(QUOTED)].map(q => [q.index, q.index + q[0].length] as const)
+  const inner = [...plain.matchAll(INNER)]
+    .filter(m => !quoted.some(([from, to]) => m.index > from && m.index < to))
+    .flatMap(m => runsOf((m[1] ?? m[2] ?? '').replace(/\\(.)/g, '$1'), aliases, depth + 1))
   // A heredoc's body is text, not commands; a quoted word stays one word, so an option's value or a
   // variable's in quotes is still taken whole.
-  const bare = command.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2\s*(?=\n|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '_')
-  return bare.split(/&&|\|\||[;|&\n]/).some(part => {
+  const bare = plain.replace(QUOTED, '_')
+  const runs = bare.split(/&&|\|\||[;|&\n]/).flatMap((part): Run[] => {
     const words = part
       .replace(/[(){}]/g, ' ')
       .trim()
       .split(/\s+/)
       .filter(Boolean)
-    // A prefix's own options go with it (env -i, sudo -u root, nice -n 10).
-    while (words.length > 0 && (PREFIXES.has(words[0]!) || /^\w+=/.test(words[0]!) || words[0]!.startsWith('-')))
-      if (PREFIX_VALUED.has(words.shift()!)) words.shift()
+    // A prefix's own options go with it (env -i, sudo -u root, nice -n 10, timeout -s INT 60).
+    let prefix = ''
+    while (words.length > 0 && (PREFIXES.has(words[0]!) || /^\w+=/.test(words[0]!) || words[0]!.startsWith('-'))) {
+      const word = words.shift()!
+      if (PREFIXES.has(word)) prefix = word
+      else if (word.startsWith('-') && PREFIX_VALUED[prefix]?.has(word)) words.shift()
+      if (word === 'timeout') {
+        while (words[0]?.startsWith('-')) if (PREFIX_VALUED.timeout!.has(words.shift()!)) words.shift()
+        words.shift()
+      }
+    }
     const tool = (words.shift() ?? '').split('/').at(-1)
     const valued = tool ? VALUED[tool] : undefined
-    if (!tool || !valued) return false
+    if (!tool || !valued) return []
     while (words[0]?.startsWith('-')) {
       const option = words.shift()!
       if (valued.has(option)) words.shift()
     }
-    if (tool === 'git') return words[0] === 'push' && !words.includes('--dry-run') && !words.includes('-n')
-    return words[0] === (tool === 'gh' ? 'pr' : 'mr') && words[1] === 'create'
+    const alias = tool === 'git' && words[0] ? aliases[words[0]] : undefined
+    if (alias !== undefined && depth <= 3) {
+      if (alias.startsWith('!')) return runsOf(alias.slice(1), aliases, depth + 1)
+      return [{ tool, words: [...alias.split(/\s+/).filter(Boolean), ...words.slice(1)] }]
+    }
+    return [{ tool, words }]
   })
+  return [...inner, ...runs]
 }
+
+const isOut = ({ tool, words }: Run) =>
+  tool === 'git' ? words[0] === 'push' && !words.includes('--dry-run') && !words.includes('-n') : words[0] === (tool === 'gh' ? 'pr' : 'mr') && words[1] === 'create'
+
+// Whether a shell command sends the work out of the machine, to people: a push that is not a dry
+// run, a pull or merge request opened. Read by its words, not by a pattern: what is in quotes is
+// text (a commit message that speaks of a push pushes nothing), the prefixes, groups and variables
+// before a command are passed over, and so are the options git and gh take before theirs.
+export function sendsOut(command: string, aliases: Aliases = {}) {
+  return runsOf(command, aliases).some(isOut)
+}
+
+// The branches or commits a push sends, by the refs it names (`git push origin feature`,
+// `HEAD:main`); none named, or all of them (`--all`), is what is checked out.
+export function pushedRefs(command: string, aliases: Aliases = {}) {
+  return runsOf(command, aliases)
+    .filter(r => r.tool === 'git' && isOut(r))
+    .flatMap(r => {
+      const args = r.words.slice(1).filter(w => !w.startsWith('-'))
+      return args.slice(1).flatMap(spec => {
+        const src = spec.replace(/^\+/, '').split(':')[0]!
+        return src === '' || src === '_' ? [] : [src]
+      })
+    })
+}
+
+// A tool of an MCP server that sends the work out: files pushed, a pull or merge request opened.
+export const isMcpPush = (tool: string) => /^mcp__.+__(push_files|create_or_update_file|create_pull_request|create_merge_request|push)$/i.test(tool)

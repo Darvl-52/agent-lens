@@ -12,6 +12,31 @@ export type Catalog = { name: string; text: string }
 // What changed in one repository of the project: where it is, from which commit it is read, how many
 // files the diff holds, and the files git does not know of yet, which no diff shows.
 export type RepoChanges = { path: string; base: string; changed: number; untracked: string[] }
+// What the review is told of the work beside the diff, so a change the task asked for is not taken
+// for a mistake, and a point answered before is not raised again.
+export type LensContext = { requests: string[]; spec?: { change: string; tasks: string[]; requirements: string[] }; commits: string[]; settled: string[] }
+
+const listed = (items: readonly string[]) => items.map(i => `- ${i}`).join('\n')
+const contextEn = (c: LensContext) =>
+  [
+    c.requests.length > 0 ? `What the developer asked the agent in this session, oldest first; a change may answer any of these, and what was asked for is no finding:\n${listed(c.requests)}` : '',
+    c.spec ? `The OpenSpec change being built, "${c.spec.change}": what it requires is what the code is meant to do.${c.spec.requirements.length > 0 ? `\nIts requirements:\n${listed(c.spec.requirements)}` : ''}${c.spec.tasks.length > 0 ? `\nIts tasks not done yet:\n${listed(c.spec.tasks)}` : ''}` : '',
+    c.commits.length > 0 ? `The commits since the base, by their messages:\n${listed(c.commits)}` : '',
+    c.settled.length > 0 ? `Settled already: points raised before, which the agent showed do not hold and the developer did not overrule. Raise one again only where the code changed since, and say what changed:\n${listed(c.settled)}` : '',
+  ]
+    .filter(Boolean)
+    .map(t => `\n${t}\n`)
+    .join('')
+const contextRu = (c: LensContext) =>
+  [
+    c.requests.length > 0 ? `Что разработчик просил у агента в этой сессии, по порядку; изменение может отвечать любому из этого, и то, о чём просили, — не находка:\n${listed(c.requests)}` : '',
+    c.spec ? `OpenSpec-изменение, которое сейчас строится, «${c.spec.change}»: что оно требует, то код и должен делать.${c.spec.requirements.length > 0 ? `\nЕго требования:\n${listed(c.spec.requirements)}` : ''}${c.spec.tasks.length > 0 ? `\nЕго незакрытые задачи:\n${listed(c.spec.tasks)}` : ''}` : '',
+    c.commits.length > 0 ? `Коммиты после базы, по сообщениям:\n${listed(c.commits)}` : '',
+    c.settled.length > 0 ? `Уже решено: пункты, которые поднимались раньше, агент показал, что они не подтверждаются, и разработчик это не отменил. Поднимай такой снова, только если код с тех пор изменился, и скажи, что изменилось:\n${listed(c.settled)}` : '',
+  ]
+    .filter(Boolean)
+    .map(t => `\n${t}\n`)
+    .join('')
 
 const EN = {
   // How to look, whatever the lens: what makes a look a check and not an opinion.
@@ -33,15 +58,23 @@ const EN = {
 11. What is said matches the code. A description, comment, doc or spec this same diff made untrue. Look at: each claim, whether the diff holds it.
 12. Edge cases and states. Empty, long, first and last, quick repeats; a cold cache, an error, an empty answer. Look at: each list and request, its four states.
 13. Shared code. A change to a shared component, hook or helper: every consumer by grep, the default behaviour changed only by a new option.`,
-  prompt: (root: string, repos: RepoChanges[], catalogs: Catalog[]): string =>
+  // What makes a finding one: a kind with its places, shown from the code, and what is none.
+  findingRules: `- One finding per kind of mistake, its places listed: the same shape in five files is one finding with five places, not five.
+- Each finding says what you read that shows it (evidence: the lines, the grep and its count). One you cannot show from the code is no finding: a clean lens is worth more than a finding without evidence.
+- Say how sure you are: confirmed where you read the code that shows it, likely where it rests on code you did not read.
+- No finding, push back on it instead: a matter of taste the project's rules do not settle; an edge case no caller reaches, with no path to it from how the code is called; "this could be made general" for a single use; a test asked of code with no logic; a rename the project's convention does not ask for; what the developer asked for.`,
+  prompt: (root: string, repos: RepoChanges[], catalogs: Catalog[], context: LensContext): string =>
     `Review the changes of the project at ${root} through each lens below. You made none of them: read them as a reviewer who was not there.
 
 The changes, by repository, each what is committed since its base and what is not:
 ${repos.map(r => `- \`git -C ${r.path} diff ${r.base}\`: ${r.changed} ${r.changed === 1 ? 'file' : 'files'}${r.untracked.length > 0 ? `, and these files git does not know of yet, which the diff does not show: ${r.untracked.join(', ')}` : ''}`).join('\n')}
 A finding names its file by its path from ${root}. Read the code around the changes as much as you need.
-
+${contextEn(context)}
 How to look:
 ${EN.howToLook}
+
+What a finding is:
+${EN.findingRules}
 
 The lenses, the mod's own:
 ${EN.lenses}
@@ -49,9 +82,9 @@ ${catalogs.map(c => `\nThe lenses of ${c.name}, beside them. Where one names a k
 
 Do not edit a file, run git that changes anything, build, run tests or a linter that fixes. Where a run would settle a question, name the command.
 
-Report every lens, in the order above and then those of the other catalogs, none left out: its findings, each a file and line, what is wrong and what it risks; or clean, with what you checked and the numbers; or not applicable, and why, in a phrase. Then what the changes get wrong outside the lenses, and, apart, bugs in code the changes do not touch. Quote no code beyond three lines where a finding cannot be read without it.
+Report every lens, in the order above and then those of the other catalogs, none left out: its findings, each with its places, what is wrong, what it risks, its evidence and how sure you are; or clean, with what you checked and the numbers; or not applicable, and why, in a phrase. Then what the changes get wrong outside the lenses, and, apart, bugs in code the changes do not touch. Quote no code beyond three lines where a finding cannot be read without it.
 
-End your answer with JSON alone: {"lenses": [{"lens": "1. the lens's name", "status": "findings" or "clean" or "na", "checked": "what you checked, with numbers, or why it does not apply", "findings": [{"file": "path from the root", "line": 12, "problem": "what is wrong, a sentence", "risk": "what it risks, a phrase"}]}], "outside": ["what the changes get wrong outside the lenses, with its file and line"], "untouched": ["a bug in code the changes do not touch, with its file and line"]}`,
+End your answer with JSON alone: {"lenses": [{"lens": "1. the lens's name", "status": "findings" or "clean" or "na", "checked": "what you checked, with numbers, or why it does not apply", "findings": [{"file": "path from the root", "line": 12, "places": [{"file": "another place of the same kind", "line": 40}], "problem": "what is wrong, a sentence", "risk": "what it risks, a phrase", "evidence": "what you read that shows it, with numbers", "confidence": "confirmed" or "likely"}]}], "outside": ["what the changes get wrong outside the lenses, with its file and line"], "untouched": ["a bug in code the changes do not touch, with its file and line"]}`,
   // The command and the pane.
   task: 'The branch through lenses',
   title: 'Lenses',
@@ -85,6 +118,19 @@ End your answer with JSON alone: {"lenses": [{"lens": "1. the lens's name", "sta
   again: 'review again',
   sent: 'sent to Claude',
   band: (n: number) => `lenses: ${n} ${n === 1 ? 'finding' : 'findings'}`,
+  alsoAt: (places: string[]) => `Also at: ${places.join(', ')}.`,
+  outsideWhere: 'outside the lenses',
+  droppedTitle: (n: number) => `Not held by a second look on the lines named: ${n}, not sent`,
+  acceptance: (held: number, answered: number) => `Of the findings Claude answered, ${held} of ${answered} held (${Math.round((held / answered) * 100)}%).`,
+  pushOther: (ref: string) => `agent-lens reads the branch checked out through the lenses before it leaves the machine (Lenses: auto), and "${ref}" is not it. Check out ${ref} and push from it, so it is read first.`,
+  pushHeldSub:
+    'agent-lens reads the work through the lenses before it leaves the machine (Lenses: auto), and it has not been read since the last push. Do not push: finish your task and say in your answer that the push waits for the review by lenses. What it finds goes to the main conversation.',
+  // The second look of the small model at findings the agent did not show from the code.
+  checkSystem:
+    'You check findings of a code review against the lines they name. A finding holds where the lines shown bear it out, or where it is about code not shown and nothing shown speaks against it. It does not hold where the lines shown contradict it, or where it is a matter of taste, a hypothetical case no caller reaches, or "could be made general". Answer with JSON only: {"dropped": [{"n": 2, "why": "a phrase"}]}, the numbers of those that do not hold; {"dropped": []} where all hold.',
+  checkEvidence: 'What the reviewer read',
+  checkNoFile: '(no such file)',
+  checkDropped: 'the lines named do not bear it out',
   // Only what the branch got wrong: a bug in code it does not touch is the person's to take up.
   sendText: (results: LensResult[], outside: string[]): string =>
     `The review of the branch by lenses found these. Check each against the code: fix what holds, and say in a line why one does not; a fix is a diff too, so look at what it costs. Change nothing else.\n${[
@@ -111,15 +157,22 @@ const RU: typeof EN = {
 11. Заявленное совпадает с кодом. Описание, комментарий, дока или спека, которые этот же дифф сделал неверными. Смотреть: каждое утверждение — есть ли оно в диффе.
 12. Граничные случаи и состояния. Пустое, длинное, первый и последний элемент, быстрые повторы; холодный кэш, ошибка, пустой ответ. Смотреть: каждый список и запрос — четыре состояния.
 13. Общий код. Правка общего компонента, хука или утилиты — все потребители по grep, поведение по умолчанию меняется только новой опцией.`,
-  prompt: (root, repos, catalogs) =>
+  findingRules: `- Одна находка на класс ошибки, места списком: одна и та же форма в пяти файлах — одна находка с пятью местами, а не пять.
+- У каждой находки — что ты прочитал и что это показывает (evidence: строки, grep и сколько он нашёл). Чего не показать по коду, то не находка: чистая линза ценнее находки без доказательства.
+- Скажи, насколько уверен: confirmed — ты прочитал код, который это показывает; likely — вывод опирается на код, который ты не читал.
+- Не находка, а повод возразить: вкусовщина, которую правила проекта не решают; граничный случай, до которого не дойти ни одним вызовом; «можно сделать общее» для единственного использования; тест для кода без логики; переименование, которого не требует конвенция проекта; то, о чём просил разработчик.`,
+  prompt: (root, repos, catalogs, context) =>
     `Проверь изменения проекта в ${root} через каждую линзу ниже. Ты их не делал: читай как ревьюер, которого при этом не было.
 
 Изменения по репозиториям, в каждом — то, что закоммичено после его базы, и то, что нет:
 ${repos.map(r => `- \`git -C ${r.path} diff ${r.base}\`: ${r.changed} ${plural(r.changed, 'файл', 'файла', 'файлов')}${r.untracked.length > 0 ? `, и эти файлы, которых git ещё не знает и которых дифф не покажет: ${r.untracked.join(', ')}` : ''}`).join('\n')}
 Файл в находке называй путём от ${root}. Код вокруг изменений читай сколько нужно.
-
+${contextRu(context)}
 Как смотреть:
 ${RU.howToLook}
+
+Что такое находка:
+${RU.findingRules}
 
 Линзы мода:
 ${RU.lenses}
@@ -127,9 +180,9 @@ ${catalogs.map(c => `\nЛинзы ${c.name}, вдобавок к ним. Где 
 
 Нельзя: править файлы, запускать git, который что-то меняет, сборку, тесты, линтер с автоисправлением. Где вопрос решил бы прогон, назови команду. Отвечай по-русски.
 
-Отчитайся по каждой линзе — в порядке списка выше, потом линзы других каталогов, ни одной не пропуская: её находки, у каждой файл и строка, что не так и чем грозит; или «чисто» — что проверил, с числами; или «неприменимо» — почему, одной фразой. Потом — что изменения делают не так вне линз и, отдельно, баги в коде, который изменения не трогают. Код не цитируй, кроме трёх строк там, где без них находку не понять.
+Отчитайся по каждой линзе — в порядке списка выше, потом линзы других каталогов, ни одной не пропуская: её находки, у каждой места, что не так, чем грозит, доказательство и уверенность; или «чисто» — что проверил, с числами; или «неприменимо» — почему, одной фразой. Потом — что изменения делают не так вне линз и, отдельно, баги в коде, который изменения не трогают. Код не цитируй, кроме трёх строк там, где без них находку не понять.
 
-Закончи ответ одним JSON: {"lenses": [{"lens": "1. имя линзы", "status": "findings" или "clean" или "na", "checked": "что проверил, с числами, или почему неприменимо", "findings": [{"file": "путь от корня", "line": 12, "problem": "что не так, одной фразой", "risk": "чем грозит, коротко"}]}], "outside": ["что изменения делают не так вне линз, с файлом и строкой"], "untouched": ["баг в коде, который изменения не трогают, с файлом и строкой"]}`,
+Закончи ответ одним JSON: {"lenses": [{"lens": "1. имя линзы", "status": "findings" или "clean" или "na", "checked": "что проверил, с числами, или почему неприменимо", "findings": [{"file": "путь от корня", "line": 12, "places": [{"file": "другое место того же класса", "line": 40}], "problem": "что не так, одной фразой", "risk": "чем грозит, коротко", "evidence": "что прочитал и что это показывает, с числами", "confidence": "confirmed" или "likely"}]}], "outside": ["что изменения делают не так вне линз, с файлом и строкой"], "untouched": ["баг в коде, который изменения не трогают, с файлом и строкой"]}`,
   task: 'Ветка через линзы',
   title: 'Линзы',
   started: (n, base) => `Ревью по линзам читает ${n} ${plural(n, 'файл', 'файла', 'файлов')} относительно ${base}; находки появятся в панели.`,
@@ -161,6 +214,18 @@ ${catalogs.map(c => `\nЛинзы ${c.name}, вдобавок к ним. Где 
   again: 'проверить снова',
   sent: 'отправлено Claude',
   band: n => `линзы: ${n} ${plural(n, 'находка', 'находки', 'находок')}`,
+  alsoAt: places => `Также: ${places.join(', ')}.`,
+  outsideWhere: 'вне линз',
+  droppedTitle: n => `Не подтвердилось при второй проверке по названным строкам: ${n}, не отправляется`,
+  acceptance: (held, answered) => `Из находок, на которые ответил Claude, подтвердились ${held} из ${answered} (${Math.round((held / answered) * 100)}%).`,
+  pushOther: ref => `agent-lens читает через линзы ветку, на которой ты стоишь, прежде чем она уйдёт с машины (Lenses: auto), а «${ref}» — не она. Перейди на ${ref} и пушь с неё, чтобы её сначала прочитали. Отвечай по-русски.`,
+  pushHeldSub:
+    'agent-lens читает работу через линзы, прежде чем она уйдёт с машины (Lenses: auto), а с прошлого пуша её не читали. Не пушь: закончи задачу и скажи в ответе, что пуш ждёт ревью по линзам. Что оно найдёт, уйдёт в основной разговор.',
+  checkSystem:
+    'You check findings of a code review against the lines they name. A finding holds where the lines shown bear it out, or where it is about code not shown and nothing shown speaks against it. It does not hold where the lines shown contradict it, or where it is a matter of taste, a hypothetical case no caller reaches, or "could be made general". Write each why in Russian. Answer with JSON only: {"dropped": [{"n": 2, "why": "a phrase"}]}, the numbers of those that do not hold; {"dropped": []} where all hold.',
+  checkEvidence: 'Что прочитал ревьюер',
+  checkNoFile: '(файла нет)',
+  checkDropped: 'названные строки этого не показывают',
   sendText: (results, outside) =>
     `Ревью ветки по линзам нашло это. Сверь каждое с кодом: исправь то, что подтверждается, и одной строкой скажи, почему не подтверждается остальное; свой фикс — тоже дифф, посмотри его цену. Больше ничего не меняй. Отвечай по-русски.\n${[
       ...results.flatMap(r => r.findings.map(f => `- ${r.lens}: ${f.file}${f.line ? `:${f.line}` : ''} — ${f.problem}${f.risk ? ` (${f.risk})` : ''}`)),

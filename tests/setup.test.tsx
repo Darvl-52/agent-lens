@@ -51,11 +51,12 @@ test('the files are held to their size, the paths they name, and the forms of th
 // through the shell, each green where it says nothing.
 type Git = (args: string[], env?: Record<string, string>) => { exitCode: number; stdout: string } | undefined
 type Sh = (command: string, cwd: string) => { exitCode: number; stdout?: string } | undefined
-const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; noMatt?: boolean; noOpenspec?: boolean; git?: Git; sh?: Sh } = {}) => {
+const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], opts: { files?: Record<string, string>; noMatt?: boolean; noOpenspec?: boolean; git?: Git; sh?: Sh; reply?: string; autonomy?: 'manual' | 'auto' | 'full' } = {}) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const disk = new Map(Object.entries(opts.files ?? {}).map(([f, t]) => [`/proj/${f}`, t]))
   const isDir = (p: string) => [...disk.keys()].some(k => k.startsWith(`${p.replace(/\/$/, '')}/`))
-  const store = new Map<string, unknown>()
+  // What the checks find waits for the person, as by hand, unless `autonomy` says otherwise.
+  const store = new Map<string, unknown>([['autonomy', opts.autonomy ?? 'manual']])
   const submitted: string[] = []
   const commands: string[] = []
   const runs: string[][] = []
@@ -72,6 +73,15 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
         names.set(name!, rest.length > 0 ? 'dir' : 'file')
       }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
+  })
+  // The rule files of each folder from a file up, as the check of each edit reads them.
+  on('fs.ancestors', ($, e) => {
+    const top = (e.below ?? '/').replace(/\/$/, '')
+    const file = e.of ?? '/proj/.'
+    const dirs: string[] = []
+    for (let dir = file.slice(0, file.lastIndexOf('/')); dir.length > top.length && dir.startsWith(`${top}/`); dir = dir.slice(0, dir.lastIndexOf('/'))) dirs.unshift(dir)
+    const found = dirs.flatMap(dir => e.names.filter(name => disk.has(`${dir}/${name}`)).map(name => ({ dir, name, content: disk.get(`${dir}/${name}`)! })))
+    return { value: found.map(f => ({ ...f, parts: [{ path: `${f.dir}/${f.name}`, content: f.content }] })) }
   })
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => (store.set(e.key, e.value), { value: undefined }))
@@ -96,8 +106,8 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('prompt.submit', ($, e) => (submitted.push(e.text), { text: e.text }))
-  // The review of a turn's diff asks a model: it finds nothing here.
-  on('model.complete', () => ({ value: { isAnswered: true as const, text: '{"findings":[]}', usage: USAGE } }))
+  // The review of a turn's diff asks a model: it finds nothing here, unless `reply` says otherwise.
+  on('model.complete', () => ({ value: { isAnswered: true as const, text: opts.reply ?? '{"findings":[]}', usage: USAGE } }))
   const spawned: string[] = []
   const tasks: string[] = []
   const models: (string | undefined)[] = []
@@ -121,9 +131,14 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
   const setup = (args = '') => $.command.run({ command: 'setup-project', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
-  // A turn of the main loop that writes `files` as Claude would, then ends with an answer.
-  const turn = async (files: Record<string, string> = {}) => {
-    await $.turn.start({ text: 'go', turnId: 't' })
+  // A turn of the main loop that writes `files` as Claude would, then ends with an answer. It starts
+  // with `text`, or with the last prompt sent where no turn started with it yet: the one it answers.
+  let started = 0
+  const turn = async (files: Record<string, string> = {}, text?: string) => {
+    const at = text === undefined ? submitted.length - 1 : submitted.indexOf(text, started)
+    const isNew = at >= started
+    if (isNew) started = at + 1
+    await $.turn.start({ text: text ?? (isNew ? submitted[at]! : 'go'), turnId: 't' })
     for (const [f, t] of Object.entries(files)) disk.set(`/proj/${f}`, t)
     await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
   }
@@ -187,7 +202,7 @@ test('no OpenSpec CLI: it is recommended, and the two steps of OpenSpec are left
 
 test('the steps go one at a time: Matt’s setup, openspec init by the mod, then each prompt once the files of the one before pass', async ($, on) => {
   const w = await world($, on)
-  expect((await w.setup()).text).toBe('✓ Matt’s skills installed · ✓ OpenSpec 1.14.1, a step initialises openspec/ · ○ no CI: its step is left out\nOpened the setup: the steps go to Claude one at a time.')
+  expect((await w.setup()).text).toBe('✓ Matt’s skills installed · ✓ OpenSpec 1.14.1, a step initialises openspec/ · ○ no CI: its step is left out\nOpened the setup: the steps go to Claude one at a time; one not sent yet may be skipped from its row, and the dear ones say so.')
   await w.settle()
   expect(w.opened).toEqual(['agent-lens-setup'])
   expect(w.commands).toEqual(['mattpocock-skills:setup-matt-pocock-skills'])
@@ -664,7 +679,8 @@ test('a turn that edits the docs has an agent read the edits against the code; i
   expect(await pane.find({ type: 'Text', text: '→ sent to Claude' })).toBeDefined()
   // Sent, they are off the list; once the turn they went in ends, off the pane.
   expect(await pane.find({ type: 'Text', text: '• CLAUDE.md: A wish that changes nothing' })).toBeUndefined()
-  await w.turn()
+  // A turn of another prompt keeps them there.
+  await w.turn({}, 'go')
   await w.settle()
   expect(await pane.find({ type: 'Text', text: 'What the docs agent found in the last edits' })).toBeDefined()
   await $.turn.start({ text: w.submitted.at(-1)!, turnId: 'fix' })
@@ -1226,4 +1242,277 @@ test('the rule of the tasks is read under rules as YAML holds it: comments out, 
   expect(hasTaskRules(rules('  tasks:\n    - "a \\"quoted\\" word # and the lenses"'))).toBe(true)
   expect(hasTaskRules(rules("  tasks:\n    - 'it''s # the lenses'"))).toBe(true)
   expect(hasTaskRules(rules('  tasks:\n    - a -> b\n    # lenses later'))).toBe(false)
+})
+
+// What the audit of 0.19.0 found, written as it should be.
+
+type KeptRun = { current: string | null; steps: Record<string, { status: string }> }
+type World = Awaited<ReturnType<typeof world>>
+const runIn = (w: World) => w.store.get('setup:/proj') as KeptRun
+const bandOf = ($: Parameters<TestBody>[0]) =>
+  $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'AbovePrompt' as const, props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} } })
+const endTurn = ($: Parameters<TestBody>[0], turnId: string, reason: 'answer' | 'aborted' = 'answer') =>
+  $.turn.complete({ answer: '', durationMs: 1, isAborted: reason === 'aborted', turnId, reason, usage: { ...USAGE, model: 'test' } })
+// A project whose fast check is red whatever is written.
+const redLint = (files: Record<string, string> = {}) => ({ files: { '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}}', ...files }, git: REPO, sh: (c: string) => (c === 'lint' ? { exitCode: 1, stdout: 'bad' } : undefined) })
+const gateRed = (round: number) => new RegExp(`^The project's fast checks[\\s\\S]*round ${round} of 3`)
+const TASK_RULES_OFFER = /^OpenSpec’s config has the tasks name/
+
+// Up to the map's step sent back once: its files fail the check, the fix is the prompt returned.
+const mapFixSent = async (w: World) => {
+  await w.setup()
+  await w.settle()
+  await w.turn({ 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n' })
+  await w.settle()
+  await w.turn({ 'GLOSSARY.md': `${GLOSSARY}\nA loose note.\n`, 'ARCHITECTURE.md': '# Map\n' }, w.submitted[0])
+  await w.settle()
+  expect(w.submitted[1]).toMatch(/^The check of the files/)
+  return w.submitted[1]!
+}
+
+// Then the fix's own turn leaves the glossary failing: the step stops and waits for the person.
+const mapStopped = async (w: World) => {
+  await w.turn({}, await mapFixSent(w))
+  await w.settle()
+  expect(w.submitted).toHaveLength(2)
+  expect(runIn(w).steps.map!.status).toBe('failed')
+}
+
+test('a step stopped on its failed check waits for the person: a turn of another prompt does not move the run on', async ($, on) => {
+  const w = await world($, on)
+  await mapStopped(w)
+  await w.turn({}, 'Do the next task of add-dark-mode.')
+  await w.settle()
+  expect(w.submitted).toHaveLength(2)
+  expect(runIn(w).current).toBe('map')
+  expect(runIn(w).steps.map!.status).toBe('failed')
+})
+
+test('a step’s fix is judged by its own turn, not by the turn of another prompt that ended first', async ($, on) => {
+  const w = await world($, on)
+  const fix = await mapFixSent(w)
+  // Another prompt, queued before the fix, has its turn first: the glossary still fails.
+  await w.turn({}, 'Do the next task of add-dark-mode.')
+  await w.settle()
+  expect(runIn(w).steps.map!.status).toBe('sent')
+  // The fix's own turn mends it.
+  await w.turn({ 'GLOSSARY.md': GLOSSARY }, fix)
+  await w.settle()
+  expect(runIn(w).steps.map!.status).toBe('done')
+  expect(runIn(w).current).toBe('standards')
+})
+
+test('a step answered by Claude alone is not taken as done by a turn of another prompt while its own waits', async ($, on) => {
+  const w = await world($, on, { files: { 'CLAUDE.md': '# Rules\n\nUse BEM.\n', 'CONTEXT.md': GLOSSARY, 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Read `CONTEXT.md`.\n', 'openspec/config.yaml': 'schema: spec-driven\n' } })
+  await w.setup()
+  await w.settle()
+  expect(w.submitted[0]).toMatch(/^Step 3 of \/setup-project/)
+  await w.turn({}, 'Do the next task of add-dark-mode.')
+  await w.settle()
+  expect(w.submitted).toHaveLength(1)
+  expect(runIn(w).steps.existing!.status).toBe('sent')
+})
+
+test('the rule of the tasks is not offered beside a fresh run of /setup-project: its own step adds it', async ($, on) => {
+  const w = await world($, on, { files: { 'openspec/config.yaml': 'schema: spec-driven\n' } })
+  await w.settle()
+  await w.setup()
+  await w.settle()
+  const band = await bandOf($)
+  expect(await band.find({ type: 'Text', text: TASK_RULES_OFFER })).toBeUndefined()
+  await band.unmount()
+})
+
+test('the rule of the tasks is not offered while a run of /setup-project waits on a failed step, in the next session too', async ($, on) => {
+  const w = await world($, on)
+  await mapStopped(w)
+  // openspec init wrote a config whose tasks name no rules: the run's own step 12 is still to come.
+  await $.session.start({ cwd: '/proj', surface: 'terminal', isInteractive: true })
+  await w.settle()
+  const band = await bandOf($)
+  expect(await band.find({ type: 'Text', text: TASK_RULES_OFFER })).toBeUndefined()
+  await band.unmount()
+})
+
+test('the rule of the tasks is read under tasks alone: a rule of the proposal or the design that names the lenses is none', () => {
+  const rules = (body: string) => `schema: x\nrules:\n${body}\n`
+  expect(hasTaskRules(rules('  proposal:\n    - name the lenses the change touches'))).toBe(false)
+  expect(hasTaskRules(rules('  tasks:\n    - each task is small\n  design:\n    - the lenses of the change'))).toBe(false)
+  expect(hasTaskRules(rules('  design:\n    - x\n  tasks:\n    - each task names the lenses it touches'))).toBe(true)
+})
+
+test('a step whose turn the person stopped waits for them, says so above the prompt, and does not hold the gate off', async ($, on) => {
+  const w = await world($, on, redLint())
+  await w.setup()
+  await w.settle()
+  // Matt's setup runs as a command: the turn it starts is the step's.
+  expect(runIn(w).steps.matt!.status).toBe('sent')
+  await $.turn.start({ text: 'go', turnId: 'stopped' })
+  await endTurn($, 'stopped', 'aborted')
+  await w.settle()
+  expect(runIn(w).steps.matt!.status).toBe('failed')
+  const band = await bandOf($)
+  expect(await band.find({ type: 'Text', text: /^setup: step 1 stopped/ })).toBeDefined()
+  await band.unmount()
+  // The person's next turn leaves the checks red: the gate sends it back.
+  await $.turn.start({ text: 'fix the cart', turnId: 'person' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'x' })
+  await w.settle()
+  await endTurn($, 'person')
+  await w.settle()
+  expect(w.submitted.some(s => gateRed(1).test(s))).toBe(true)
+})
+
+test('where no classic hook runs, the gate’s rounds go on past a turn of the review’s notes that ran first', async ($, on) => {
+  const caught = JSON.stringify({ findings: [], violations: [{ rule: 'No comments in code', evidence: '// x', fix: 'Remove the comment.' }] })
+  const w = await world($, on, { ...redLint({ 'CLAUDE.md': 'No comments in code.\n' }), reply: caught })
+  await $.turn.start({ text: 'go', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: '// x' })
+  await w.settle()
+  await endTurn($, 't')
+  await w.settle()
+  const gate = w.submitted.find(s => gateRed(1).test(s))
+  const notes = w.submitted.find(s => s.startsWith('agent-lens: your edit'))
+  expect(gate).toBeDefined()
+  expect(notes).toBeDefined()
+  // The notes' turn runs first and edits nothing; then the gate's turn, still red.
+  await $.turn.start({ text: notes!, turnId: 'notes' })
+  await endTurn($, 'notes')
+  await w.settle()
+  await $.turn.start({ text: gate!, turnId: 'gate' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'y' })
+  await w.settle()
+  await endTurn($, 'gate')
+  await w.settle()
+  expect(w.submitted.some(s => gateRed(2).test(s))).toBe(true)
+})
+
+test('the setup turned off in /agent-lens mid-turn sends nothing at that turn’s end', async ($, on) => {
+  const w = await world($, on, redLint())
+  await $.turn.start({ text: 'go', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'x' })
+  await w.settle()
+  await $.command.run({ command: 'agent-lens', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
+  const parts = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane', requestId: 'agent-lens-parts', props: { title: 'agent-lens', isFocused: false, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  await parts.press({ key: 'toggle-setup' })
+  expect((await parts.find({ key: 'toggle-setup' }))?.props.label).toBe('○ off')
+  await parts.unmount()
+  expect((await $.classic.Stop({ stop_hook_active: false })).block).toBeUndefined()
+  await endTurn($, 't')
+  await w.settle()
+  expect(w.submitted.filter(s => /fast checks/.test(s))).toEqual([])
+})
+
+test('in auto, the docs agent’s blockers go to Claude by themselves, with no j, and the minor ones stay on the pane', async ($, on) => {
+  const w = await world($, on, { files: { 'docs/agents/workflow.md': '# How work goes\n', 'CLAUDE.md': '# Rules\n' }, autonomy: 'auto' })
+  await $.turn.start({ text: 'go', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/CLAUDE.md', content: '# Rules\n\nWrite clean code.\n' })
+  await w.settle()
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  await w.settle()
+  await w.agentDone(
+    'judge-1',
+    '[{"file": "CLAUDE.md", "problem": "A wish that changes nothing", "fix": "Take it out", "severity": "blocker"}, {"file": "CLAUDE.md", "problem": "A heading could be shorter", "severity": "minor"}]',
+  )
+  await w.settle()
+  const sent = w.submitted.filter(s => s.startsWith('agent-lens: the checks of your work found these'))
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toMatch(/#1 CLAUDE\.md — A wish that changes nothing Fix: Take it out/)
+  expect(sent[0]).not.toMatch(/A heading could be shorter/)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: '• CLAUDE.md: A wish that changes nothing' })).toBeUndefined()
+  expect(await pane.find({ type: 'Text', text: /A heading could be shorter/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('in auto, a term the docs agent found nowhere goes to Claude to take out unasked, and one it could not look at is still the person’s question', async ($, on) => {
+  const git: Git = args => (args[0] === 'grep' ? { exitCode: 1, stdout: '' } : undefined)
+  const w = await world($, on, { git, files: { 'docs/agents/workflow.md': '# How work goes\n', 'GLOSSARY.md': GLOSSARY }, autonomy: 'auto' })
+  await w.settle()
+  await w.agentDone('judge-1', '[{"file": "GLOSSARY.md", "term": "Order", "inUse": true, "where": "src/orders.ts"}, {"file": "GLOSSARY.md", "term": "Invoice", "inUse": false, "where": ""}]')
+  await w.settle()
+  const sent = w.submitted.filter(s => s.startsWith('agent-lens: the checks of your work found these'))
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toMatch(/#1 GLOSSARY\.md — the term "Invoice" is found nowhere outside the glossaries/)
+  expect(sent[0]).not.toMatch(/"Order"/)
+  // The person is asked nothing of it.
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: /^"Invoice" \(GLOSSARY\.md\)/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('the docs a step of /setup-project writes in its turn are not checked edit by edit: the step’s check and the docs agent read them', async ($, on) => {
+  const caught = JSON.stringify({ findings: [], violations: [{ rule: 'No comments in code', evidence: '// x', fix: 'Remove the comment.' }] })
+  const w = await world($, on, { files: { 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n', 'openspec/config.yaml': 'schema: spec-driven\n', 'CLAUDE.md': 'No comments in code.\n' }, git: REPO, reply: caught })
+  await w.setup()
+  await w.settle()
+  const step = w.submitted.at(-1)!
+  expect(step).toMatch(/^Step \d+ of \/setup-project/)
+  const writes = async (text: string, files: Record<string, string>) => {
+    await $.turn.start({ text, turnId: text.slice(0, 9) })
+    for (const [f, t] of Object.entries(files)) await $.tool.call({ tool: 'Write', file_path: `/proj/${f}`, content: t })
+    await w.settle()
+    await endTurn($, text.slice(0, 9))
+    await w.settle()
+  }
+  await writes(step, { 'GLOSSARY.md': '# Shop\n\n// x\n', 'docs/adr/0001-x.md': '# X\n// x\n' })
+  expect(w.submitted.some(s => s.startsWith('agent-lens: your edit'))).toBe(false)
+  // The person's own turn is checked as ever.
+  await writes('add a cart', { 'src/a.ts': '// x' })
+  expect(w.submitted.some(s => s.startsWith('agent-lens: your edit'))).toBe(true)
+})
+
+test('a step not sent yet is skipped ahead from its row, the one with Claude kept, and the dear ones say what they cost', async ($, on) => {
+  const w = await world($, on, { files: { 'docs/agents/issue-tracker.md': 'GitLab.\n', 'docs/agents/domain.md': 'Single context.\n', 'openspec/config.yaml': 'schema: spec-driven\n' } })
+  await w.setup()
+  await w.settle()
+  expect(w.submitted.at(-1)).toMatch(/^Step 4 of \/setup-project/)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: /^· waiting · reads some fifty merge requests: the dearest step$/ })).toBeDefined()
+  // The step with Claude has no skip of its own row: its buttons are below.
+  expect(await pane.find({ key: 'setup-skip-map' })).toBeUndefined()
+  await pane.press({ key: 'setup-skip-lenses' })
+  await w.settle()
+  await pane.unmount()
+  expect(runIn(w).steps.lenses!.status).toBe('skipped')
+  expect(runIn(w).current).toBe('map')
+  expect(runIn(w).steps.map!.status).toBe('sent')
+})
+
+test('a config the gate cannot read says the checks are off, on the row', async ($, on) => {
+  await world($, on, { files: { '.claude/agent-lens.json': '{"checks": {"fast": ["lint"],}}' } })
+  const band = await bandOf($)
+  expect(await band.find({ type: 'Text', text: /^checks off: \.claude\/agent-lens\.json does not read \(not JSON\)/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('the agent taking a command out of the fast checks waits for the person', async ($, on) => {
+  const w = await world($, on, { files: { '.claude/agent-lens.json': '{"checks": {"fast": ["lint", "tsc --noEmit"]}}' }, git: REPO })
+  await $.turn.start({ text: 'the build is slow', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/.claude/agent-lens.json', content: '{"checks": {"fast": ["lint"]}}' })
+  await w.settle()
+  const band = await bandOf($)
+  expect(await band.find({ type: 'Text', text: '1 to decide' })).toBeDefined()
+  await band.unmount()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane', requestId: 'agent-lens-decide', props: { title: 'To decide', isFocused: true, bodyColumns: 100, placement: 'inline', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  expect(await pane.find({ type: 'Text', text: '#1 .claude/agent-lens.json — the agent took out of the fast checks: `tsc --noEmit`' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('after a turn that commits, the fast checks that take files get the files it changed since its start', async ($, on) => {
+  let head = 'h1'
+  const git: Git = args =>
+    args[0] === 'rev-parse' ? { exitCode: 0, stdout: `${head}\n` }
+    : args[0] === 'diff' && args.includes('--name-only') ? { exitCode: 0, stdout: args[1] === 'h1' ? 'src/a.ts\n' : '' }
+    : args[0] === 'diff' ? { exitCode: 0, stdout: head }
+    : args[0] === 'ls-files' ? { exitCode: 0, stdout: '' }
+    : undefined
+  const w = await world($, on, { files: { '.claude/agent-lens.json': '{"checks": {"fast": ["eslint {files}"]}}' }, git })
+  await $.turn.start({ text: 'fix and commit', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'x' })
+  head = 'h2'
+  await w.settle()
+  await endTurn($, 't')
+  await w.settle()
+  expect(w.shells()).toContain(`eslint 'src/a.ts'`)
 })
