@@ -167,7 +167,7 @@ export const register: Register = (on, options) => {
     // A turn whose start this module missed (a reload) ends as the switches are now.
     const began = (part: Part) => begun.get(e.agentId ?? MAIN)?.includes(part) ?? isOn(part)
     const owner = turnOwner()
-    endRouterTurn(e.agentId, e.answer)
+    await endRouterTurn($, e.agentId, e.answer, e.reason, isPerson(owner)).catch(() => {})
     if (e.agentId === undefined) {
       if (began('spec')) endSpecTurn($, e.reason)
       if (began('setup')) endSetupTurn($, e.reason, isOn('setup'))

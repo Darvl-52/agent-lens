@@ -1,4 +1,4 @@
-import type { Lang, Mode, Tab } from '../../types/router'
+import type { Lang, Mode, Stage, Tab } from '../../types/router'
 import type { Failure } from './route'
 
 export type Words = {
@@ -68,6 +68,11 @@ export type Words = {
   leftOutByProject: string
   ignoredByProject: (skill: string) => string
   fromSpec: string
+  stages: Record<Stage, string>
+  stageLine: (stage: string, gaps?: string) => string
+  taken: string
+  declined: string
+  outcomes: (taken: number, declined: number) => string
 }
 
 export const WORDS: Record<Lang, Words> = {
@@ -179,6 +184,11 @@ export const WORDS: Record<Lang, Words> = {
     makeRule: '+ rule',
     ruleFor: skill => `Type the words for a rule that runs ${skill}.`,
     hintRemoved: skill => `No longer telling the model when ${skill} fits.`,
+    stages: { grill: 'grill first', spec: 'spec first', go: 'go' },
+    stageLine: (stage, gaps) => `${stage}${gaps ? `: ${gaps}` : ''}`,
+    taken: 'loaded',
+    declined: 'Claude went on without it',
+    outcomes: (taken, declined) => `Claude loaded ${taken} picks, went on without ${declined}`,
   },
   ru: {
     title: 'Роутер скиллов',
@@ -288,5 +298,10 @@ export const WORDS: Record<Lang, Words> = {
     makeRule: '+ правило',
     ruleFor: skill => `Введи слова для правила, которое запускает ${skill}.`,
     hintRemoved: skill => `Подсказка для ${skill} удалена.`,
+    stages: { grill: 'сначала гриллинг', spec: 'сначала спека', go: 'сразу' },
+    stageLine: (stage, gaps) => `${stage}${gaps ? `: ${gaps}` : ''}`,
+    taken: 'загружен',
+    declined: 'Claude обошёлся без него',
+    outcomes: (taken, declined) => `Claude загрузил подсказок: ${taken}, обошёлся без: ${declined}`,
   },
 }

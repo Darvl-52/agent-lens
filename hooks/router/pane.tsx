@@ -36,6 +36,10 @@ const oneLine = (text: string, room: number) => {
   return line.length > room ? `${line.slice(0, Math.max(1, room - 1))}…` : line
 }
 
+// What Claude did with a pick, once its turn ended: loaded it, or went on without it; a maybe pick
+// is marked as one.
+const markOf = (p: Decision['picks'][number]) => `${p.fit === 'maybe' ? ' ?' : ''}${p.taken === true ? ' ✓' : p.taken === false ? ' ✗' : ''}`
+
 // The plugin a skill comes from (`mattpocock-skills` of `mattpocock-skills:tdd`); none for the person's
 // and the project's own.
 const groupOf = (name: string) => (name.includes(':') ? name.slice(0, name.indexOf(':')) : '')
@@ -193,11 +197,17 @@ function overviewTab(els: Els, d: Data) {
       <Text weight="semibold">{words.lastPrompt}</Text>
       <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
         <Text wrap="truncate-end">«{oneLine(last.prompt, d.columns - 8)}»</Text>
+        {last.stage && (
+          <Text color="warning" wrap="truncate-end">
+            ◆ {words.stageLine(words.stages[last.stage], last.gaps)}
+          </Text>
+        )}
         {last.picks.length > 0 ? (
           last.picks.map(p => (
             <Box key={`last-${p.skill}`} flexDirection="column">
               <Text wrap="truncate-end">
                 → <Text color="claude">{shortOf(p.skill)}</Text>
+                {markOf(p) !== '' && <Text color={p.taken === false ? 'warning' : 'success'}>{markOf(p)}</Text>}
                 <Text dimColor>
                   {' '}
                   · {p.by === 'rule' ? words.byRule : words.byModel} · {Math.round(last.ms / 100) / 10}s
@@ -218,6 +228,9 @@ function overviewTab(els: Els, d: Data) {
       <Text wrap="truncate-end">
         {words.sessionStats(d.stats.prompts, d.stats.withSkill, d.stats.byRule, d.stats.byModel)}
       </Text>
+      {(d.stats.taken ?? 0) + (d.stats.declined ?? 0) > 0 && (
+        <Text wrap="truncate-end">{words.outcomes(d.stats.taken ?? 0, d.stats.declined ?? 0)}</Text>
+      )}
       {top.length > 0 && (
         <Text wrap="truncate-end">
           {words.top}: {top.map(([skill, n]) => `${shortOf(skill)} ×${n}`).join(', ')}
@@ -361,6 +374,11 @@ function historyTab($: EngineInterface, els: Els, d: Data) {
           <Text wrap="truncate-end">
             <Text dimColor>{timeOf(x.at)}</Text> «{oneLine(x.prompt, d.columns - 10)}»
           </Text>
+          {x.stage && (
+            <Text color="warning" wrap="truncate-end">
+              {'  '}◆ {words.stageLine(words.stages[x.stage], x.gaps)}
+            </Text>
+          )}
           {x.picks.length === 0 ? (
             <Text {...(x.note === 'failed' || x.note === 'error' ? { color: 'error' as const } : x.note === 'resting' ? { color: 'warning' as const } : {})}>{'  '}→ {words.noteText(x.note, x.why)}</Text>
           ) : (
@@ -368,13 +386,14 @@ function historyTab($: EngineInterface, els: Els, d: Data) {
               <Box key={`p-${x.at}-${p.skill}`} flexDirection="row" columnGap={1}>
                 <Text wrap="truncate-end">
                   {'  '}→ <Text color="claude">{shortOf(p.skill)}</Text>
+                  {markOf(p) !== '' && <Text color={p.taken === false ? 'warning' : 'success'}>{markOf(p)}</Text>}
                   <Text dimColor>
                     {' '}
                     · {p.by === 'rule' ? words.byRule : words.byModel}
                     {p.why && p.by === 'model' ? ` · ${oneLine(p.why, Math.max(10, d.columns - 40))}` : ''}
                   </Text>
                 </Text>
-                {p.by === 'model' && (
+                {p.by === 'model' && !p.isStage && (
                   <Button key={`rule-from-${x.at}-${p.skill}`} plain dimColor label={words.makeRule} onPress={() => ruleFrom($, p.skill, words)} />
                 )}
               </Box>

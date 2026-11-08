@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { Change, Pick, Setup, Skill } from '../../types/router'
-import { catalogOf, join, manualOf, merge, NO_SETUP, progressOf, resolve, resolveSetup, setupOf, shortOf } from './route'
+import { catalogOf, DOMAIN_DOCS, join, manualOf, merge, NO_SETUP, progressOf, resolve, resolveSetup, setupOf, shortOf } from './route'
 import type { Listed } from './route'
 import { addDecision, holdCatalog, loadedIn, modeIn, ownSetup, wordsIn } from './state'
 
@@ -67,6 +67,15 @@ export async function changesIn($: EngineInterface): Promise<Change[] | null> {
       return { name: f.name, ...progressOf(tasks.replace(/\r\n/g, '\n')) }
     }),
   )
+}
+
+// Whether the project keeps its domain docs: a glossary or its map at the root, or ADRs in
+// `docs/adr`. A grilling there writes the terms and decisions down as they settle.
+export async function domainDocsIn($: EngineInterface): Promise<boolean> {
+  const root = await $.session.root()
+  const [top, docs] = await Promise.all([$.fs.list(root).catch(() => []), $.fs.list(join(root, 'docs')).catch(() => [])])
+
+  return top.some(f => f.kind === 'file' && DOMAIN_DOCS.includes(f.name)) || docs.some(f => f.kind === 'dir' && f.name === 'adr')
 }
 
 // The skills to route among and the setup in force, the setup's short names made full; the pane is

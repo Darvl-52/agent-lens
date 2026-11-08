@@ -231,15 +231,30 @@ export type RouterRule = { skill: string; when: string[]; args?: string }
 // rules, a line per skill saying when it fits, and the skills left out.
 export type RouterSetup = { rules: RouterRule[]; hints: Record<string, string>; ignored: string[] }
 
-// One skill picked for a prompt: by one of the person's rules or by the model, and why.
-export type RouterPick = { skill: string; why: string; args?: string; by: 'rule' | 'model' }
+// One skill picked for a prompt: by one of the person's rules or by the model, and why. `fit`: how
+// sure the model is (a `maybe` is only offered to Claude, never ordered); none is sure. `isStage`: the
+// skill of the request's stage (grilling, the spec), not of its work. `taken`: whether Claude loaded it
+// in the turn the prompt started, once that turn ended.
+export type RouterPick = { skill: string; why: string; args?: string; by: 'rule' | 'model'; fit?: 'sure' | 'maybe'; isStage?: true; taken?: boolean }
+
+// Where a piece of work starts, as the model reads the request: `grill` when it can be read more than
+// one way and the developer is to be questioned first, `spec` when it is clear but big enough for an
+// OpenSpec change first, `go` when Claude can start on it.
+export type RouterStage = 'grill' | 'spec' | 'go'
 
 // What the router made of one prompt: its start, what it picked, how long it took, and a note where it
-// picked nothing for a reason worth showing (no skills, the model failed), and how it failed.
-export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; ms: number; note?: string; why?: string }
+// picked nothing for a reason worth showing (no skills, the model failed), and how it failed. `stage`
+// and `gaps` (what the request leaves open) for work the model read.
+export type RouterDecision = { at: number; prompt: string; picks: RouterPick[]; ms: number; note?: string; why?: string; stage?: RouterStage; gaps?: string }
 
-// The session's prompts routed, counted whole: the decisions keep only the last few.
-export type RouterStats = { prompts: number; withSkill: number; byRule: number; byModel: number; bySkill: Record<string, number> }
+// The session's prompts routed, counted whole: the decisions keep only the last few. `taken` and
+// `declined`: the picks Claude loaded and the sure ones it went on without.
+export type RouterStats = { prompts: number; withSkill: number; byRule: number; byModel: number; bySkill: Record<string, number>; taken?: number; declined?: number }
+
+// What the router learns across sessions and projects from what Claude did with its picks: each
+// skill's sure picks and how many Claude loaded, and the last sure picks it went on without, each
+// with the prompt it was for.
+export type RouterFeedback = { bySkill: Record<string, { offered: number; taken: number }>; declined: { skill: string; prompt: string; at: number }[] }
 
 // The guard over each agent's turn.
 
@@ -496,6 +511,9 @@ declare module 'claude-code' {
       // Null until the first prompt routed since the counts were kept: read from the decisions.
       'router.stats': RouterStats | null
       'router.loaded': string[]
+      // The request Claude is grilling the developer about, from the pick of the grilling to the
+      // next step's; null when no grilling is under way.
+      'router.grilling': string | null
       'router.mode': RouterMode | null
       'router.setup': RouterSetup | null
       'router.catalog': RouterSkill[]

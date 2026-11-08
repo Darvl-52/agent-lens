@@ -1,5 +1,5 @@
 // The types of the router part, by the names the contract in index.d.ts gives them.
-import type { RouterMode, RouterLang, RouterTab, RouterSkill, RouterRule, RouterSetup, RouterPick, RouterDecision, RouterChange, RouterStats } from '.'
+import type { RouterMode, RouterLang, RouterTab, RouterSkill, RouterRule, RouterSetup, RouterPick, RouterDecision, RouterChange, RouterStats, RouterStage, RouterFeedback } from '.'
 
 export type Mode = RouterMode
 export type Lang = RouterLang
@@ -11,3 +11,5 @@ export type Pick = RouterPick
 export type Decision = RouterDecision
 export type Change = RouterChange
 export type Stats = RouterStats
+export type Stage = RouterStage
+export type Feedback = RouterFeedback

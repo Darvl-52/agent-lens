@@ -68,9 +68,10 @@ async function router($: Engine, on: On, setup: Setup = {}) {
     const skills = setup.listed && { totalSkills: setup.listed.length, includedSkills: setup.listed.length, tokens: 1, skillFrontmatter: setup.listed.map(name => ({ name, source: setup.ofProject?.includes(name) ? 'projectSettings' : 'plugin', tokens: 1 })) }
     return { value: { startedAt: 0, rateLimits: [], context: { breakdown: skills ? { skills } : undefined } } as any }
   })
+  let replyNow = setup.reply
   on('model.complete', ($, e) => {
     asked.push(e)
-    const reply = setup.reply === undefined ? '{"picks":[]}' : setup.reply
+    const reply = replyNow === undefined ? '{"picks":[]}' : replyNow
     if (setup.fail === 'timeout') return { value: { isAnswered: false as const, reason: 'aborted' as const, usage: USAGE } }
     if (setup.fail === 429) return { value: { isAnswered: false as const, reason: 'api-error' as const, status: 429, error: 'rate_limit' as const, usage: USAGE } }
     return reply === null
@@ -95,6 +96,7 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   })
   on('skill.prompt', ($, e) => ({ text: e.text }))
   on('prompt.autocomplete', () => ({ suggestions: [] }))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -105,7 +107,17 @@ async function router($: Engine, on: On, setup: Setup = {}) {
   const run = (args: string) =>
     $.command.run({ command: 'router', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 100 } })
 
-  return { asked, entered, status, opened, store, reads, send, run, clock, install: (c: CommandInfo) => (commands = [...commands, c]) }
+  // The main turn a prompt starts: the skills Claude loads in it, and how it ends.
+  const turn = async (text: string, loads: string[] = [], reason: 'answer' | 'aborted' = 'answer', answer = 'Done.') => {
+    await $.turn.start({ text, turnId: text.slice(0, 12) })
+    for (const name of loads) {
+      const [plugin, skill] = name.includes(':') ? name.split(':') : [undefined, name]
+      await $.skill.prompt({ skill: skill!, ...(plugin ? { pluginName: plugin } : {}), text: 'Skill.', frontmatter: {}, source: plugin ? 'plugin' : 'projectSettings' } as any)
+    }
+    await $.turn.complete({ answer, durationMs: 1, isAborted: reason === 'aborted', turnId: text.slice(0, 12), reason, usage: { ...USAGE, model: 'test' } })
+  }
+
+  return { asked, entered, status, opened, store, reads, send, run, clock, turn, setReply: (r: string | null) => (replyNow = r), install: (c: CommandInfo) => (commands = [...commands, c]) }
 }
 
 test('with no rule, the model picks and Claude is told to load the skill', async ($, on) => {
@@ -231,7 +243,7 @@ test('a model that fails lets the prompt through as typed', async ($, on) => {
 test('a model that failed twice in a row is left to rest five minutes, each prompt kept waiting no longer than a short call', async ($, on) => {
   const r = await router($, on, { reply: null })
   await r.send('Почини выгрузку отчёта в Excel')
-  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(4_000)
+  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(6_000)
   // One failure is a blip: the next prompt asks again.
   await r.send('Почему падает сборка на CI')
   expect(r.asked).toHaveLength(2)
@@ -252,8 +264,8 @@ test('a model that failed twice in a row is left to rest five minutes, each prom
 test('a model out of time says so on the status line', async ($, on) => {
   const slow = await router($, on, { fail: 'timeout' })
   await slow.send('Почини выгрузку отчёта в Excel')
-  expect(slow.status.at(-1)).toBe('skill: model failed: no answer in 4 s')
-  expect(slow.asked[0]!.timeoutMs).toBe(4_000)
+  expect(slow.status.at(-1)).toBe('skill: model failed: no answer in 6 s')
+  expect(slow.asked[0]!.timeoutMs).toBe(6_000)
 })
 
 test('a rate limit and an unreadable answer are told apart', async ($, on) => {
@@ -540,4 +552,113 @@ test('off is said on the status line; a skill the project leaves out says so in 
   await ui.press({ key: 'skill-mattpocock-skills:tdd' })
   expect(await ui.find({ type: 'Text', text: /^⚠ tdd is left out by the project's/ })).toMatchObject({ props: { color: 'warning' } })
   await ui.unmount()
+})
+
+const GRILLING: CommandInfo = { name: 'mattpocock-skills:grilling', description: 'Grill the user about a plan.', source: 'plugin', plugin: 'mattpocock-skills' }
+const MODELING: CommandInfo = { name: 'mattpocock-skills:domain-modeling', description: 'Build the domain model.', source: 'plugin', plugin: 'mattpocock-skills' }
+const PROPOSE: CommandInfo = { name: 'opsx:propose', description: 'Propose an OpenSpec change.', source: 'user' }
+const VAGUE = '{"read":"auth, but which kind is open","kind":"work","stage":"grill","gaps":"login methods, sessions or tokens","picks":[]}'
+
+test('a request that reads more than one way is grilled first: Claude is told so, and the row says it', async ($, on) => {
+  const r = await router($, on, { reply: VAGUE })
+  r.install(GRILLING)
+  await r.send('Сделай авторизацию')
+  const told = r.entered[0]!.context.at(-1)!
+  expect(told).toContain('This request leaves decisions open (login methods, sessions or tokens)')
+  expect(told).toContain('load `mattpocock-skills:grilling` with the Skill tool')
+  expect(told).not.toContain('domain-modeling')
+  expect(r.status.at(-1)).toBe('skill: grill first · grilling')
+  await r.run('')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await shows(ui, /◆ grill first: login methods, sessions or tokens/)).toBe(true)
+  await ui.unmount()
+})
+
+test('in a project with a glossary or ADRs, the grilling writes the docs too (grill with docs)', async ($, on) => {
+  const r = await router($, on, { reply: VAGUE, files: { '/proj/CONTEXT.md': '# Shop\n' } })
+  r.install(GRILLING)
+  r.install(MODELING)
+  await r.send('Сделай авторизацию')
+  expect(r.entered[0]!.context.at(-1)).toContain('`mattpocock-skills:grilling` and `mattpocock-skills:domain-modeling`')
+})
+
+test('the answers to the grilling go to the model, short ones too, past the rules; the go-ahead writes the spec', async ($, on) => {
+  const r = await router($, on, {
+    reply: VAGUE,
+    files: { '/proj/openspec/changes/archive/old/tasks.md': '- [x] a\n' },
+    stored: { setup: { rules: [{ skill: 'tdd', when: ['токен'] }], hints: {}, ignored: [] } },
+  })
+  r.install(GRILLING)
+  r.install(PROPOSE)
+  await r.send('Сделай авторизацию')
+  await r.turn('Сделай авторизацию', ['mattpocock-skills:grilling'], 'answer', 'Q1: sessions or tokens?')
+  r.setReply('{"read":"an answer","kind":"continue","picks":[]}')
+  await r.send('токены')
+  expect(r.asked).toHaveLength(2)
+  expect(r.asked[1]!.prompt).toContain('Claude is grilling the developer about this request:\n<grilled>\nСделай авторизацию\n</grilled>')
+  expect(r.entered[1]!.context).toEqual([])
+  r.setReply('{"read":"settled, go on","kind":"work","stage":"spec","picks":[]}')
+  await r.send('ок, давай')
+  expect(r.asked).toHaveLength(3)
+  expect(r.entered[2]!.context.at(-1)).toContain('The grilling is settled: load `opsx:propose`')
+  expect(r.status.at(-1)).toBe('skill: spec first · propose')
+  // The grilling is over: a short prompt is too short to ask about again.
+  await r.send('да')
+  expect(r.asked).toHaveLength(3)
+})
+
+test('a request that says to skip the questions goes to work, whatever the model read in it', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","stage":"grill","gaps":"x","picks":[{"skill":"tdd","fit":"sure","why":"a feature"}]}' })
+  r.install(GRILLING)
+  await r.send('Сделай авторизацию, без вопросов')
+  const told = r.entered[0]!.context.at(-1)!
+  expect(told).not.toContain('grilling')
+  expect(told).toContain('`mattpocock-skills:tdd`: a feature')
+})
+
+test('with no grilling installed, a vague request goes as before', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","stage":"grill","picks":[{"skill":"tdd","fit":"sure"}]}' })
+  await r.send('Сделай авторизацию')
+  expect(r.entered[0]!.context.at(-1)).toContain('`mattpocock-skills:tdd`')
+})
+
+test('a maybe pick is offered, not ordered', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"maybe","why":"might want tests"}]}' })
+  await r.send('Поправь вёрстку карточки товара')
+  const told = r.entered[0]!.context.at(-1)!
+  expect(told).toContain('may fit the request')
+  expect(told).not.toContain('Before you start')
+})
+
+test('a sure pick Claude goes on without is a miss the model reads on the next prompts, in the next session too', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"sure","why":"a feature"}]}' })
+  await r.send('Объясни и поправь кэш корзины')
+  await r.turn('Объясни и поправь кэш корзины')
+  expect(r.store.get('feedback')).toMatchObject({
+    bySkill: { 'mattpocock-skills:tdd': { offered: 1, taken: 0 } },
+    declined: [{ skill: 'mattpocock-skills:tdd', prompt: 'Объясни и поправь кэш корзины' }],
+  })
+  await r.send('Добавь фильтр по цене в каталог')
+  expect(r.asked[1]!.prompt).toContain('- mattpocock-skills:tdd for «Объясни и поправь кэш корзины»')
+  // Loaded this time: taken, and the pane says both.
+  await r.turn('Добавь фильтр по цене в каталог', ['mattpocock-skills:tdd'])
+  expect(r.store.get('feedback')).toMatchObject({ bySkill: { 'mattpocock-skills:tdd': { offered: 2, taken: 1 } } })
+  await r.run('history')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await shows(ui, /^ ✓$/)).toBe(true)
+  expect(await shows(ui, /^ ✗$/)).toBe(true)
+  await ui.press({ key: 'tab-overview' })
+  expect(await shows(ui, /Claude loaded 1 picks, went on without 1/)).toBe(true)
+  await ui.unmount()
+})
+
+test('a turn the person stopped, or a maybe pick left, teaches nothing', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"sure"}]}' })
+  await r.send('Добавь фильтр по цене в каталог')
+  await r.turn('Добавь фильтр по цене в каталог', [], 'aborted')
+  expect(r.store.get('feedback')).toBeUndefined()
+  r.setReply('{"kind":"work","stage":"go","picks":[{"skill":"diagnosing-bugs","fit":"maybe"}]}')
+  await r.send('Почини выгрузку отчёта в Excel')
+  await r.turn('Почини выгрузку отчёта в Excel')
+  expect(r.store.get('feedback')).toEqual({ bySkill: {}, declined: [] })
 })

@@ -322,11 +322,32 @@ the turn starts and tells Claude to load it. **What you do:** nothing, or add ru
 
 **How it picks.** Your rules come first and cost nothing (a word matches at the start of a word, in
 any case). Otherwise a small model (`haiku`) reads the prompt, the exchange before it, the OpenSpec
-changes in progress and the skills, project skills first. Only a prompt that asks for work gets a
-skill, not a question or small talk. A skill already loaded is not picked again until `/clear`,
-`/resume` or a compaction. Prompts naming a skill or a slash command, and prompts from other plugins,
-are left alone. If the model fails or takes over 4 seconds, the prompt goes as typed and the status
-line says why; after two failures in a row it rests for five minutes.
+changes in progress and the skills, project skills first. It says in a sentence what the request
+asks for before it picks. Only a prompt that asks for work gets a skill, not a question, a nod or
+small talk. Each pick is `sure` or `maybe`: in `auto` Claude is told to load a sure one, and a maybe
+one is only offered. A skill already loaded is not picked again until `/clear`, `/resume` or a
+compaction. Prompts naming a skill or a slash command, and prompts from other plugins, are left
+alone. If the model fails or takes over 6 seconds, the prompt goes as typed and the status line says
+why; after two failures in a row it rests for five minutes.
+
+**Where the work starts.** For work, the model also says whether it is settled:
+
+| Stage | When | What Claude is told |
+| --- | --- | --- |
+| grill first | the request reads two or more ways, or hangs on a decision of yours (`Сделай авторизацию`) | load `grilling` and question you before any plan or code; with `domain-modeling` too where the project keeps `CONTEXT.md`, a glossary or `docs/adr` (Matt's grill-with-docs) |
+| spec first | settled and big, in a project with OpenSpec | load `openspec-propose` (or `opsx:propose`) and write the change first |
+| go | settled, Claude can start | the work's own skills, as above |
+
+While Claude grills you, your answers go to the model, short ones too, and your rules wait: a word a
+rule listens for is part of an answer there. Your go-ahead (`ок, давай`) ends the grilling: the
+spec is written from what it settled, or, without OpenSpec, the work starts. Say `без вопросов`,
+`сразу делай` or `no questions` to skip the grilling for one prompt; `/router ignore grilling` skips
+it for good.
+
+**It learns from Claude.** When the turn ends, each pick is marked loaded (✓) or not (✗) in the
+pane. A sure pick Claude went on without is kept, with its prompt, across sessions and projects:
+the model reads the last of these as misses, and a skill Claude often leaves is picked only for its
+own kind of work.
 
 ```
 /router add tdd test, тест, /red.?green/      run tdd when a prompt says one of these
@@ -351,7 +372,7 @@ rules in the project's `.claude/skill-router.json` and commit it. They come befo
 ```
 
 **The pane.** `/router` opens four tabs (`1`–`4`): Overview, Rules, Skills, History (`+ rule` turns
-a model's pick into a rule). `l` switches the language, and `a`, `s`, `o` the mode: `auto` (default)
+a model's pick into a rule; `◆` marks a stage, `?` a maybe pick). `l` switches the language, and `a`, `s`, `o` the mode: `auto` (default)
 tells Claude to load the skill, `suggest` says it may fit, `off` routes nothing.
 
 ## `/agent-lens`
