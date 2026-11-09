@@ -3,8 +3,9 @@ import type { Hook, Register, RenderChildren } from 'claude-code'
 import type { Part } from '../types'
 import type { StopNext } from './core/hooks'
 
+import { clearFaults, failed } from './core/faults'
 import { configureLang, restoreLang } from './core/lang'
-import { clearOutbox, endTurn, isPerson, startTurn, turnOwner } from './core/outbox'
+import { clearOutbox, configureOutbox, endTurn, isPerson, noteSubmit, startTurn, turnOwner } from './core/outbox'
 import { clearSpend, configureSpend, spendAgent, spendOn } from './core/spend'
 import { clearLedger, configureLedger, decideLine, endLedgerTurn, openDecide, PANE as DECIDE_PANE, pane as decidePane, restoreLedger, startLedgerTurn } from './ledger/ledger'
 import { checkedGuard, clearGuard, configureGuard, endGuardTurn, guardAfter, guardBefore, guardCommand, guardLines, restoreGuard, startGuardTurn } from './guard/guard'
@@ -55,7 +56,8 @@ import { afterSpecEdit, clearDecided, configureSpec, endSpecAgent, endSpecTurn, 
 // Four parts in one module, each in its own folder, sharing the language: the review of what the
 // agent changed (with the check of each edit as it is made), the OpenSpec change in view, the
 // skill each prompt gets, and the guard that holds each agent's turn to its limits. Every hook is registered here; on an event more than one part hears,
-// each part's work runs in turn, and one that fails does not stop the others.
+// each part's work runs in turn, and one that fails does not stop the others: its error is kept as
+// the part's (core/faults), for /agent-lens to show.
 // Between the spec's part of the row and the review's; and the columns the spec keeps for itself
 // there, its name and a part or two, below which each goes on a row of its own.
 const SPLIT = '  │  '
@@ -69,19 +71,19 @@ const MAIN = ''
 // What every part shows, read back into values a /clear or /resume emptied: the language, the change
 // in view, the router's mode, setup and skills.
 async function readBack($: Parameters<Hook<'session.end'>>[0]) {
-  await restoreLang($).catch(() => {})
-  await restoreParts($).catch(() => {})
-  if (isOn('spec')) await rescanSpec($).catch(() => {})
-  if (isOn('router')) await restoreRouter($).catch(() => {})
-  await restoreGuard($).catch(() => {})
-  await restoreLedger($).catch(() => {})
-  if (isOn('setup')) await startSetup($).catch(() => {})
+  await restoreLang($).catch(failed('lang'))
+  await restoreParts($).catch(failed('parts'))
+  if (isOn('spec')) await rescanSpec($).catch(failed('spec'))
+  if (isOn('router')) await restoreRouter($).catch(failed('router'))
+  await restoreGuard($).catch(failed('guard'))
+  await restoreLedger($).catch(failed('ledger'))
+  if (isOn('setup')) await startSetup($).catch(failed('setup'))
 }
 
 // What the person is told such a report went to, or undefined for any other text.
 async function agentReport($: Parameters<Hook<'prompt.submit'>>[0], text: string) {
   // The docs agent and the lenses first: the critic's check knows every agent this mod started.
-  return (await judgeReport($, text).catch(() => undefined)) ?? (await lensReport($, text).catch(() => undefined)) ?? (await criticReport($, text).catch(() => undefined))
+  return (await judgeReport($, text).catch(failed('setup'))) ?? (await lensReport($, text).catch(failed('lenses'))) ?? (await criticReport($, text).catch(failed('spec')))
 }
 
 export const register: Register = (on, options) => {
@@ -94,19 +96,21 @@ export const register: Register = (on, options) => {
   // What the review and the docs agent find goes to Claude by itself, the disputes to the person.
   configureLedger(options)
   configureSpend(options)
+  // The turns the parts may start by themselves after each prompt of the person's.
+  configureOutbox(options)
 
   // A part turned off in /agent-lens still has its command, which says so, and does none of its work.
   on('session.start', async ($, e, next) => {
-    await restoreLang($).catch(() => {})
-    await restoreParts($).catch(() => {})
-    await restoreGuard($).catch(() => {})
-    await restoreLedger($).catch(() => {})
-    await registerPartsCommand($).catch(() => {})
-    await startReview($).catch(() => {})
-    await (isOn('spec') ? startSpec($, e.isInteractive) : registerSpecCommand($)).catch(() => {})
-    await (isOn('setup') ? startSetup($) : registerSetup($)).catch(() => {})
+    await restoreLang($).catch(failed('lang'))
+    await restoreParts($).catch(failed('parts'))
+    await restoreGuard($).catch(failed('guard'))
+    await restoreLedger($).catch(failed('ledger'))
+    await registerPartsCommand($).catch(failed('parts'))
+    await startReview($).catch(failed('review'))
+    await (isOn('spec') ? startSpec($, e.isInteractive) : registerSpecCommand($)).catch(failed('spec'))
+    await (isOn('setup') ? startSetup($) : registerSetup($)).catch(failed('setup'))
     const started = await next(e)
-    await (isOn('router') ? startRouter($) : registerRouterCommand($)).catch(() => {})
+    await (isOn('router') ? startRouter($) : registerRouterCommand($)).catch(failed('router'))
     return started
   })
 
@@ -119,11 +123,12 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       clearOutbox()
       clearSpend()
-      await clearLedger($).catch(() => {})
+      clearFaults()
+      await clearLedger($).catch(failed('ledger'))
       clearDecided()
-      await restartReview($).catch(() => {})
-      await clearRouter($).catch(() => {})
-      await clearGuard($).catch(() => {})
+      await restartReview($).catch(failed('review'))
+      await clearRouter($).catch(failed('router'))
+      await clearGuard($).catch(failed('guard'))
       await readBack($)
     }
     return ended
@@ -142,6 +147,8 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     const kept = e.origin.kind === 'peer' ? await agentReport($, e.text) : undefined
     if (kept) return { drop: kept }
+    // A slash command's turn may be the one a part ran as if typed; a prompt's is not.
+    noteSubmit(e.command !== undefined)
     return isOn('router') ? promptSubmit($, e, next) : next(e)
   })
   on('prompt.autocomplete', ($, e, next) => (isOn('router') ? promptAutocomplete($, e, next) : next(e)))
@@ -154,7 +161,7 @@ export const register: Register = (on, options) => {
       if (isOn('spec')) startSpecTurn()
       if (isOn('setup')) startSetupTurn($)
     }
-    if (isOn('guard')) await startGuardTurn($, e.agentId).catch(() => {})
+    if (isOn('guard')) await startGuardTurn($, e.agentId).catch(failed('guard'))
     return isOn('review') ? turnStart($, e, next) : next(e)
   })
 
@@ -167,25 +174,25 @@ export const register: Register = (on, options) => {
     // A turn whose start this module missed (a reload) ends as the switches are now.
     const began = (part: Part) => begun.get(e.agentId ?? MAIN)?.includes(part) ?? isOn(part)
     const owner = turnOwner()
-    await endRouterTurn($, e.agentId, e.answer, e.reason, isPerson(owner)).catch(() => {})
+    await endRouterTurn($, e.agentId, e.answer, e.reason, isPerson(owner)).catch(failed('router'))
     if (e.agentId === undefined) {
       if (began('spec')) endSpecTurn($, e.reason)
       if (began('setup')) endSetupTurn($, e.reason, isOn('setup'))
     } else {
       endSpecAgent($, e.agentId, e.answer)
-      void endSetupAgent($, e.agentId, e.answer).catch(() => {})
-      void endLensAgent($, e.agentId, e.answer).catch(() => {})
+      void endSetupAgent($, e.agentId, e.answer).catch(failed('setup'))
+      void endLensAgent($, e.agentId, e.answer).catch(failed('lenses'))
     }
-    await endGuardTurn($, e.agentId).catch(() => {})
+    await endGuardTurn($, e.agentId).catch(failed('guard'))
     const result = await next(e)
-    if (began('review')) await endReviewTurn($, e.agentId, e.reason, isOn('review')).catch(() => {})
+    if (began('review')) await endReviewTurn($, e.agentId, e.reason, isOn('review')).catch(failed('review'))
     // What the turn cost: a subagent's is the part's that started it; a main turn its prompt
     // started is the part's too, as the main model pays for it.
     if (e.agentId !== undefined) spendAgent(e.agentId, e.usage)
     else if (!isPerson(owner)) spendOn(owner.from, e.usage, true)
     if (e.agentId === undefined) {
       endTurn()
-      await endLedgerTurn($, owner, e.answer, e.reason).catch(() => {})
+      await endLedgerTurn($, owner, e.answer, e.reason).catch(failed('ledger'))
     }
     begun.delete(e.agentId ?? MAIN)
     return result
@@ -208,23 +215,23 @@ export const register: Register = (on, options) => {
   // Then the guard holds the call to its loop's limits; each edit is checked against the rules, and
   // the spec read again where the edit was to it.
   on('tool.call', async ($, e, next) => {
-    const held = isOn('guard') ? await guardBefore($, e).catch(() => undefined) : undefined
+    const held = isOn('guard') ? await guardBefore($, e).catch(failed('guard')) : undefined
     if (held?.deny !== undefined) return { deny: held.deny }
-    const refusal = isOn('review') ? await checkBefore($, e).catch(() => undefined) : undefined
+    const refusal = isOn('review') ? await checkBefore($, e).catch(failed('review')) : undefined
     if (refusal !== undefined) return { deny: refusal }
     // A rule taken out of a rule file waits for the person, once the edit that takes it landed.
-    const removed = isOn('review') ? await rulesRemovedBy($, e).catch(() => undefined) : undefined
+    const removed = isOn('review') ? await rulesRemovedBy($, e).catch(failed('review')) : undefined
     // In Lenses: auto, work not read through the lenses since the last push waits for them.
-    const unread = isOn('lenses') && (e.tool === 'Bash' || isMcpPush(e.tool)) ? await lensesBeforePush($, e.tool === 'Bash' ? e.command : null, e.agentId).catch(() => undefined) : undefined
+    const unread = isOn('lenses') && (e.tool === 'Bash' || isMcpPush(e.tool)) ? await lensesBeforePush($, e.tool === 'Bash' ? e.command : null, e.agentId).catch(failed('lenses')) : undefined
     if (unread !== undefined) return { deny: unread }
     const ran = await next(e)
-    if (removed && !ran.isError) await raiseRemoved($, removed).catch(() => {})
+    if (removed && !ran.isError) await raiseRemoved($, removed).catch(failed('review'))
     if ((e.tool === 'Write' || e.tool === 'Edit') && !ran.isError) {
       if (isOn('spec')) afterSpecEdit($, e.file_path)
       if (isOn('setup')) afterSetupEdit($, e.file_path)
     }
     const reviewed = isOn('review') ? checkAfter($, e, ran) : ran
-    return guardAfter($, e, held, reviewed).catch(() => reviewed)
+    return guardAfter($, e, held, reviewed).catch(failed('guard', reviewed))
   }).catch(($, e, next) => next(e))
 
   // The review's notes wait while the gate keeps the turn going: red code is fixed before it is read.
@@ -257,14 +264,14 @@ export const register: Register = (on, options) => {
     const below = await next(e)
     if (e.props.hasSurvey || e.props.maxRows < 2) return below
     const { Box, Text, Button } = $.ui.resolve(e)
-    const review = isOn('review') ? await reviewLine($, e).catch(() => null) : null
-    const reviewButton = <Button key="open-changes" label="/changes" plain dimColor onPress={() => void openReview($).catch(() => {})} />
-    const specButton = <Button key="open-spec" label="/spec" plain dimColor onPress={() => void openSpec($).catch(() => {})} />
+    const review = isOn('review') ? await reviewLine($, e).catch(failed('review', null)) : null
+    const reviewButton = <Button key="open-changes" label="/changes" plain dimColor onPress={() => void openReview($).catch(failed('review'))} />
+    const specButton = <Button key="open-spec" label="/spec" plain dimColor onPress={() => void openSpec($).catch(failed('spec'))} />
     // Whether the spec keeps its room beside the review is settled first: on a row of its own it
     // is laid out for the whole row, not squeezed as if the review were still beside it.
     const taken = review ? ' /spec /changes'.length + SPLIT.length + review.width : ' /spec'.length
     const fits = review !== null && e.props.bodyColumns - taken >= MIN_SPEC
-    const spec = isOn('spec') ? await specLine($, e, fits ? taken : ' /spec'.length).catch(() => null) : null
+    const spec = isOn('spec') ? await specLine($, e, fits ? taken : ' /spec'.length).catch(failed('spec', null)) : null
     const row = (key: string, items: RenderChildren, buttons: RenderChildren) => (
       <Box key={key} flexDirection="row" gap={1} justifyContent="space-between">
         <Box flexDirection="row" flexShrink={1} overflow="hidden">
@@ -280,41 +287,41 @@ export const register: Register = (on, options) => {
         ? [row('lens-row', [...spec, <Text dimColor>{SPLIT}</Text>, review.item], [specButton, reviewButton])]
         : [...(spec ? [row('lens-row', spec, specButton)] : []), ...(review ? [row('review-row', review.item, reviewButton)] : [])]
     // An agent past the guard's soft limit goes first, a row of its own: it is what wants a look now.
-    const guarded = (isOn('guard') ? await guardLines($).catch(() => []) : []).map((g, i) => (
+    const guarded = (isOn('guard') ? await guardLines($).catch(failed('guard', [])) : []).map((g, i) => (
       <Text key={`guard-row-${i}`} color={g.isStopped ? 'error' : 'warning'} wrap="truncate-end">
         {g.text}
       </Text>
     ))
-    const retro = isOn('setup') ? await retroLine($).catch(() => null) : null
+    const retro = isOn('setup') ? await retroLine($).catch(failed('setup', null)) : null
     if (retro)
       rows.unshift(
         row('retro-row', <Text color="warning">{retro}</Text>, [
-          <Button key="run-retro" label="/retro" plain onPress={() => void runRetro($).catch(() => {})} />,
-          <Button key="dismiss-retro" label="×" plain dimColor onPress={() => void dismissRetro($).catch(() => {})} />,
+          <Button key="run-retro" label="/retro" plain onPress={() => void runRetro($).catch(failed('setup'))} />,
+          <Button key="dismiss-retro" label="×" plain dimColor onPress={() => void dismissRetro($).catch(failed('setup'))} />,
         ]),
       )
-    const rules = isOn('setup') ? await rulesLine($).catch(() => null) : null
+    const rules = isOn('setup') ? await rulesLine($).catch(failed('setup', null)) : null
     if (rules)
       rows.unshift(
         row('rules-offer-row', <Text color="warning">{rules}</Text>, [
-          <Button key="add-rules" label="add" plain onPress={() => void addTaskRules($).catch(() => {})} />,
-          <Button key="dismiss-rules" label="×" plain dimColor onPress={() => void dismissTaskRules($).catch(() => {})} />,
+          <Button key="add-rules" label="add" plain onPress={() => void addTaskRules($).catch(failed('setup'))} />,
+          <Button key="dismiss-rules" label="×" plain dimColor onPress={() => void dismissTaskRules($).catch(failed('setup'))} />,
         ]),
       )
-    const offered = isOn('lenses') ? await offerLine($).catch(() => null) : null
+    const offered = isOn('lenses') ? await offerLine($).catch(failed('lenses', null)) : null
     if (offered)
       rows.unshift(
         row('lenses-offer-row', <Text color="warning">{offered}</Text>, [
-          <Button key="run-lenses" label="/changes lenses" plain onPress={() => void runOffered($).catch(() => {})} />,
-          <Button key="dismiss-lenses" label="×" plain dimColor onPress={() => void dismissOffer($).catch(() => {})} />,
+          <Button key="run-lenses" label="/changes lenses" plain onPress={() => void runOffered($).catch(failed('lenses'))} />,
+          <Button key="dismiss-lenses" label="×" plain dimColor onPress={() => void dismissOffer($).catch(failed('lenses'))} />,
         ]),
       )
-    const lenses = isOn('lenses') ? await lensesLine($).catch(() => null) : null
-    if (lenses) rows.unshift(row('lenses-row', <Text color="warning">{lenses}</Text>, <Button key="open-lenses" label="/changes lenses" plain dimColor onPress={() => void openLenses($).catch(() => {})} />))
-    const decide = await decideLine($).catch(() => null)
-    if (decide) rows.unshift(row('decide-row', <Text color="warning">{decide}</Text>, <Button key="open-decide" label="/agent-lens decide" plain dimColor onPress={() => void openDecide($).catch(() => {})} />))
-    const docs = isOn('setup') ? await setupLine($).catch(() => null) : null
-    if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(() => {})} />))
+    const lenses = isOn('lenses') ? await lensesLine($).catch(failed('lenses', null)) : null
+    if (lenses) rows.unshift(row('lenses-row', <Text color="warning">{lenses}</Text>, <Button key="open-lenses" label="/changes lenses" plain dimColor onPress={() => void openLenses($).catch(failed('lenses'))} />))
+    const decide = await decideLine($).catch(failed('ledger', null))
+    if (decide) rows.unshift(row('decide-row', <Text color="warning">{decide}</Text>, <Button key="open-decide" label="/agent-lens decide" plain dimColor onPress={() => void openDecide($).catch(failed('ledger'))} />))
+    const docs = isOn('setup') ? await setupLine($).catch(failed('setup', null)) : null
+    if (docs) rows.unshift(row('setup-row', <Text color="warning">{docs}</Text>, <Button key="open-setup" label="/setup-project" plain dimColor onPress={() => void openSetup($).catch(failed('setup'))} />))
     rows.unshift(...guarded)
     if (rows.length === 0) return below
     return (

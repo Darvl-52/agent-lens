@@ -12,8 +12,13 @@ export const SETTINGS = '.claude/settings.json'
 const FILES = /\{files(?::([\w.,\s]+))?\}/g
 // A fast command past this is too slow to run at every turn's end: it belongs to the full tier.
 const FAST_BUDGET_MS = 120_000
-// How long one command of a tier may run, and how much of what it wrote goes back to Claude.
+// How long one command of a tier may run, and how much of what it wrote goes back to Claude. The fast
+// tier runs at a turn's end, in its Stop hook: a command there is cut at the fast budget, and the
+// tier as a whole at its own, so the gate ends in time to say what it found. A command cut, or one
+// left unrun once the tier's time is spent, is red, said so, never a check that passed.
 const COMMAND_TIMEOUT_MS = 300_000
+const FAST_COMMAND_TIMEOUT_MS = FAST_BUDGET_MS
+const FAST_TOTAL_MS = 180_000
 const OUTPUT_LINES = 60
 const OUTPUT_CHARS = 4_000
 // The untracked files hashed for the tree's fingerprint, at most: past them, their names alone.
@@ -23,8 +28,8 @@ const ROOT = '.'
 
 export type Config = { checks?: Checks; run?: RunCommands }
 export type Exec = (argv: readonly string[], cwd: string, timeoutMs: number) => Promise<{ exitCode: number; stdout: string; stderr: string }>
-// One command run: where, what, how long, how it ended.
-export type Timing = { folder: string; command: string; ms: number; exitCode: number }
+// One command run: where, what, how long, how it ended; cut where its time or the tier's ran out.
+export type Timing = { folder: string; command: string; ms: number; exitCode: number; isCut?: boolean }
 
 const isCommands = (v: unknown): v is string[] => Array.isArray(v) && v.every(c => typeof c === 'string' && c.trim() !== '')
 const isFolder = (f: string) => f !== '' && !f.startsWith('/') && !/^[a-z]:/i.test(f) && !f.split(/[\\/]/).includes('..')
@@ -151,14 +156,27 @@ export async function fingerprintOf(exec: Exec, cwd: string) {
   return { head: (head ?? '').trim(), tree: [head ?? '', diff ?? '', names.join('\n'), hashes].join('\0') }
 }
 
+// A command past its time: the engine rejects the run, the CLI kills it and says so.
+const isTimeout = (err: unknown) => /tim(ed|e) ?out|timeout/i.test(String(err))
+const seconds = (ms: number) => `${Math.round(ms / 1000)}s`
+
 // One tier run, folder by folder, each command in turn: what went red, how long each took, and the
 // commands that take files and had none, which did not run. A fast command that takes files runs on
-// the folder's changed ones; a full one on the whole folder.
-export async function runTier(exec: Exec, root: string, tier: Record<string, string[]>, opts: { isFast: boolean; now: () => Promise<number> | number; since?: Readonly<Record<string, string>> }) {
+// the folder's changed ones; a full one on the whole folder. A command past its time is red, and so
+// is each one the tier's time ran out before: the gate says it, rather than nothing.
+export async function runTier(
+  exec: Exec,
+  root: string,
+  tier: Record<string, string[]>,
+  opts: { isFast: boolean; now: () => Promise<number> | number; since?: Readonly<Record<string, string>>; commandMs?: number; totalMs?: number },
+) {
   const shell = await shellOf(exec, root)
   const failures: GateFailure[] = []
   const timings: Timing[] = []
   const skipped: { folder: string; command: string }[] = []
+  const commandMs = opts.commandMs ?? (opts.isFast ? FAST_COMMAND_TIMEOUT_MS : COMMAND_TIMEOUT_MS)
+  const totalMs = opts.totalMs ?? (opts.isFast ? FAST_TOTAL_MS : Infinity)
+  const start = await opts.now()
   for (const [folder, commands] of Object.entries(tier)) {
     const cwd = joinRel(root, folder)
     const files = opts.isFast && commands.some(takesFiles) ? await changedIn(exec, cwd, opts.since?.[folder]) : []
@@ -169,9 +187,27 @@ export async function runTier(exec: Exec, root: string, tier: Record<string, str
         continue
       }
       const at = await opts.now()
-      const r = await exec(argvOf(shell, line), cwd, COMMAND_TIMEOUT_MS).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }))
-      timings.push({ folder, command, ms: (await opts.now()) - at, exitCode: r.exitCode })
-      if (r.exitCode !== 0) failures.push({ folder, command, exitCode: r.exitCode, output: tailOf(r.stdout, r.stderr) })
+      const left = totalMs - (at - start)
+      if (left < 1_000) {
+        timings.push({ folder, command, ms: 0, exitCode: -1, isCut: true })
+        failures.push({ folder, command, exitCode: -1, output: `not run: the ${opts.isFast ? 'fast' : 'full'} checks ran past their ${seconds(totalMs)} before it` })
+        continue
+      }
+      const limit = Math.min(commandMs, left)
+      let isRejected = false
+      const r = await exec(argvOf(shell, line), cwd, limit).catch((err: unknown) => {
+        isRejected = isTimeout(err)
+        // What it wrote before it was cut, where the run kept it.
+        const kept = err as { stdout?: unknown; stderr?: unknown } | null
+        const text = (v: unknown) => (typeof v === 'string' ? v : '')
+        return { exitCode: -1, stdout: text(kept?.stdout), stderr: [text(kept?.stderr), String(err)].filter(Boolean).join('\n') }
+      })
+      const ms = (await opts.now()) - at
+      const isCut = r.exitCode !== 0 && (isRejected || ms >= limit)
+      timings.push({ folder, command, ms, exitCode: r.exitCode, ...(isCut ? { isCut } : {}) })
+      const tail = tailOf(r.stdout, r.stderr)
+      const output = isCut ? `timed out: cut at ${seconds(limit)}${tail === '' ? '' : `\n${tail}`}` : tail
+      if (r.exitCode !== 0) failures.push({ folder, command, exitCode: r.exitCode, output })
     }
   }
   return { failures, timings, skipped }
@@ -189,11 +225,11 @@ export function newRed(failures: readonly GateFailure[], baseline: Readonly<Reco
   })
 }
 
-// What a validation of the fast tier found: a command too slow for it (one cut at the timeout too),
-// one that does not start.
+// What a validation of the fast tier found: a command too slow for it (one cut at the timeout, or
+// left unrun as the tier's time ran out, too), one that does not start.
 export function timingIssues(timings: readonly Timing[]): DocIssue[] {
   return timings.flatMap((t): DocIssue[] =>
-    t.ms > FAST_BUDGET_MS ? [{ file: CONFIG, kind: 'checks-slow', detail: `${whereOf(t)} (${Math.round(t.ms / 1000)}s)` }]
+    t.isCut || t.ms > FAST_BUDGET_MS ? [{ file: CONFIG, kind: 'checks-slow', detail: `${whereOf(t)} (${t.ms > 0 ? seconds(t.ms) : 'not run in time'})` }]
     : isUnstarted(t.exitCode) ? [{ file: CONFIG, kind: 'checks-start', detail: whereOf(t) }]
     : [],
   )

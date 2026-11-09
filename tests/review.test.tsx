@@ -6,6 +6,7 @@ import { below, canonical, changedSpan, fileDiff, fileText, filesText, fingerpri
 import { verdictsIn } from '../hooks/ledger/ledger'
 import { clearOutbox, isWaiting, send, startTurn } from '../hooks/core/outbox'
 import { WORDS } from '../hooks/review/words'
+import { posix } from './helpers'
 
 // Where a file of the project's own repository is shown.
 const at = (rel: string) => ({ group: '', rel, shown: rel })
@@ -197,10 +198,6 @@ const DARK = APP.replace('export const theme = "light"\n', 'export const theme =
 const REVIEWED =
   '[{"file":"src/app.ts","line":1,"severity":"bug","text":"The theme no longer follows the system."},{"file":"src/app.ts","severity":"note","text":"No test for the dark theme."}]'
 
-// The engine hands the mod each path as the platform spells it: on Windows `D:\proj\src\app.ts` for
-// `/proj/src/app.ts`. The disk here is kept by the POSIX spelling, whichever the mod asks by.
-const posix = (path: string) => path.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/')
-
 // A project in /proj, one repository, its files on a disk kept here; Write edits it, and the model,
 // git, the prompts sent and the toasts are answered and kept here, so a test reads what the mod did.
 // What the checks find waits for the person here, as by hand, unless `autonomy` says otherwise.
@@ -283,7 +280,7 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     // As git for Windows says it: `D:/proj`, never `D:\proj`.
     const at = posix(e.argv[e.argv.indexOf('-C') + 1] ?? '/proj')
     const repo = repoOfPath(at) ?? '/proj'
-    if (e.argv.includes('rev-parse')) return ok(`${repoOfPath(at) ?? root.replace(/\\/g, '/')}\n`)
+    if (e.argv.includes('rev-parse')) return ok(`${native(repo).replace(/\\/g, '/')}\n`)
     if (e.argv.includes('status'))
       return ok(
         [...new Set([...head.keys(), ...disk.keys()])]
@@ -1006,6 +1003,23 @@ test('where classic hooks run, the turn is kept going to fix what was caught, an
   expect((await $.classic.Stop({ stop_hook_active: false })).block).toContain('Remove the comment above the theme.')
   await $.turn.complete(DONE)
   expect(submitted).toEqual([])
+})
+
+test('past the turns the parts may start by themselves, a classic stop is not kept going: the note waits for the next tool result', { options: { autoTurns: 1 } }, async ($, on) => {
+  const { native, settle, setViolations, submitted } = await project($, on, { ...RULES, 'src/app.ts': APP })
+  setViolations(COMMENT)
+  await $.turn.start({ text: 'add dark mode', turnId: 't1' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: COMMENTED })
+  await settle()
+  // No classic stop ran: the note goes as a prompt, the one turn the parts may start by themselves.
+  await $.turn.complete(DONE)
+  await settle()
+  expect(submitted).toHaveLength(1)
+  await $.turn.start({ text: submitted[0]!, turnId: 't2' })
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: `${COMMENTED}\n` })
+  await settle()
+  expect((await $.classic.Stop({ stop_hook_active: false })).block).toBeUndefined()
+  expect((await $.tool.call({ tool: 'Bash', command: 'ls' })).context?.join('\n')).toMatch(/^agent-lens: your edit to .*app\.ts breaks/)
 })
 
 test("a subagent's unread note goes to the main loop when it ends", async ($, on) => {

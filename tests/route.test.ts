@@ -226,12 +226,20 @@ test('grilling comes before any code; a sure pick is loaded, a maybe one offered
   const spec = directiveOf('auto', [{ skill: 'opsx:propose', why: '', by: 'model', isStage: true }], { stage: 'spec', loaded: [], afterGrilling: true })
   expect(spec).toContain('The grilling is settled: load `opsx:propose`')
   expect(spec).toContain('from what the grilling settled')
-  const mixed = directiveOf('auto', [
-    { skill: 'mattpocock-skills:tdd', why: 'a feature', by: 'model' },
-    { skill: 'docs', why: 'maybe docs', by: 'model', fit: 'maybe' },
-  ])
-  expect(mixed).toContain('This request fits the skill below. Before you start, load it with the Skill tool and follow it:\n- `mattpocock-skills:tdd`: a feature')
-  expect(mixed).toContain('This skill may fit the request; load it with the Skill tool if it does:\n- `docs`: maybe docs')
+  // The model's pick is told by the skill's own description, not the model's why; a maybe one not at all.
+  const mixed = directiveOf(
+    'auto',
+    [
+      { skill: 'mattpocock-skills:tdd', why: 'a feature', by: 'model' },
+      { skill: 'docs', why: 'maybe docs', by: 'model', fit: 'maybe' },
+    ],
+    undefined,
+    SKILLS,
+  )
+  expect(mixed).toContain('This request fits the skill below. Before you start, load it with the Skill tool and follow it:\n- `mattpocock-skills:tdd`: Test-driven development.')
+  expect(mixed).not.toContain('a feature')
+  expect(mixed).not.toContain('docs')
+  expect(directiveOf('suggest', [{ skill: 'docs', why: 'made up', by: 'model' }], undefined, SKILLS)).toContain('This skill may fit the request; load it with the Skill tool if it does:\n- `docs`: Living docs.')
   expect(directiveOf('suggest', [{ skill: 'mattpocock-skills:grilling', why: '', by: 'model', isStage: true }], { stage: 'grill', loaded: [] })).toContain('may leave decisions open')
 })
 

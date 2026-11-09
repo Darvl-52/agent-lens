@@ -345,8 +345,9 @@ export type SetupGateFailure = { folder: string; command: string; exitCode: numb
 // The gate at the end of the main loop's turn: the fast checks green, red (and how many times the
 // turn went back for it), red but as they were on this commit before the agent, let go once the
 // turn went back as often as it may, or let go as the turn sent back changed nothing: Claude holds
-// the red is not of its changes.
-export type SetupGate = { status: 'green' | 'red' | 'base' | 'released' | 'answered'; rounds: number; failures: SetupGateFailure[] }
+// the red is not of its changes; or held, not sent back, the turns the parts may start by themselves
+// after the person's prompt spent.
+export type SetupGate = { status: 'green' | 'red' | 'base' | 'released' | 'answered' | 'held'; rounds: number; failures: SetupGateFailure[] }
 
 // The fast checks as they were on a commit: what was red there before the agent touched it.
 export type SetupBaseline = { sha: string; red: string[] }
@@ -497,6 +498,9 @@ declare module 'claude-code' {
       // OpenSpec's config with no rule for each task to name the rules and lenses it touches, offered
       // to have it added.
       'setup.rulesOffer': Record<string, never> | null
+      // What keeps the gate from reading .claude/agent-lens.json, as the row says it; null where it
+      // reads it. Read at the session's start, after an edit to it and at a turn's end.
+      'setup.configBroken': string | null
 
       // The last review of the branch by lenses.
       'lenses.review': LensReview | null

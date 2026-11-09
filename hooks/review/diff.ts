@@ -20,24 +20,29 @@ const isWindows = (path: string) => /^[A-Za-z]:/.test(path) || path.includes('\\
 const sepOf = (path: string) => (isWindows(path) ? '\\' : '/')
 const isRoot = (path: string) => path === '/' || /^[A-Z]:\\$/.test(path)
 const fold = (path: string) => (isWindows(path) ? path.toLowerCase() : path)
+// Git Bash names a drive as a folder at the root: `/d/proj` for `D:\proj`.
+const MSYS = /^\/([A-Za-z])(?=\/|$)/
 
 // One spelling of a path, so a file is one key whoever named it: on Windows `\` between names and
 // the drive letter upper-cased (git says `d:/proj` where the engine says `D:\proj`); no separator
-// at the end but a root's.
-export const canonical = (path: string) => {
-  const p = isWindows(path) ? path.replace(/\//g, '\\').replace(/^[a-z]:/, d => d.toUpperCase()) : path
+// at the end but a root's. Beside a Windows path `like`, Git Bash's `/d/proj` is `D:\proj` too; on
+// its own it may be a POSIX folder, and stays one.
+export const canonical = (path: string, like?: string) => {
+  // `like` a string alone: `map(canonical)` hands it an index.
+  const named = typeof like === 'string' && isWindows(like) ? path.replace(MSYS, (_, d: string) => `${d}:`) : path
+  const p = isWindows(named) ? named.replace(/\//g, '\\').replace(/^[a-z]:/, d => d.toUpperCase()) : named
   if (isRoot(p)) return p
   const trimmed = p.replace(/[\\/]+$/, '')
   return /^[A-Z]:$/.test(trimmed) ? `${trimmed}\\` : trimmed || p
 }
 
-export const samePath = (a: string, b: string) => fold(canonical(a)) === fold(canonical(b))
+export const samePath = (a: string, b: string) => fold(canonical(a, b)) === fold(canonical(b, a))
 
 // `path` below `dir`, its names joined by `/` as git and the model name them; undefined for a path
 // not inside it, `dir` itself included.
 export const below = (path: string, dir: string) => {
-  const p = canonical(path)
-  const d = canonical(dir)
+  const p = canonical(path, dir)
+  const d = canonical(dir, path)
   const head = isRoot(d) ? d : `${d}${sepOf(d)}`
   return p.length > head.length && fold(p).startsWith(fold(head)) ? p.slice(head.length).split(SEP).join('/') : undefined
 }

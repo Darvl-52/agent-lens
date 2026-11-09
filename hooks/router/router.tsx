@@ -2,10 +2,31 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions } from 'claude-c
 
 import type { Decision, Pick, Stage } from '../../types/router'
 import type { PaneHook } from '../core/hooks'
+import { ownerNow } from '../core/outbox'
 import { spendOn } from '../core/spend'
 import { catalogNow, changesIn, domainDocsIn, isLoaded, KEPT_DECISIONS, lookAround, manualNow, oneLine } from './catalog'
 import { drawPane } from './pane'
-import { SYSTEM, directiveOf, gapsOf, isSpecSkill, isTerse, kindOf, namesSkill, parseReply, promptOf, resolve, ruleHits, shortOf, skipsQuestions, stageOf, stageSkills } from './route'
+import {
+  SYSTEM,
+  directiveOf,
+  gapsOf,
+  hashOf,
+  isAdvice,
+  isReviewSkill,
+  isSpecSkill,
+  isTerse,
+  kindOf,
+  namesSkill,
+  parseReply,
+  promptOf,
+  resolve,
+  ruleHits,
+  shortOf,
+  skipOf,
+  skipsQuestions,
+  stageOf,
+  stageSkills,
+} from './route'
 import type { Failure } from './route'
 import {
   COMMAND,
@@ -33,10 +54,11 @@ import {
 import { WORDS } from './words'
 
 // The prompt waits on the model, so the model gets a short while: a pick that comes later is worth
-// less than the wait. It answers in two to three seconds, as it says what it reads before it picks;
-// six leave room for a slow one. One that failed twice in a row (offline, rate-limited, overloaded) is
-// left to rest, so the prompts after it are not kept waiting on it too; once is a blip.
-const MODEL_TIMEOUT_MS = 6_000
+// less than the wait. It mostly answers in one to two seconds, as it says what it reads before it
+// picks; one that takes longer than three is let go, and the prompt goes as typed. One that failed
+// twice in a row (offline, rate-limited, overloaded) is left to rest, so the prompts after it are not
+// kept waiting on it too; once is a blip.
+const MODEL_TIMEOUT_MS = 3_000
 const MODEL_REST_MS = 5 * 60_000
 const FAILS_TO_REST = 2
 
@@ -49,10 +71,18 @@ let answer = ''
 let restUntil = 0
 let failsInRow = 0
 let lastFailure: Failure = { kind: 'unread' }
-// The decision whose picks wait on the turn its prompt started, and the picks judged by it (those not
-// loaded before); the skills loaded since that prompt.
-let awaiting: { at: number; judged: string[] } | null = null
-let seen: string[] = []
+// The decisions whose picks wait on the turn their prompt starts, each by its own `at`: the picks
+// judged by it (those not loaded before) and the skills loaded in its turn. A prompt the person queued
+// while a turn ran waits for the next turn (`isQueued`): the turn under way is not its, so its picks
+// are not judged by what that one loaded.
+type Awaiting = { at: number; judged: string[]; seen: string[]; isQueued: boolean }
+let awaiting: Awaiting[] = []
+// The `at` of the last decision: each prompt's is its own, two in the same millisecond too.
+let lastAt = 0
+// The model's verdicts this session, by the prompt and what was around it: the same prompt after the
+// same answer is not asked again (sent again after an escape, or once more as it was).
+const verdicts = new Map<string, string>()
+const KEPT_VERDICTS = 100
 
 type Routed = { picks: Pick[]; note?: string; failure?: Failure; stage?: Stage; gaps?: string; afterGrilling?: boolean }
 
@@ -79,47 +109,69 @@ async function routeOf($: EngineInterface, text: string, useModel: boolean, mode
   const hits = grilling === null ? ruleHits(text, setup.rules, skills) : []
   if (hits.length > 0) return fresh(hits).length > 0 ? { picks: fresh(hits) } : { picks: [], note: 'loaded' }
   if (!useModel || (isTerse(text) && grilling === null)) return { picks: [] }
-  if ((await $.clock.now()) < restUntil) return { picks: [], note: 'resting' }
+  // Too short, a slash command, a reply to Claude's question: not worth the wait on the model.
+  const skip = grilling === null ? skipOf(text, answer) : undefined
+  if (skip !== undefined) return { picks: [], note: skip }
+  // An open question for an opinion or ideas wants Claude's own reading: a skill only where one is
+  // for reviewing, and then only a sure pick of one.
+  const advice = grilling === null && isAdvice(text)
+  if (advice && !skills.some(isReviewSkill)) return { picks: [], note: 'advice' }
 
-  const [changes, hasDocs, learned] = await Promise.all([changesIn($).catch(() => null), domainDocsIn($).catch(() => false), feedbackIn($)])
-  const tracks = Object.entries(learned.bySkill)
-    .filter(([skill]) => skills.some(s => s.name === skill))
-    .map(([skill, t]) => ({ skill, ...t }))
-  const prompt = promptOf(text, { skills, hints: setup.hints, loaded, changes, previous, answer, grilling, declined: learned.declined, tracks })
-  const reply = await $.model.complete(
-    {
-      model,
-      system: SYSTEM,
-      prompt: [{ text: prompt.skills, cache: true }, { text: prompt.rest }],
-      // It thinks in its reply: the line it reads the request in comes before its picks.
-      maxTokens: 400,
-      effort: 'low',
-      timeoutMs: MODEL_TIMEOUT_MS,
-    },
-    { signal },
-  )
-  spendOn('router', reply.usage)
-  if (!reply.isAnswered) {
-    // Cut by the person (escape on the prompt) the model did not fail; by its time, it did.
-    if (signal.aborted) return { picks: [] }
-    if (reply.reason === 'aborted') return failed($, { kind: 'timeout', seconds: MODEL_TIMEOUT_MS / 1000 }, true)
-    if (reply.reason === 'api-error') return failed($, { kind: 'api', status: reply.status, error: reply.error }, true)
-    return failed($, { kind: 'unread' }, true)
+  const key = hashOf(`${text}\u0000${answer}\u0000${grilling ?? ''}`)
+  let said = verdicts.get(key)
+  const [changes, hasDocs] = await Promise.all([changesIn($).catch(() => null), domainDocsIn($).catch(() => false)])
+  if (said === undefined) {
+    if ((await $.clock.now()) < restUntil) return { picks: [], note: 'resting' }
+    const learned = await feedbackIn($)
+    // A skill's track in this project where it has one to judge by, else over every project.
+    const enough = (t: { offered: number } | undefined) => (t?.offered ?? 0) >= 3
+    const tracks = skills
+      .map(s => s.name)
+      .map(skill => ({ skill, t: enough(learned.project.bySkill[skill]) ? learned.project.bySkill[skill] : learned.global[skill] }))
+      .filter((x): x is { skill: string; t: { offered: number; taken: number } } => x.t !== undefined)
+      .map(({ skill, t }) => ({ skill, ...t }))
+    const prompt = promptOf(text, { skills, hints: setup.hints, loaded, changes, previous, answer, grilling, declined: learned.project.declined, tracks })
+    const reply = await $.model.complete(
+      {
+        model,
+        system: SYSTEM,
+        prompt: [{ text: prompt.skills, cache: true }, { text: prompt.rest }],
+        // It thinks in its reply: the line it reads the request in comes before its picks.
+        maxTokens: 400,
+        effort: 'low',
+        timeoutMs: MODEL_TIMEOUT_MS,
+      },
+      { signal },
+    )
+    spendOn('router', reply.usage)
+    if (!reply.isAnswered) {
+      // Cut by the person (escape on the prompt) the model did not fail; by its time, it did.
+      if (signal.aborted) return { picks: [] }
+      if (reply.reason === 'aborted') return failed($, { kind: 'timeout', seconds: MODEL_TIMEOUT_MS / 1000 }, true)
+      if (reply.reason === 'api-error') return failed($, { kind: 'api', status: reply.status, error: reply.error }, true)
+      return failed($, { kind: 'unread' }, true)
+    }
+    restUntil = 0
+    said = reply.text
   }
-  restUntil = 0
   // Not work, the answer is read whatever its picks say, or whether it has any.
-  const kind = kindOf(reply.text)
-  const picks = kind === undefined || kind === 'work' ? parseReply(reply.text, skills) : []
+  const kind = kindOf(said)
+  const read = kind === undefined || kind === 'work' ? parseReply(said, skills) : []
   // An answer not read is the model's slip, not an outage: it is asked again on the next prompt.
-  if (picks === undefined) return failed($, { kind: 'unread' }, false)
+  if (read === undefined) return failed($, { kind: 'unread' }, false)
   failsInRow = 0
+  if (verdicts.size >= KEPT_VERDICTS) verdicts.delete(verdicts.keys().next().value!)
+  verdicts.set(key, said)
   // An answer to Claude's questions, or a question of the person's, leaves the grilling under way.
-  if (kind !== undefined && kind !== 'work') return { picks, note: kind }
+  if (kind !== undefined && kind !== 'work') return { picks: read, note: kind }
+  // Asked for an opinion, only a sure pick of a reviewing skill stands, and no stage: nothing is built.
+  const picks = advice ? read.filter(p => p.fit !== 'maybe' && skills.some(s => s.name === p.skill && isReviewSkill(s))) : read
+  if (advice) return picks.length > 0 ? { picks: fresh(picks) } : { picks: [], note: 'advice' }
 
   // The person who said to skip the questions is not grilled.
-  const read = stageOf(reply.text) ?? 'go'
-  const stage = read === 'grill' && skipsQuestions(text) ? 'go' : read
-  const gaps = stage === 'grill' ? gapsOf(reply.text) : undefined
+  const starts = stageOf(said) ?? 'go'
+  const stage = starts === 'grill' && skipsQuestions(text) ? 'go' : starts
+  const gaps = stage === 'grill' ? gapsOf(said) : undefined
   const staged = stage === 'go' ? [] : stageSkills(stage, skills, { hasSpec: changes !== null, hasDocs })
   if (staged.length > 0) {
     await setGrilling($, stage === 'grill' ? text.slice(0, 1500) : null)
@@ -155,12 +207,15 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
   const mode = await modeIn($)
   if (mode === 'off') return next(e)
 
-  const startedAt = await $.clock.now()
+  // A prompt sent while a turn runs is queued: its turn is the next one.
+  const isQueued = ownerNow() !== undefined
+  const startedAt = Math.max(await $.clock.now(), lastAt + 1)
+  lastAt = startedAt
   const loadedBefore = await loadedIn($).catch(() => [] as string[])
   // The router's own slip (the commands not listed, the store not read) is not the model's.
   const routed: Routed = await routeOf($, e.text, useModel, model, next.signal).catch(() => ({ picks: [] as Pick[], note: 'error' }))
   previous = e.text.slice(0, 1500)
-  const ms = (await $.clock.now()) - startedAt
+  const ms = Math.max(0, (await $.clock.now()) - startedAt)
   const decision: Decision = {
     at: startedAt,
     prompt: oneLine(e.text, 200),
@@ -176,16 +231,19 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
   // Kept for the pane; a write refused mid-render costs the history a line, not the prompt its skill.
   await addDecision($, decision, KEPT_DECISIONS).catch(() => {})
   // The model's picks are judged by the turn this prompt starts: a skill loaded before it tells
-  // nothing, and a rule is the person's word, not a guess to learn from.
-  const judged = routed.picks.filter(p => p.by === 'model').map(p => p.skill).filter(skill => !isLoaded(skill, loadedBefore))
-  awaiting = judged.length > 0 ? { at: startedAt, judged } : null
-  seen = []
+  // nothing, a rule is the person's word, not a guess to learn from, and a maybe pick is not told.
+  // A prompt sent between turns starts the next one, and what waited before it is let go; one queued
+  // waits beside the turn under way.
+  const told = routed.picks.filter(p => p.fit !== 'maybe')
+  const judged = told.filter(p => p.by === 'model').map(p => p.skill).filter(skill => !isLoaded(skill, loadedBefore))
+  const entry: Awaiting = { at: startedAt, judged, seen: [], isQueued }
+  awaiting = [...(isQueued ? awaiting : []), ...(judged.length > 0 ? [entry] : [])]
   // A model that failed says so where the pick would be, and why, so no pick is not read as nothing
   // fitting; one left to rest, when it is asked again.
   const note = routed.note
   $.ui.status(
-    routed.picks.length > 0
-      ? words.status(`${decision.stage ? `${words.stages[decision.stage]} · ` : ''}${routed.picks.map(p => shortOf(p.skill)).join(', ')}`)
+    told.length > 0
+      ? words.status(`${decision.stage ? `${words.stages[decision.stage]} · ` : ''}${told.map(p => shortOf(p.skill)).join(', ')}`)
       : note === 'failed'
         ? words.status(words.failed(decision.why ?? ''))
         : note === 'resting'
@@ -194,10 +252,10 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
             ? words.status(words.broken)
             : undefined,
   )
-  if (routed.picks.length === 0) return next(e)
+  if (told.length === 0) return next(e)
   const stage = decision.stage ? { stage: decision.stage, loaded: loadedBefore, ...(routed.gaps ? { gaps: routed.gaps } : {}), ...(routed.afterGrilling ? { afterGrilling: true } : {}) } : undefined
 
-  return next({ ...e, context: [...(e.context ?? []), directiveOf(mode, routed.picks, stage)] })
+  return next({ ...e, context: [...(e.context ?? []), directiveOf(mode, told, stage, catalogNow())] })
 }
 
 // A skill loaded by any road (the router's word, the person's `/name`, Claude's own choice) is in the
@@ -205,7 +263,8 @@ export async function promptSubmit($: Parameters<Hook<'prompt.submit'>>[0], e: P
 export async function skillPrompt($: Parameters<Hook<'skill.prompt'>>[0], e: Parameters<Hook<'skill.prompt'>>[1], next: Parameters<Hook<'skill.prompt'>>[2]) {
   const expanded = await next(e)
   const name = e.pluginName && !e.skill.includes(':') ? `${e.pluginName}:${e.skill}` : e.skill
-  seen = [...seen, name]
+  // Seen by the prompts whose turn this is, not by those queued for the next.
+  for (const a of awaiting) if (!a.isQueued) a.seen.push(name)
   await markLoaded($, name)
   if (isSpecSkill(name)) await setGrilling($, null)
 
@@ -218,12 +277,12 @@ export async function skillPrompt($: Parameters<Hook<'skill.prompt'>>[0], e: Par
 export async function endRouterTurn($: EngineInterface, agentId: string | undefined, said: string, reason: string, isPersons: boolean) {
   if (agentId !== undefined) return
   if (said) answer = said.slice(-800)
-  if (awaiting === null || !isPersons) return
-  const { at, judged } = awaiting
-  awaiting = null
+  // A part's turn is not the person's prompt's: what waits on one goes on waiting, and a prompt queued
+  // in it is next.
+  const ours = isPersons ? awaiting.filter(a => !a.isQueued) : []
+  awaiting = awaiting.filter(a => !ours.includes(a)).map(a => ({ ...a, isQueued: false }))
   if (reason !== 'answer') return
-  const loaded = seen
-  await recordOutcome($, at, skill => isLoaded(skill, loaded), judged)
+  for (const { at, judged, seen } of ours) await recordOutcome($, at, skill => isLoaded(skill, seen), judged)
 }
 
 // A compaction can drop a skill's text from the conversation, and a /clear drops everything: such a
@@ -242,8 +301,8 @@ export async function sessionCompact($: Parameters<Hook<'session.compact'>>[0], 
 export async function clearRouter($: EngineInterface) {
   previous = ''
   answer = ''
-  awaiting = null
-  seen = []
+  awaiting = []
+  verdicts.clear()
   $.ui.status(undefined)
   await forgetLoaded($)
   await setGrilling($, null)

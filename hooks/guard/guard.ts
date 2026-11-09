@@ -3,6 +3,7 @@ import type { EngineInterface, Hook, PluginOptions } from 'claude-code'
 
 import type { Alert, Setting, Stuck } from '../../types/guard'
 import { langIn } from '../core/lang'
+import { positive } from '../core/numbers'
 import { WORDS } from './words'
 
 // The guard over each agent's turn, the main loop's and every subagent's alike: a call that repeats
@@ -76,11 +77,6 @@ async function wordsIn($: EngineInterface) {
   return WORDS[await langIn($)]
 }
 
-const positive = (value: unknown, or: number) => {
-  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : or
-}
-
 export function configureGuard(options: PluginOptions) {
   configured = { isOn: options.guard !== 'off' && options.guard !== false, minutes: positive(options.guardMinutes, 60), steps: positive(options.guardSteps, 150) }
   setting = configured
@@ -121,7 +117,9 @@ async function clearAlert($: EngineInterface, id: string) {
   if (id in (await read($, alertsAtom))) await update($, alertsAtom, ({ [id]: _gone, ...rest }) => rest)
 }
 
-// A permission put to the person: the call it is for waits on them.
+// A permission put to the person: the call it is for waits on them. The engine decides it inside
+// the call, after every tool.call hook, so the wait falls within the call's span: guardAfter leaves
+// that span out, the tool's own run with it, as nothing marks where the person answered.
 export function checkedGuard(toolUseId: string | undefined, decision: string) {
   if (toolUseId && decision === 'ask') asked.add(toolUseId)
 }
@@ -196,10 +194,12 @@ type Held = { id: string; key: string; at: number; loop: Loop; deny?: undefined 
 type Ran = Awaited<ReturnType<CallNext>>
 
 export async function guardAfter($: EngineInterface, e: CallEvent, held: Held | undefined, ran: Ran): Promise<Ran> {
+  // Taken out first, so no call leaves its id behind: one held by no loop, of a tool that asks anyway.
+  const wasAsked = e.tool_use_id !== undefined && asked.delete(e.tool_use_id)
   if (!held || loops.get(held.id) !== held.loop) return ran
   const { id, key, loop } = held
   const after = await $.clock.now()
-  if (ASKING.has(e.tool) || DELEGATING.has(e.tool) || (e.tool_use_id && asked.delete(e.tool_use_id))) loop.outside.push([held.at, after])
+  if (wasAsked || ASKING.has(e.tool) || DELEGATING.has(e.tool)) loop.outside.push([held.at, after])
   if (ran.deny !== undefined) return ran
   loop.done = [...loop.done, { key, result: hashOf(ran.text ?? JSON.stringify(ran.result ?? null)), isError: ran.isError === true }].slice(-KEPT)
   const worked = workedOf(loop, after)

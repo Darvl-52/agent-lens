@@ -10,6 +10,15 @@ export type Violation = { rule: string; evidence: string; fix: string }
 // /setup-project writes, which are read at review rather than on every turn.
 export const RULE_NAMES = ['CLAUDE.md', 'CLAUDE.local.md', '.claude/CLAUDE.md', 'AGENTS.md', 'CODING_STANDARDS.md']
 
+// Reading code wants care more than speed: the session's mid-sized model reviews each turn and reads
+// the branch through the lenses, unless the settings' `reviewModel` names another.
+export const REVIEW_MODEL = 'sonnet'
+
+// A model the settings name, an alias or a full id; none named, `fallback`.
+export function modelOf(option: unknown, fallback: string) {
+  return typeof option === 'string' && option.trim() !== '' ? option.trim() : fallback
+}
+
 // An edit is sent to the check up to this, on each side of it.
 const CHANGE_LIMIT = 20_000
 
@@ -18,6 +27,18 @@ export const LIVE_SYSTEM = `You review one change an AI coding agent just made t
 Judge only rules about what files contain: code style, naming, comments, structure, forbidden APIs or patterns, hardcoded values, where code belongs. Ignore rules about workflow, git, communication, tools, testing process or how the agent should behave.
 Report a violation only when the NEW text clearly breaks a rule. Text the change removed or kept as it was is not a violation. When unsure, report nothing.
 Answer with JSON only: {"violations":[{"rule":"the rule, quoted briefly","evidence":"the offending new text, short, copied exactly","fix":"what to change, one sentence"}]}. No violations: {"violations":[]}.`
+
+// A rule file past `limit` is cut, but its security rules, the section /setup-project writes last,
+// are read whole: the rest gives way to them. Its heading may say more after its word (`## Security
+// rules`, `## Безопасность (OWASP)`); `## Securityfoo` and `### Cookie security` are no such section.
+const SECURITY_SECTION = /^##[ \t]+(?:security|безопасность)(?![\p{L}\p{N}_])[^\n]*$[\s\S]*?(?=^##[ \t]|(?![\s\S]))/imu
+export function clipRules(text: string, limit: number) {
+  if (text.length <= limit) return text
+  const security = text.match(SECURITY_SECTION)?.[0]
+  if (!security) return text.slice(0, limit)
+  const rest = text.replace(security, '')
+  return `${rest.slice(0, Math.max(0, limit - security.length))}\n[... cut]\n\n${security}`
+}
 
 // A drive letter or a backslash means a Windows path: compared without case.
 export const isRuleFile = (path: string) => {

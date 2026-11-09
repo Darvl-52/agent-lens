@@ -1,5 +1,7 @@
 import type { ModelUsage, PluginOptions } from 'claude-code'
 
+import { positive } from './numbers'
+
 // What each part of the mod cost this session: its own model calls, the subagents it started, and
 // the main turns its prompts started, which the main model pays for. Past the budget, where one is
 // set, the mod is by hand till the session ends: no findings go to Claude unasked, the critic waits
@@ -15,11 +17,6 @@ const spent = new Map<string, PartSpend>()
 const agents = new Map<string, string>()
 let budget = 0
 let isOver = false
-
-const positive = (value: unknown) => {
-  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : 0
-}
 
 export function configureSpend(options: PluginOptions) {
   budget = positive(options.budget)

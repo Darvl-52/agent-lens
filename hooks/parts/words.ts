@@ -18,7 +18,18 @@ export type Words = {
   ledgerName: string
   spent: (name: string, fresh: number, cached: number, calls: number, turns: number) => string
   budget: (fresh: number, budget: number, isOver: boolean) => string
+  // A part whose errors were let go this session, and the last of them.
+  fault: (part: string, count: number, last: string) => string
+  // The turns the parts started by themselves since the person's last prompt, of how many (0: no limit).
+  auto: (used: number, max: number, isHeld: boolean) => string
   list: (lines: string[]) => string
+}
+
+// Russian plural: 1 ошибка, 2 ошибки, 5 ошибок.
+const plural = (n: number, one: string, few: string, many: string) => {
+  const ten = n % 10
+  const hundred = n % 100
+  return ten === 1 && hundred !== 11 ? one : ten >= 2 && ten <= 4 && (hundred < 12 || hundred > 14) ? few : many
 }
 
 // Tokens as the person reads them: 1.2k, 340k.
@@ -52,6 +63,8 @@ export const WORDS: Record<Lang, Words> = {
     spent: (name, fresh, cached, calls, turns) =>
       `${name}: ${kilo(fresh)} tokens${cached > 0 ? `, ${kilo(cached)} from the cache` : ''}${calls > 0 ? ` · ${calls} ${calls === 1 ? 'call' : 'calls'}` : ''}${turns > 0 ? ` · ${turns} ${turns === 1 ? 'turn' : 'turns'} of Claude` : ''}`,
     budget: (fresh, budget, isOver) => `Budget: ${kilo(fresh)} of ${kilo(budget)}${isOver ? ': spent, all by hand now' : ''}`,
+    fault: (part, count, last) => `${part}: ${count} ${count === 1 ? 'error' : 'errors'}, last: ${last}`,
+    auto: (used, max, isHeld) => `Turns started by itself since your prompt: ${max > 0 ? `${used}/${max}` : `${used}, no limit`}${isHeld ? ', the rest held back' : ''}`,
     list: lines => `agent-lens parts:\n${lines.join('\n')}`,
   },
   ru: {
@@ -81,6 +94,8 @@ export const WORDS: Record<Lang, Words> = {
     spent: (name, fresh, cached, calls, turns) =>
       `${name}: ${kilo(fresh)} токенов${cached > 0 ? `, ${kilo(cached)} из кэша` : ''}${calls > 0 ? ` · вызовов: ${calls}` : ''}${turns > 0 ? ` · ходов Claude: ${turns}` : ''}`,
     budget: (fresh, budget, isOver) => `Бюджет: ${kilo(fresh)} из ${kilo(budget)}${isOver ? ': исчерпан, теперь всё вручную' : ''}`,
+    fault: (part, count, last) => `${part}: ${count} ${plural(count, 'ошибка', 'ошибки', 'ошибок')}, последняя: ${last}`,
+    auto: (used, max, isHeld) => `Ходов, начатых самим после вашего промпта: ${max > 0 ? `${used}/${max}` : `${used}, без предела`}${isHeld ? ', остальное придержано' : ''}`,
     list: lines => `Части agent-lens:\n${lines.join('\n')}`,
   },
 }

@@ -2,10 +2,12 @@ import type { Elements, EngineInterface } from 'claude-code'
 
 import type { Decision, Lang, Setup, Skill, Stats, Tab } from '../../types/router'
 import { NO_SETUP, shortOf } from './route'
+import type { Offer } from './route'
 import {
   MODES,
   TABS,
   changeSetup,
+  dismissOffer,
   flash,
   ownSetup,
   paneState,
@@ -92,6 +94,16 @@ async function ruleFrom($: EngineInterface, skill: string, words: Words) {
   await flash($, words.ruleFor(shortOf(skill)))
 }
 
+// A rule the project's picks have earned, made as offered, or said no to for good in this project.
+async function takeOffer($: EngineInterface, offer: Offer, words: Words) {
+  await changeSetup($, own => ({ ...own, rules: [...own.rules, { skill: offer.skill, when: [offer.word] }] }), words.added(shortOf(offer.skill), offer.word))
+}
+
+async function refuseOffer($: EngineInterface, offer: Offer, words: Words) {
+  await dismissOffer($, offer.skill)
+  await flash($, words.learnDismissed(shortOf(offer.skill)))
+}
+
 export async function drawPane($: EngineInterface, els: Els, view: View) {
   const { Box, Button, Text } = els
   const held = await paneState($)
@@ -109,6 +121,7 @@ export async function drawPane($: EngineInterface, els: Els, view: View) {
     columns: Math.max(30, view.columns - 2),
     canType: view.surface !== 'mobile',
     form: { skill: held.formSkill, words: held.formWords, hint: held.formHint },
+    offers: held.offers,
   }
   const body =
     tab === 'rules'
@@ -117,7 +130,7 @@ export async function drawPane($: EngineInterface, els: Els, view: View) {
         ? skillsTab($, els, data)
         : tab === 'history'
           ? historyTab($, els, data)
-          : overviewTab(els, data)
+          : overviewTab($, els, data)
 
   return (
     <Box flexDirection="column">
@@ -173,10 +186,26 @@ type Data = {
   columns: number
   canType: boolean
   form: { skill: string | null; words: string; hint: string }
+  offers: Offer[]
 }
 
-// The last prompt and what it got, then the session at a glance.
-function overviewTab(els: Els, d: Data) {
+// The rules the project's picks have earned, each to make or say no to.
+function offerRows($: EngineInterface, els: Els, d: Data) {
+  const { Box, Button, Text } = els
+
+  return d.offers.map(o => (
+    <Box key={`offer-${o.skill}`} flexDirection="row" columnGap={2} flexWrap="wrap">
+      <Text color="claude" wrap="truncate-end">
+        {d.words.learned(shortOf(o.skill), o.count, o.word)}
+      </Text>
+      <Button key={`learn-${o.skill}`} plain label={d.words.learnRule} onPress={() => takeOffer($, o, d.words)} />
+      <Button key={`unlearn-${o.skill}`} plain dimColor label={d.words.learnDismiss} onPress={() => refuseOffer($, o, d.words)} />
+    </Box>
+  ))
+}
+
+// The last prompt and what it got, then the session at a glance, and the rules learned.
+function overviewTab($: EngineInterface, els: Els, d: Data) {
   const { Box, Text } = els
   const { words } = d
   const last = d.decisions[0]
@@ -188,6 +217,7 @@ function overviewTab(els: Els, d: Data) {
       <Box flexDirection="column">
         <Text dimColor>{words.emptyOverview}</Text>
         <Text dimColor>{words.counts(d.catalog.length, out, d.own.rules.length + d.project.rules.length)}</Text>
+        {offerRows($, els, d)}
       </Box>
     )
   }
@@ -242,6 +272,7 @@ function overviewTab(els: Els, d: Data) {
         </Text>
       )}
       <Text dimColor>{words.counts(d.catalog.length, out, d.own.rules.length + d.project.rules.length)}</Text>
+      {offerRows($, els, d)}
     </Box>
   )
 }

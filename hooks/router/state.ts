@@ -3,7 +3,8 @@ import type { EngineInterface } from 'claude-code'
 
 import type { Decision, Feedback, Mode, Setup, Skill, Stats, Tab } from '../../types/router'
 import { langIn } from '../core/lang'
-import { setupOf } from './route'
+import { offersOf, setupOf } from './route'
+import type { Offer } from './route'
 import { WORDS } from './words'
 import type { Words } from './words'
 
@@ -36,9 +37,15 @@ export const PANE = 'agent-lens-router'
 export const COMMAND = 'router'
 const MODE_KEY = 'mode'
 const SETUP_KEY = 'setup'
+// What Claude did with the picks: each skill's counts over every project under the old key, the
+// declined prompts, the counts and what was taken under each project's own, so one project's prompts
+// never reach the model in another.
 const FEEDBACK_KEY = 'feedback'
-// The sure picks Claude went on without that the model is shown, newest first.
+const PROJECT_FEEDBACK_KEY = 'feedback.project'
+// The sure picks Claude went on without that the model is shown, newest first; the sure picks it took
+// kept to learn rules from.
 export const KEPT_DECLINED = 8
+export const KEPT_TAKEN = 30
 export const MODES: readonly Mode[] = ['auto', 'suggest', 'off']
 export const TABS: readonly Tab[] = ['overview', 'rules', 'skills', 'history']
 
@@ -144,17 +151,41 @@ export async function setGrilling($: EngineInterface, request: string | null) {
   await update($, grillingAtom, () => request)
 }
 
-const NO_FEEDBACK: Feedback = { bySkill: {}, declined: [] }
+// A project's own: besides the counts and misses, the sure picks Claude took, and the skills whose
+// learned rule the person said no to.
+export type ProjectFeedback = Feedback & { taken: { skill: string; prompt: string; at: number }[]; dismissed: string[] }
 
-// What the router learned of Claude's answers to its picks, in every session and project; a value the
-// store holds in another shape is none.
-export async function feedbackIn($: EngineInterface): Promise<Feedback> {
-  const v = (await $.store.get(FEEDBACK_KEY).catch(() => undefined)) as Partial<Feedback> | undefined
+const NO_FEEDBACK: ProjectFeedback = { bySkill: {}, declined: [], taken: [], dismissed: [] }
+
+// The project's key: its root with '/' for separators and no trailing one, a drive letter in one case.
+async function projectKey($: EngineInterface): Promise<string> {
+  const root = await $.session.root().catch(() => '')
+  const path = String(root ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+
+  return `${PROJECT_FEEDBACK_KEY}:${/^[A-Za-z]:/.test(path) ? path.charAt(0).toLowerCase() + path.slice(1) : path}`
+}
+
+// A value the store holds, read as feedback: what has the right shape is kept, the rest dropped.
+function feedbackOf(v: unknown): ProjectFeedback {
   if (typeof v !== 'object' || v === null) return NO_FEEDBACK
-  const bySkill = typeof v.bySkill === 'object' && v.bySkill !== null ? v.bySkill : {}
-  const declined = Array.isArray(v.declined) ? v.declined.filter(d => typeof d?.skill === 'string' && typeof d?.prompt === 'string') : []
+  const f = v as Partial<ProjectFeedback>
+  const bySkill = typeof f.bySkill === 'object' && f.bySkill !== null ? f.bySkill : {}
+  const prompted = (list: unknown) => (Array.isArray(list) ? list.filter(d => typeof d?.skill === 'string' && typeof d?.prompt === 'string') : [])
+  const dismissed = Array.isArray(f.dismissed) ? f.dismissed.filter((d): d is string => typeof d === 'string') : []
 
-  return { bySkill, declined }
+  return { bySkill, declined: prompted(f.declined), taken: prompted(f.taken), dismissed }
+}
+
+// What the router learned of Claude's answers to its picks in this project, in every session; each
+// skill's counts in every project beside. The old global key's misses, of no known project, are not
+// read: its counts are the global ones still.
+export async function feedbackIn($: EngineInterface): Promise<{ project: ProjectFeedback; global: Feedback['bySkill'] }> {
+  const [project, global] = await Promise.all([
+    projectKey($).then(key => $.store.get(key)).catch(() => undefined),
+    $.store.get(FEEDBACK_KEY).catch(() => undefined),
+  ])
+
+  return { project: feedbackOf(project), global: feedbackOf(global).bySkill }
 }
 
 // What Claude did with the picks of the decision made at `at`, once its turn ended: each pick marked
@@ -174,14 +205,39 @@ export async function recordOutcome($: EngineInterface, at: number, taken: (skil
     const now = statsOf(s, decisions)
     return { ...now, taken: (now.taken ?? 0) + marked.filter(p => p.taken).length, declined: (now.declined ?? 0) + marked.filter(isDeclined).length }
   })
-  const learned = await feedbackIn($)
-  const bySkill = { ...learned.bySkill }
-  for (const p of marked.filter(p => p.fit !== 'maybe')) {
-    const was = bySkill[p.skill] ?? { offered: 0, taken: 0 }
-    bySkill[p.skill] = { offered: was.offered + 1, taken: was.taken + (p.taken ? 1 : 0) }
+  const { project, global } = await feedbackIn($)
+  const sure = marked.filter(p => p.fit !== 'maybe')
+  const counted = (counts: Feedback['bySkill']) => {
+    const bySkill = { ...counts }
+    for (const p of sure) {
+      const was = bySkill[p.skill] ?? { offered: 0, taken: 0 }
+      bySkill[p.skill] = { offered: was.offered + 1, taken: was.taken + (p.taken ? 1 : 0) }
+    }
+    return bySkill
   }
   const missed = marked.filter(isDeclined).map(p => ({ skill: p.skill, prompt: decision.prompt, at }))
-  await $.store.set(FEEDBACK_KEY, { bySkill, declined: [...missed, ...learned.declined].slice(0, KEPT_DECLINED) })
+  const took = sure.filter(p => p.taken === true).map(p => ({ skill: p.skill, prompt: decision.prompt, at }))
+  await $.store.set(await projectKey($), {
+    ...project,
+    bySkill: counted(project.bySkill),
+    declined: [...missed, ...project.declined].slice(0, KEPT_DECLINED),
+    taken: [...took, ...project.taken].slice(0, KEPT_TAKEN),
+  })
+  // The old key keeps the counts alone: its prompts, of every project, are dropped as it is written.
+  await $.store.set(FEEDBACK_KEY, { bySkill: counted(global) })
+}
+
+// The rules this project's picks have earned, as the pane offers them.
+export async function offersIn($: EngineInterface, rules: Setup['rules']): Promise<Offer[]> {
+  const { project } = await feedbackIn($).catch(() => ({ project: NO_FEEDBACK }))
+
+  return offersOf(project.taken, rules, project.dismissed)
+}
+
+// The person said no to the rule a skill earned here: it is not offered again in this project.
+export async function dismissOffer($: EngineInterface, skill: string) {
+  const { project } = await feedbackIn($)
+  await $.store.set(await projectKey($), { ...project, dismissed: [...new Set([...project.dismissed, skill])] })
 }
 
 export async function setTab($: EngineInterface, tab: Tab) {
@@ -219,7 +275,9 @@ export async function paneState($: EngineInterface) {
     read($, flashToneAtom),
   ])
 
-  return { tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats: statsOf(stats, decisions), saidTone: saidTone ?? 'success' }
+  const offers = await offersIn($, [...(own?.rules ?? []), ...(project?.rules ?? [])]).catch(() => [] as Offer[])
+
+  return { tab, mode, said, own, project, catalog, decisions, loaded, lang, formSkill, formWords, formHint, stats: statsOf(stats, decisions), saidTone: saidTone ?? 'success', offers }
 }
 
 export async function flash($: EngineInterface, text: string | null, tone: 'success' | 'warning' = 'success') {

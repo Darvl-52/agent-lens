@@ -73,6 +73,10 @@ export type Words = {
   taken: string
   declined: string
   outcomes: (taken: number, declined: number) => string
+  learned: (skill: string, n: number, word: string) => string
+  learnRule: string
+  learnDismiss: string
+  learnDismissed: (skill: string) => string
 }
 
 export const WORDS: Record<Lang, Words> = {
@@ -161,6 +165,14 @@ export const WORDS: Record<Lang, Words> = {
               ? 'goes on with the work under way: no skill'
             : note === 'chat'
               ? 'small talk: no skill'
+            : note === 'short'
+              ? 'too short to route: the model not asked'
+            : note === 'command'
+              ? 'a slash command: the model not asked'
+            : note === 'answer'
+              ? 'answers Claude’s question: the model not asked'
+            : note === 'advice'
+              ? 'asks for an opinion or ideas, not work: no skill'
               : 'nothing fit',
     sessionStats: (n, withSkill, byRule, byModel) =>
       `This session: ${n} prompts, ${withSkill} with a skill (${byRule} by rule, ${byModel} by model)`,
@@ -189,6 +201,10 @@ export const WORDS: Record<Lang, Words> = {
     taken: 'loaded',
     declined: 'Claude went on without it',
     outcomes: (taken, declined) => `Claude loaded ${taken} picks, went on without ${declined}`,
+    learned: (skill, n, word) => `${skill} was loaded for ${n} prompts here that say «${word}»: make it a rule?`,
+    learnRule: '+ make the rule',
+    learnDismiss: '× no',
+    learnDismissed: skill => `Not offered again: ${skill}.`,
   },
   ru: {
     title: 'Роутер скиллов',
@@ -275,6 +291,14 @@ export const WORDS: Record<Lang, Words> = {
               ? 'продолжение текущей работы — без скилла'
             : note === 'chat'
               ? 'реплика без работы — без скилла'
+            : note === 'short'
+              ? 'слишком коротко: модель не спрашивали'
+            : note === 'command'
+              ? 'слэш-команда: модель не спрашивали'
+            : note === 'answer'
+              ? 'ответ на вопрос Claude: модель не спрашивали'
+            : note === 'advice'
+              ? 'просьба о мнении или идеях, а не работа — без скилла'
               : 'ничего не подошло',
     sessionStats: (n, withSkill, byRule, byModel) =>
       `За сессию: промптов ${n}, со скиллом ${withSkill} (правилом ${byRule}, моделью ${byModel})`,
@@ -303,5 +327,9 @@ export const WORDS: Record<Lang, Words> = {
     taken: 'загружен',
     declined: 'Claude обошёлся без него',
     outcomes: (taken, declined) => `Claude загрузил подсказок: ${taken}, обошёлся без: ${declined}`,
+    learned: (skill, n, word) => `${skill} загружен для ${n} промптов здесь со словом «${word}» — сделать правилом?`,
+    learnRule: '+ сделать правило',
+    learnDismiss: '× не надо',
+    learnDismissed: skill => `Больше не предложу: ${skill}.`,
   },
 }

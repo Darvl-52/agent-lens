@@ -5,15 +5,16 @@ import type { LensFinding, LensReview } from '../../types'
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { ownerNow, send } from '../core/outbox'
-import { nestedRepos } from '../core/repos'
+import { gitAliases, nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
 import { acceptanceOf, flush, isAutoNow, type Point, sendPoints, settledPoints } from '../ledger/ledger'
 import { ownAgent, spendOn } from '../core/spend'
 import { isOn } from '../parts/parts'
 import { below, joinPath } from '../review/diff'
 import { sessionRequests } from '../review/review'
+import { modelOf, REVIEW_MODEL } from '../review/rules'
 import { specInView } from '../spec/lens'
-import { aliasesOf, parseLensReport, pushedRefs, sendsOut } from './report'
+import { parseLensReport, pushedRefs, sendsOut } from './report'
 import { type Catalog, type LensContext, type RepoChanges, WORDS } from './words'
 
 // The review of the branch by lenses: the kinds of mistake reviews catch, each looked for across the
@@ -44,9 +45,9 @@ const STALE_MS = 30 * 60_000
 // How much of a catalog the agent is shown, and how many new files are named to it.
 const CATALOG_LIMIT = 20_000
 const FILES_LIMIT = 200
-// The model that reads the branch through the lenses: a look this wide wants more than the haiku of
-// each edit, as the docs agent does; it reads code, so a general agent, not one that skims.
-const MODEL = 'sonnet'
+// The model that reads the branch through the lenses, the review's (`reviewModel`): a look this wide
+// wants more than the haiku of each edit, as the docs agent does; it reads code, so a general agent,
+// not one that skims.
 const AGENT_TYPE = 'general-purpose'
 // The second look at the findings not shown from the code: the small model, on the lines named.
 const CHECK_MODEL = 'haiku'
@@ -60,7 +61,7 @@ const BASES = ['main', 'master', 'develop', 'trunk']
 // off: the lenses only on /changes lenses; offer: the row offers them once a change's tasks are
 // ticked; auto: they run by themselves then, and before the agent pushes the work.
 type Mode = 'off' | 'offer' | 'auto'
-let settings: { includeUserLenses: boolean; mode: Mode } = { includeUserLenses: false, mode: 'offer' }
+let settings: { includeUserLenses: boolean; mode: Mode; model: string } = { includeUserLenses: false, mode: 'offer', model: REVIEW_MODEL }
 // The review a push waits for, by its agent, or the one starting, whose agent is not known yet: its
 // outcome goes to Claude as the next prompt, and the push with it. Another review's end is no answer
 // to that push.
@@ -71,7 +72,7 @@ const agents = new Set<string>()
 
 export function configureLenses(options: PluginOptions) {
   const mode = options.lenses === 'off' || options.lenses === 'auto' ? options.lenses : 'offer'
-  settings = { includeUserLenses: options.includeUserLenses === true, mode }
+  settings = { includeUserLenses: options.includeUserLenses === true, mode, model: modelOf(options.reviewModel, REVIEW_MODEL) }
 }
 
 async function wordsIn($: EngineInterface) {
@@ -186,7 +187,7 @@ export async function lensesCommand($: EngineInterface, args: string) {
   const base = found.map(l => l.label).join(', ')
   const unread = looked.filter(l => l.read === undefined).map(l => (l.folder === '.' ? w.ownRepo : l.folder))
   const prompt = w.prompt(root, found.map(l => l.read), await catalogsOf($, root), await contextOf($, found.map(l => l.read)))
-  const spawned = await $.agent.spawn({ prompt, description: w.task, subagentType: AGENT_TYPE, model: MODEL }).catch(() => undefined)
+  const spawned = await $.agent.spawn({ prompt, description: w.task, subagentType: AGENT_TYPE, model: settings.model }).catch(() => undefined)
   const agentId =
     spawned?.agentId ?? (spawned && !spawned.deny ? (await $.agent.list().catch(() => [])).findLast(a => a.spawnedBy === 'agent-lens' && a.description === w.task)?.id : undefined)
   if (!agentId) return stop(w.failedSpawn)
@@ -360,8 +361,8 @@ async function headsOf($: EngineInterface, root: string) {
 export async function lensesBeforePush($: EngineInterface, command: string | null, agentId: string | undefined) {
   if (settings.mode !== 'auto') return undefined
   const root = await $.session.root()
-  // The aliases are read only where git is named: not on every command.
-  const aliases = command === null || !/\bgit\b/.test(command) ? {} : aliasesOf((await gitOut($, root, ['config', '--get-regexp', '^alias\\.'])) ?? '')
+  // The aliases are read only where git is named: not on every command, and once a session.
+  const aliases = command === null || !/\bgit\b/.test(command) ? {} : await gitAliases($, root)
   if (command !== null && !sendsOut(command, aliases)) return undefined
   const w = await wordsIn($)
   const head = await gitOut($, root, ['rev-parse', 'HEAD'])

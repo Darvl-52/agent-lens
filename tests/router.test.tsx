@@ -127,7 +127,9 @@ test('with no rule, the model picks and Claude is told to load the skill', async
   expect(r.asked[0]!.model).toBe('haiku')
   expect(r.asked[0]!.prompt).toContain('- mattpocock-skills:tdd: Test-driven development.')
   expect(r.asked[0]!.prompt).not.toContain('context-bar')
-  expect(r.entered[0]!.context.at(-1)).toContain('`mattpocock-skills:tdd`: a new feature, test-first')
+  // Told by the skill's own description, not the model's retelling of it.
+  expect(r.entered[0]!.context.at(-1)).toContain('`mattpocock-skills:tdd`: Test-driven development.')
+  expect(r.entered[0]!.context.at(-1)).not.toContain('a new feature, test-first')
   expect(r.entered[0]!.context.at(-1)).toContain('Before you start, load it with the Skill tool')
   expect(r.status.at(-1)).toBe('skill: tdd')
 })
@@ -243,7 +245,7 @@ test('a model that fails lets the prompt through as typed', async ($, on) => {
 test('a model that failed twice in a row is left to rest five minutes, each prompt kept waiting no longer than a short call', async ($, on) => {
   const r = await router($, on, { reply: null })
   await r.send('Почини выгрузку отчёта в Excel')
-  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(6_000)
+  expect(r.asked[0]!.timeoutMs).toBeLessThanOrEqual(3_000)
   // One failure is a blip: the next prompt asks again.
   await r.send('Почему падает сборка на CI')
   expect(r.asked).toHaveLength(2)
@@ -264,8 +266,8 @@ test('a model that failed twice in a row is left to rest five minutes, each prom
 test('a model out of time says so on the status line', async ($, on) => {
   const slow = await router($, on, { fail: 'timeout' })
   await slow.send('Почини выгрузку отчёта в Excel')
-  expect(slow.status.at(-1)).toBe('skill: model failed: no answer in 6 s')
-  expect(slow.asked[0]!.timeoutMs).toBe(6_000)
+  expect(slow.status.at(-1)).toBe('skill: model failed: no answer in 3 s')
+  expect(slow.asked[0]!.timeoutMs).toBe(3_000)
 })
 
 test('a rate limit and an unreadable answer are told apart', async ($, on) => {
@@ -613,7 +615,7 @@ test('a request that says to skip the questions goes to work, whatever the model
   await r.send('Сделай авторизацию, без вопросов')
   const told = r.entered[0]!.context.at(-1)!
   expect(told).not.toContain('grilling')
-  expect(told).toContain('`mattpocock-skills:tdd`: a feature')
+  expect(told).toContain('`mattpocock-skills:tdd`: Test-driven development.')
 })
 
 test('with no grilling installed, a vague request goes as before', async ($, on) => {
@@ -622,27 +624,32 @@ test('with no grilling installed, a vague request goes as before', async ($, on)
   expect(r.entered[0]!.context.at(-1)).toContain('`mattpocock-skills:tdd`')
 })
 
-test('a maybe pick is offered, not ordered', async ($, on) => {
+test('a maybe pick stays on the pane: Claude is not told it', async ($, on) => {
   const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"maybe","why":"might want tests"}]}' })
   await r.send('Поправь вёрстку карточки товара')
-  const told = r.entered[0]!.context.at(-1)!
-  expect(told).toContain('may fit the request')
-  expect(told).not.toContain('Before you start')
+  expect(r.entered[0]!.context).toEqual([])
+  expect(r.status.at(-1)).toBeUndefined()
+  await r.run('history')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await shows(ui, /^ \?$/)).toBe(true)
+  await ui.unmount()
 })
 
 test('a sure pick Claude goes on without is a miss the model reads on the next prompts, in the next session too', async ($, on) => {
   const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"sure","why":"a feature"}]}' })
   await r.send('Объясни и поправь кэш корзины')
   await r.turn('Объясни и поправь кэш корзины')
-  expect(r.store.get('feedback')).toMatchObject({
+  expect(r.store.get(PROJECT_FEEDBACK)).toMatchObject({
     bySkill: { 'mattpocock-skills:tdd': { offered: 1, taken: 0 } },
     declined: [{ skill: 'mattpocock-skills:tdd', prompt: 'Объясни и поправь кэш корзины' }],
   })
+  // Over every project only the counts are kept.
+  expect(r.store.get('feedback')).toEqual({ bySkill: { 'mattpocock-skills:tdd': { offered: 1, taken: 0 } } })
   await r.send('Добавь фильтр по цене в каталог')
   expect(r.asked[1]!.prompt).toContain('- mattpocock-skills:tdd for «Объясни и поправь кэш корзины»')
   // Loaded this time: taken, and the pane says both.
   await r.turn('Добавь фильтр по цене в каталог', ['mattpocock-skills:tdd'])
-  expect(r.store.get('feedback')).toMatchObject({ bySkill: { 'mattpocock-skills:tdd': { offered: 2, taken: 1 } } })
+  expect(r.store.get(PROJECT_FEEDBACK)).toMatchObject({ bySkill: { 'mattpocock-skills:tdd': { offered: 2, taken: 1 } } })
   await r.run('history')
   const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   expect(await shows(ui, /^ ✓$/)).toBe(true)
@@ -656,9 +663,118 @@ test('a turn the person stopped, or a maybe pick left, teaches nothing', async (
   const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"sure"}]}' })
   await r.send('Добавь фильтр по цене в каталог')
   await r.turn('Добавь фильтр по цене в каталог', [], 'aborted')
-  expect(r.store.get('feedback')).toBeUndefined()
+  expect(r.store.get(PROJECT_FEEDBACK)).toBeUndefined()
   r.setReply('{"kind":"work","stage":"go","picks":[{"skill":"diagnosing-bugs","fit":"maybe"}]}')
   await r.send('Почини выгрузку отчёта в Excel')
   await r.turn('Почини выгрузку отчёта в Excel')
-  expect(r.store.get('feedback')).toEqual({ bySkill: {}, declined: [] })
+  expect(r.store.get(PROJECT_FEEDBACK)).toBeUndefined()
+})
+
+const SURE_TDD = '{"kind":"work","stage":"go","picks":[{"skill":"tdd","fit":"sure","why":"a feature"}]}'
+const PROJECT_FEEDBACK = 'feedback.project:/proj'
+
+test("the misses of another project, or of the old global key, never reach this project's model", async ($, on) => {
+  const r = await router($, on, {
+    reply: SURE_TDD,
+    stored: {
+      feedback: { bySkill: { 'mattpocock-skills:tdd': { offered: 4, taken: 0 } }, declined: [{ skill: 'mattpocock-skills:tdd', prompt: 'Секретный промпт старого ключа', at: 1 }] },
+      'feedback.project:/other': { bySkill: {}, declined: [{ skill: 'mattpocock-skills:tdd', prompt: 'Промпт проекта B', at: 1 }], taken: [], dismissed: [] },
+    },
+  })
+  await r.send('Добавь фильтр по цене в каталог')
+  const prompt = r.asked[0]!.prompt
+  expect(prompt).not.toContain('Секретный промпт')
+  expect(prompt).not.toContain('Промпт проекта B')
+  // The old key's counts stand as the skill's track over every project.
+  expect(prompt).toContain('mattpocock-skills:tdd (loaded 0 of 4)')
+  await r.turn('Добавь фильтр по цене в каталог', ['mattpocock-skills:tdd'])
+  // Written again, the old key keeps the counts alone; the project's prompts go under its own.
+  expect(r.store.get('feedback')).toEqual({ bySkill: { 'mattpocock-skills:tdd': { offered: 5, taken: 1 } } })
+  expect(r.store.get(PROJECT_FEEDBACK)).toMatchObject({ taken: [{ skill: 'mattpocock-skills:tdd', prompt: 'Добавь фильтр по цене в каталог' }] })
+  expect((r.store.get('feedback.project:/other') as { declined: unknown[] }).declined).toHaveLength(1)
+})
+
+test('a prompt queued while a turn runs is judged by its own turn, not by the end of the one under way', async ($, on) => {
+  const r = await router($, on, { reply: SURE_TDD })
+  await r.send('Добавь фильтр по цене в каталог')
+  await $.turn.start({ text: 'Добавь фильтр по цене в каталог', turnId: 'one' })
+  await $.skill.prompt({ skill: 'tdd', pluginName: 'mattpocock-skills', text: 'TDD.', frontmatter: {}, source: 'plugin' } as any)
+  // Sent mid-turn: its pick waits for the next turn.
+  r.setReply('{"kind":"work","stage":"go","picks":[{"skill":"diagnosing-bugs","fit":"sure","why":"a bug"}]}')
+  await r.send('Почини выгрузку отчёта в Excel, она падает')
+  await $.turn.complete({ answer: 'Done.', durationMs: 1, isAborted: false, turnId: 'one', reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  // The first prompt's pick was taken; the queued one is not judged yet.
+  expect(r.store.get(PROJECT_FEEDBACK)).toMatchObject({ bySkill: { 'mattpocock-skills:tdd': { offered: 1, taken: 1 } }, declined: [] })
+  expect((r.store.get(PROJECT_FEEDBACK) as { bySkill: Record<string, unknown> }).bySkill['mattpocock-skills:diagnosing-bugs']).toBeUndefined()
+  // Its own turn loads it.
+  await r.turn('Почини выгрузку отчёта в Excel, она падает', ['mattpocock-skills:diagnosing-bugs'])
+  expect(r.store.get(PROJECT_FEEDBACK)).toMatchObject({
+    bySkill: { 'mattpocock-skills:tdd': { offered: 1, taken: 1 }, 'mattpocock-skills:diagnosing-bugs': { offered: 1, taken: 1 } },
+    declined: [],
+  })
+})
+
+test('the same prompt after the same answer is not asked of the model again this session', async ($, on) => {
+  const r = await router($, on, { reply: SURE_TDD })
+  await r.send('Добавь фильтр по цене в каталог')
+  await r.send('Добавь фильтр по цене в каталог')
+  expect(r.asked).toHaveLength(1)
+  expect(r.entered[1]!.context.at(-1)).toContain('`mattpocock-skills:tdd`')
+  // After another answer it is another question.
+  await r.turn('Добавь фильтр по цене в каталог', [], 'answer', 'Готово, фильтр добавлен.')
+  await r.send('Добавь фильтр по цене в каталог')
+  expect(r.asked).toHaveLength(2)
+})
+
+test('a short prompt, a slash command and a short reply to Claude’s question skip the model', async ($, on) => {
+  const r = await router($, on, { reply: SURE_TDD })
+  await r.send('ну и')
+  await r.send('/whatever is this')
+  await r.turn('x', [], 'answer', 'Можно так:\n1. В памяти\n2. Через Redis\nКакой берём?')
+  await r.send('второй вариант, через Redis')
+  expect(r.asked).toHaveLength(0)
+  expect(r.entered.every(e => e.context.length === 0)).toBe(true)
+})
+
+const CREATOR: CommandInfo = { name: 'anthropic-skills:skill-creator', description: 'Create new skills, modify and improve existing skills, and measure skill performance.', source: 'plugin', plugin: 'anthropic-skills' }
+const REVIEW: CommandInfo = { name: 'code-review', description: 'Review the current diff for correctness bugs.', source: 'user' }
+const PLUGINS = 'Можешь посмотреть на Agent Lens и на Figma Taste. И скажи, можно ли в этих моих плагинах что-то улучшить? Что бы ты добавил?'
+
+test('asked for an opinion or ideas, the router loads nothing, whatever the model picked', async ($, on) => {
+  const r = await router($, on, { reply: '{"kind":"work","stage":"go","picks":[{"skill":"skill-creator","fit":"sure","why":"improve your plugins and skills"}]}' })
+  r.install(CREATOR)
+  await r.send(PLUGINS)
+  // No skill reviews here: the model is not even asked.
+  expect(r.asked).toHaveLength(0)
+  expect(r.entered[0]!.context).toEqual([])
+  // With a reviewing skill installed it is asked, and its skill-creator pick still dropped.
+  r.install(REVIEW)
+  await r.send(`${PLUGINS} `)
+  expect(r.asked).toHaveLength(1)
+  expect(r.asked[0]!.system).toContain('An open request for an opinion, ideas or a look over something')
+  expect(r.entered[1]!.context).toEqual([])
+  // A sure pick of the reviewing skill stands.
+  r.setReply('{"kind":"work","stage":"go","picks":[{"skill":"code-review","fit":"sure","why":"a look"}]}')
+  await r.send('What do you think of the diff so far?')
+  expect(r.entered[2]!.context.at(-1)).toContain('`code-review`: Review the current diff for correctness bugs.')
+})
+
+test('a skill Claude loaded for three prompts with the same word here is offered as a rule on the overview', async ($, on) => {
+  const r = await router($, on, { reply: SURE_TDD })
+  for (const text of ['Добавь фильтр по цене в каталог', 'Сделай фильтры по бренду', 'Нужен фильтр по наличию товара']) {
+    await r.send(text)
+    await r.turn(text, ['mattpocock-skills:tdd'])
+    // A new conversation each time: a skill loaded is not picked again in the same one.
+    await $.session.end({ reason: 'clear', sessionId: 's', resume: undefined } as any)
+  }
+  await r.run('')
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  expect(await shows(ui, /tdd was loaded for 3 prompts here that say «фильтр»: make it a rule\?/)).toBe(true)
+  await ui.press({ key: 'learn-mattpocock-skills:tdd' })
+  expect(await shows(ui, /Rule added: tdd ← фильтр/)).toBe(true)
+  expect(await shows(ui, /make it a rule/)).toBe(false)
+  await ui.unmount()
+  await r.send('Ещё фильтр по цвету')
+  expect(r.asked).toHaveLength(3)
+  expect(r.entered.at(-1)!.context.at(-1)).toContain('the developer set it for prompts that say фильтр')
 })

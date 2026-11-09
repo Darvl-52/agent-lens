@@ -11,6 +11,8 @@ import { openPane as openLenses } from '../lenses/lenses'
 import { WORDS as LEDGER_WORDS } from '../ledger/words'
 import { langIn } from '../core/lang'
 import { budgetNow, spentNow } from '../core/spend'
+import { faultsNow } from '../core/faults'
+import { autoNow } from '../core/outbox'
 import { PARTS, PANE, isSwitchedOn, offIn, setPart, wordsIn } from './parts'
 
 const AUTONOMY: readonly Autonomy[] = ['manual', 'auto', 'full']
@@ -51,6 +53,8 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
   const ledger = LEDGER_WORDS[await langIn($)]
   const spent = spentNow()
   const budget = budgetNow()
+  const faults = faultsNow()
+  const auto = autoNow()
 
   return (
     <Box flexDirection="column">
@@ -82,7 +86,7 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
         <Button key="open-lenses" plain hotkey="l" label={words.openLenses} onPress={() => void openLenses($).catch(() => {})} />
         <Button key="show-guard" plain hotkey="g" label={words.showGuard} onPress={() => void showGuard($).catch(() => {})} />
       </Box>
-      {spent.length > 0 ? (
+      {spent.length > 0 || faults.length > 0 || auto.used > 0 || auto.isHeld ? (
         <Box key="spent" flexDirection="column" marginTop={1}>
           <Text bold>{words.spentTitle}</Text>
           {spent.map(([part, s]) => (
@@ -91,6 +95,14 @@ export async function pane($: Parameters<PaneHook>[0], e: Parameters<PaneHook>[1
             </Text>
           ))}
           {budget.budget > 0 ? <Text color={budget.isOver ? 'warning' : undefined} dimColor={!budget.isOver}>{words.budget(budget.fresh, budget.budget, budget.isOver)}</Text> : null}
+          <Text key="auto" dimColor wrap="truncate-end">
+            {words.auto(auto.used, auto.max, auto.isHeld)}
+          </Text>
+          {faults.map(([part, f]) => (
+            <Text key={`fault-${part}`} dimColor wrap="truncate-end">
+              {words.fault(part, f.count, f.last)}
+            </Text>
+          ))}
         </Box>
       ) : null}
       <Text dimColor>{words.keysHelp(PARTS.length)}</Text>

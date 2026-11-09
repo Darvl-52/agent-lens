@@ -3,6 +3,7 @@ import type { TestBody } from 'claude-code/testing'
 
 import { DENY, expand, newRed, parseConfig, permissionIssues, timingIssues } from '../hooks/setup/checks'
 import { checkDocs, hasSecurityLine, hasSecurityRules, hasTaskRules, parseFindings, parseTermsInUse, pathsIn, pathsNamed, termsOf } from '../hooks/setup/docs'
+import { posix } from './helpers'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const MATT = ['setup-matt-pocock-skills', 'domain-modeling', 'writing-for-agents', 'grilling', 'tdd', 'retro', 'diagnosing-bugs', 'code-review']
@@ -62,10 +63,10 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   const runs: string[][] = []
   const opened: string[] = []
   on('session.root', () => ({ value: '/proj' }))
-  on('fs.exists', ($, e) => ({ value: disk.has(e.path) || isDir(e.path) }))
-  on('fs.read', ($, e) => (disk.has(e.path) ? { value: disk.get(e.path)! } : { deny: 'ENOENT' }))
+  on('fs.exists', ($, e) => ({ value: disk.has(posix(e.path)) || isDir(posix(e.path)) }))
+  on('fs.read', ($, e) => (disk.has(posix(e.path)) ? { value: disk.get(posix(e.path))! } : { deny: 'ENOENT' }))
   on('fs.list', ($, e) => {
-    const dir = e.path.replace(/\/$/, '')
+    const dir = posix(e.path).replace(/\/$/, '')
     const names = new Map<string, 'file' | 'dir'>()
     for (const p of disk.keys())
       if (p.startsWith(`${dir}/`)) {
@@ -76,8 +77,8 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   })
   // The rule files of each folder from a file up, as the check of each edit reads them.
   on('fs.ancestors', ($, e) => {
-    const top = (e.below ?? '/').replace(/\/$/, '')
-    const file = e.of ?? '/proj/.'
+    const top = posix(e.below ?? '/').replace(/\/$/, '')
+    const file = posix(e.of ?? '/proj/.')
     const dirs: string[] = []
     for (let dir = file.slice(0, file.lastIndexOf('/')); dir.length > top.length && dir.startsWith(`${top}/`); dir = dir.slice(0, dir.lastIndexOf('/'))) dirs.unshift(dir)
     const found = dirs.flatMap(dir => e.names.filter(name => disk.has(`${dir}/${name}`)).map(name => ({ dir, name, content: disk.get(`${dir}/${name}`)! })))
@@ -97,7 +98,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
       return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (e.argv[0] === 'sh') {
-      const r = e.argv[2] === 'exit 0' ? { exitCode: 0 } : (opts.sh?.(e.argv[2]!, e.init?.cwd ?? '/proj') ?? { exitCode: 0 })
+      const r = e.argv[2] === 'exit 0' ? { exitCode: 0 } : (opts.sh?.(e.argv[2]!, posix(e.init?.cwd ?? '/proj')) ?? { exitCode: 0 })
       return { value: { exitCode: r.exitCode, stdout: r.stdout ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (opts.noOpenspec && e.argv[0]!.startsWith('openspec')) return { deny: 'spawn openspec ENOENT' }
@@ -122,7 +123,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   })
   on('tool.call', ($, e) => {
     if (e.tool !== 'Write') return { deny: 'unexpected' }
-    disk.set(e.file_path, e.content)
+    disk.set(posix(e.file_path), e.content)
     return { result: { type: 'create' as const, filePath: e.file_path, content: e.content, structuredPatch: [], originalFile: null } }
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -826,6 +827,12 @@ test('the section of the security rules is told by its own heading, and the line
   expect(hasSecurityRules('# Стандарты\n\n## Безопасность\n\n- Параметры.\n')).toBe(true)
   expect(hasSecurityRules('# Standards\n\n## Errors\n\nNot about security in a heading.\n')).toBe(false)
   expect(hasSecurityRules('# Standards\n\n### Cookie security\n\n```sh\n# run security audit\n```\n')).toBe(false)
+  // Words after the heading's own, as the review reads it: the section all the same; another word is not.
+  expect(hasSecurityRules('# Standards\n\n## Security rules\n\n- Bind.\n')).toBe(true)
+  expect(hasSecurityRules('# Standards\r\n\r\n## Security: the floor\r\n\r\n- Bind.\r\n')).toBe(true)
+  expect(hasSecurityRules('# Стандарты\n\n## Безопасность кода\n\n- Параметры.\n')).toBe(true)
+  expect(hasSecurityRules('# Standards\n\n## Securityish\n\n- Bind.\n')).toBe(false)
+  expect(hasSecurityRules('# Стандарты\n\n## Безопасностью\n\n- Параметры.\n')).toBe(false)
   expect(hasSecurityLine(SECURITY_LINE)).toBe(true)
   expect(hasSecurityLine('Прежде чем писать код, прочитай раздел «Безопасность» в `CODING_STANDARDS.md`.\n')).toBe(true)
   expect(hasSecurityLine('See `CODING_STANDARDS.md`.\nSecurity matters.\n')).toBe(false)
@@ -1278,6 +1285,36 @@ const mapStopped = async (w: World) => {
   expect(runIn(w).steps.map!.status).toBe('failed')
 }
 
+test('past the turns the parts may start by themselves, the gate sends no red back: the row says it was held, the next prompt of the person’s starts the count again', { options: { autoTurns: 1 } }, async ($, on) => {
+  const w = await world($, on, redLint())
+  await $.turn.start({ text: 'go', turnId: 't' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'x' })
+  await w.settle()
+  await endTurn($, 't')
+  await w.settle()
+  // The one turn: the red goes as the next prompt.
+  expect(w.submitted.filter(s => gateRed(1).test(s))).toHaveLength(1)
+  // Its turn, still red: neither a classic stop nor a prompt takes it further.
+  await $.turn.start({ text: w.submitted.at(-1)!, turnId: 'gate' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'y' })
+  await w.settle()
+  expect((await $.classic.Stop({ stop_hook_active: false })).block).toBeUndefined()
+  await endTurn($, 'gate')
+  await w.settle()
+  expect(w.submitted.filter(s => /^The project's fast checks/.test(s))).toHaveLength(1)
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', component: 'Pane' as const, requestId: 'agent-lens-setup', props: {} } as never)
+  expect(await pane.find({ type: 'Text', text: /^✗ red: not sent back, as the turns agent-lens may start by itself/ })).toBeDefined()
+  await pane.unmount()
+  const band = await bandOf($)
+  expect(await band.find({ type: 'Text', text: /checks: 1 red/ })).toBeDefined()
+  await band.unmount()
+  // The person's next prompt: the gate holds the turn again.
+  await $.turn.start({ text: 'go on', turnId: 'u' })
+  await $.tool.call({ tool: 'Write', file_path: '/proj/src/a.ts', content: 'z' })
+  await w.settle()
+  expect((await $.classic.Stop({ stop_hook_active: false })).block).toMatch(/round 1 of 3/)
+})
+
 test('a step stopped on its failed check waits for the person: a turn of another prompt does not move the run on', async ($, on) => {
   const w = await world($, on)
   await mapStopped(w)
@@ -1363,7 +1400,7 @@ test('a step whose turn the person stopped waits for them, says so above the pro
   expect(w.submitted.some(s => gateRed(1).test(s))).toBe(true)
 })
 
-test('where no classic hook runs, the gate’s rounds go on past a turn of the review’s notes that ran first', async ($, on) => {
+test('where no classic hook runs, the gate’s rounds go on past a turn of the review’s notes that ran first', { options: { autoTurns: 5 } }, async ($, on) => {
   const caught = JSON.stringify({ findings: [], violations: [{ rule: 'No comments in code', evidence: '// x', fix: 'Remove the comment.' }] })
   const w = await world($, on, { ...redLint({ 'CLAUDE.md': 'No comments in code.\n' }), reply: caught })
   await $.turn.start({ text: 'go', turnId: 't' })
@@ -1484,6 +1521,27 @@ test('a config the gate cannot read says the checks are off, on the row', async 
   const band = await bandOf($)
   expect(await band.find({ type: 'Text', text: /^checks off: \.claude\/agent-lens\.json does not read \(not JSON\)/ })).toBeDefined()
   await band.unmount()
+})
+
+test('the config is read for the row at the start, on an edit to it and at a turn’s end, not at each draw', async ($, on) => {
+  const w = await world($, on, { files: { '.claude/agent-lens.json': '{"checks": {"fast": ["lint"]}}' } })
+  const isOff = async () => {
+    const band = await bandOf($)
+    const off = (await band.find({ type: 'Text', text: /^checks off/ })) !== undefined
+    await band.unmount()
+    return off
+  }
+  expect(await isOff()).toBe(false)
+  // Broken on the disk behind the mod's back: the row stands as read until the next turn's end.
+  w.disk.set('/proj/.claude/agent-lens.json', '{')
+  expect(await isOff()).toBe(false)
+  await w.turn({}, 'go')
+  await w.settle()
+  expect(await isOff()).toBe(true)
+  // Mended by an edit: read again at once.
+  await $.tool.call({ tool: 'Write', file_path: '/proj/.claude/agent-lens.json', content: '{"checks": {"fast": ["lint"]}}' })
+  await w.settle()
+  expect(await isOff()).toBe(false)
 })
 
 test('the agent taking a command out of the fast checks waits for the person', async ($, on) => {

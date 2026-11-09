@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
+import { posix } from './helpers'
+
 // The band above the prompt as the mods of one session share it: inline plugins stand in for
 // context-bar-compact above agent-lens (the prepend tier) and for pyrus-inbox and stand beneath it,
 // each only as it draws its rows, copied in shape from their own code.
@@ -71,9 +73,9 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) =>
   mock.clock(on, { now: 10_000 })
   const store = new Map<string, unknown>()
   on('session.root', () => ({ value: '/proj' }))
-  on('fs.exists', ($, e) => ({ value: disk.has(e.path) || isDir(e.path) }))
+  on('fs.exists', ($, e) => ({ value: disk.has(posix(e.path)) || isDir(posix(e.path)) }))
   on('fs.list', ($, e) => {
-    const dir = e.path.replace(/\/$/, '')
+    const dir = posix(e.path).replace(/\/$/, '')
     const names = new Map<string, 'file' | 'dir'>()
     for (const p of disk.keys())
       if (p.startsWith(`${dir}/`)) {
@@ -82,7 +84,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) =>
       }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
   })
-  on('fs.read', ($, e) => ({ value: disk.get(e.path) ?? '' }))
+  on('fs.read', ($, e) => ({ value: disk.get(posix(e.path)) ?? '' }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => (store.set(e.key, e.value), { value: undefined }))
   on('store.delete', ($, e) => (store.delete(e.key), { value: undefined }))

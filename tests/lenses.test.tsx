@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import { aliasesOf, isMcpPush, parseLensReport, pushedRefs, sendsOut } from '../hooks/lenses/report'
+import { posix } from './helpers'
 
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 const REPORT = `Read the branch.
@@ -27,9 +28,9 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   const toasts: string[] = []
   let head = 'h1'
   on('session.root', () => ({ value: '/proj' }))
-  on('fs.exists', ($, e) => ({ value: disk.has(e.path) || Object.keys(opts.clones ?? {}).some(c => e.path === `/proj/${c}/.git`) }))
-  on('fs.read', ($, e) => (disk.has(e.path) ? { value: disk.get(e.path)! } : { deny: 'ENOENT' }))
-  on('fs.list', ($, e) => ({ value: e.path.replace(/\/$/, '') === '/proj' ? Object.keys(opts.clones ?? {}).map(name => ({ name, kind: 'dir' as const, size: 1, mtimeMs: 1, isLink: false })) : [] }))
+  on('fs.exists', ($, e) => ({ value: disk.has(posix(e.path)) || Object.keys(opts.clones ?? {}).some(c => posix(e.path) === `/proj/${c}/.git`) }))
+  on('fs.read', ($, e) => (disk.has(posix(e.path)) ? { value: disk.get(posix(e.path))! } : { deny: 'ENOENT' }))
+  on('fs.list', ($, e) => ({ value: posix(e.path).replace(/\/$/, '') === '/proj' ? Object.keys(opts.clones ?? {}).map(name => ({ name, kind: 'dir' as const, size: 1, mtimeMs: 1, isLink: false })) : [] }))
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => (store.set(e.key, e.value), { value: undefined }))
   on('store.delete', ($, e) => (store.delete(e.key), { value: undefined }))
@@ -38,7 +39,7 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], op
   on('command.register', () => ({ value: { command: 'x' } }))
   on('process.run', ($, e) => {
     const args = e.argv[0] === 'git' ? e.argv.slice(e.argv.indexOf('-C') + 2) : []
-    const clone = e.argv[0] === 'git' ? Object.keys(opts.clones ?? {}).find(c => e.argv[e.argv.indexOf('-C') + 1] === `/proj/${c}`) : undefined
+    const clone = e.argv[0] === 'git' ? Object.keys(opts.clones ?? {}).find(c => posix(e.argv[e.argv.indexOf('-C') + 1]!) === `/proj/${c}`) : undefined
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (opts.isRepo === false || e.argv[0] !== 'git') return { value: { exitCode: 128, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (args[0] === 'rev-parse' && args[1] === 'HEAD') return ok(`${head}\n`)

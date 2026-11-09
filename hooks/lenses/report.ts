@@ -123,7 +123,11 @@ function runsOf(command: string, aliases: Aliases, depth = 0): Run[] {
         words.shift()
       }
     }
-    const tool = (words.shift() ?? '').split('/').at(-1)
+    // By its name alone, as Windows names it too: `/usr/bin/git`, `C:\Git\cmd\git.exe`.
+    const tool = (words.shift() ?? '')
+      .split(/[\\/]/)
+      .at(-1)
+      ?.replace(/\.exe$/i, '')
     const valued = tool ? VALUED[tool] : undefined
     if (!tool || !valued) return []
     while (words[0]?.startsWith('-')) {

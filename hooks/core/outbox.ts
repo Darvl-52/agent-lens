@@ -1,4 +1,8 @@
-import type { EngineInterface } from 'claude-code'
+import type { EngineInterface, PluginOptions } from 'claude-code'
+
+import { langIn } from './lang'
+import { positive } from './numbers'
+import { WORDS } from './words'
 
 // Every prompt a part of this mod sends to the session goes through here, so each main turn is
 // known by whose prompt started it: the person's, or a part's, and what for. A part judges only the
@@ -18,9 +22,56 @@ const KEY_LENGTH = 200
 // another, and it waits no more, so nothing waits on it for the rest of the session.
 const PASSED_MAX = 5
 
+// The main turns the parts may start by themselves after one prompt of the person's: each is a turn
+// of the main model, and one prompt should not set off more than a few. A send the person asked
+// for (a key, a command) is not counted. 0: no limit.
+const AUTO_TURNS = 3
+
 let waiting: Waiting[] = []
 let current: Owner = PERSON
 let isUnderway = false
+let autoTurns = AUTO_TURNS
+// The turns started unasked since the person's last prompt, and whether one more was held back.
+let autoUsed = 0
+let isAutoHeld = false
+// Whether the prompt submitted last runs a slash command: undefined where none was seen since the
+// last turn started (a command a part runs may raise none).
+let isCommandSubmit: boolean | undefined
+
+export function configureOutbox(options: PluginOptions) {
+  autoTurns = options.autoTurns === 0 || options.autoTurns === '0' ? 0 : positive(options.autoTurns, AUTO_TURNS)
+}
+
+// Sends `text` as the person's prompt on behalf of `owner`, unasked: it counts against the turns the
+// parts may start after one prompt of the person's, and past them it is dropped, as the engine drops
+// one, so the part keeps what it would have sent for the next round.
+export async function sendAuto($: EngineInterface, owner: Owner, text: string, opts: { asUser?: boolean } = { asUser: true }) {
+  if (autoTurns > 0 && autoUsed >= autoTurns) {
+    isAutoHeld = true
+    return { drop: WORDS[await langIn($).catch(() => 'en' as const)].autoSpent(autoTurns) }
+  }
+  // Taken before the prompt goes, so two sends at once do not both pass; given back where it did not go.
+  autoUsed += 1
+  const r = await send($, owner, text, opts).catch((err: unknown) => {
+    autoUsed = Math.max(0, autoUsed - 1)
+    throw err
+  })
+  if (r.drop !== undefined) autoUsed = Math.max(0, autoUsed - 1)
+  return r
+}
+
+// The turns started unasked since the person's last prompt, of how many; whether one was held back.
+export const autoNow = () => ({ used: autoUsed, max: autoTurns, isHeld: isAutoHeld })
+export const hasAutoLeft = () => autoTurns === 0 || autoUsed < autoTurns
+// A part held back what it had to send, as none of those turns is left: the row says so.
+export function holdAuto() {
+  isAutoHeld = true
+}
+
+// A prompt submitted, a slash command's or not: a turn it starts is a command's only where it runs one.
+export function noteSubmit(isCommand: boolean) {
+  isCommandSubmit = isCommand
+}
 
 // Sends `text` as the person's prompt on behalf of `owner`. Where the engine drops it, nothing waits.
 export async function send($: EngineInterface, owner: Owner, text: string, opts: { asUser?: boolean } = { asUser: true }) {
@@ -46,10 +97,12 @@ const drop = (entry: Waiting) => {
   waiting = waiting.filter(w => w !== entry)
 }
 
-// A main turn started with `text`: whose it is. A prompt told by its text first, then a command's.
+// A main turn started with `text`: whose it is. A prompt told by its text first, then a command's, not
+// on a turn of a prompt known to run none: the person's own, typed while the command waited.
 export function startTurn(text: string): Owner {
   let at = waiting.findIndex(w => w.key !== null && text.includes(w.key))
-  if (at < 0) at = waiting.findIndex(w => w.key === null)
+  if (at < 0 && isCommandSubmit !== false) at = waiting.findIndex(w => w.key === null)
+  isCommandSubmit = undefined
   const [matched] = at < 0 ? [] : waiting.splice(at, 1)
   // Another prompt the engine ran within this turn is answered with it, though not one sent again
   // with the same text: that one waits for a turn of its own. The rest saw one more start, counted
@@ -58,6 +111,11 @@ export function startTurn(text: string): Owner {
   for (const w of waiting) w.passed += 1
   waiting = waiting.filter(w => w.passed <= PASSED_MAX)
   current = matched ? { from: matched.from, ...(matched.tag !== undefined ? { tag: matched.tag } : {}), ...(matched.batch !== undefined ? { batch: matched.batch } : {}) } : PERSON
+  // The person's prompt: the parts may start their few turns again.
+  if (!matched) {
+    autoUsed = 0
+    isAutoHeld = false
+  }
   isUnderway = true
   return current
 }
@@ -83,4 +141,7 @@ export function clearOutbox() {
   waiting = []
   current = PERSON
   isUnderway = false
+  autoUsed = 0
+  isAutoHeld = false
+  isCommandSubmit = undefined
 }

@@ -11,8 +11,9 @@ const BAND = {
 }
 const MIN = 60_000
 
-// A session with no project around it: each tool call answers by `answer`, a permission is put to
-// the person for the tools in `asking`, who takes `askMs` to answer, and a subagent is listed by its task.
+// A session with no project around it: each tool call answers by `answer` and a subagent is listed by
+// its task. The kit raises no tool.check under a call (the engine raises it inside the call, with the
+// person's wait), so a permission put to the person is not played here.
 const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const store = new Map<string, unknown>()
@@ -21,8 +22,6 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) =>
   const ran: string[] = []
   let answer = (e: { tool: string }) => `${e.tool} ran`
   let callMs = 0
-  const asking = new Set<string>()
-  let askMs = 0
   on('session.root', () => ({ value: '/proj' }))
   on('fs.exists', () => ({ value: false }))
   on('fs.list', () => ({ value: [] }))
@@ -43,11 +42,6 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) =>
   })
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
-  on('tool.check', async ($, e) => {
-    if (!asking.has(e.tool)) return { decision: 'allow' as const }
-    await clock.advance(askMs)
-    return { decision: 'ask' as const }
-  })
   on('tool.call', async ($, e) => {
     if (callMs > 0) await clock.advance(callMs)
     ran.push(e.tool)
@@ -84,10 +78,8 @@ const world = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1]) =>
     grep,
     changes,
     band,
-    asking,
     setAnswer: (f: typeof answer) => (answer = f),
     setCallMs: (ms: number) => (callMs = ms),
-    setAskMs: (ms: number) => (askMs = ms),
   }
 }
 
@@ -149,13 +141,10 @@ test('time counts the agent’s own work: a question to the person and a subagen
   // Forty minutes waiting on the person, and forty on a subagent: none of it the main loop's.
   await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as never)
   await $.tool.call({ tool: 'Agent', prompt: 'do it', description: 'Backend tasks' } as never)
-  w.asking.add('Bash')
-  w.setAskMs(40 * MIN)
-  await $.tool.call({ tool: 'Bash', command: 'git push' } as never)
   expect(w.toasts.filter(t => /wrap up/.test(t))).toEqual([])
   // Its own work is counted: thirty minutes in one call passes half the limit.
   w.setCallMs(31 * MIN)
-  expect(await w.grep('slow')).toMatchObject({ context: [expect.stringMatching(/for 31 min and 4 tool calls/)] })
+  expect(await w.grep('slow')).toMatchObject({ context: [expect.stringMatching(/for 31 min and 3 tool calls/)] })
 })
 
 test('each subagent has its own count, shown by its task; the guard turned off holds none', async ($, on) => {

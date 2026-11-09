@@ -4,14 +4,19 @@ import type { EngineInterface, PluginOptions } from 'claude-code'
 import type { LedgerEntry, LedgerPoint } from '../../types'
 import type { PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
-import { isPerson, isWaiting, type Owner, send } from '../core/outbox'
+import { autoNow, hasAutoLeft, holdAuto, isPerson, isWaiting, type Owner, send, sendAuto } from '../core/outbox'
 import { budgetNow, isOverBudget } from '../core/spend'
 import { lensPoints, lensTaken } from '../lenses/lenses'
 import { isOn } from '../parts/parts'
 import { reviewAside, reviewPoints, reviewTaken } from '../review/review'
 import { openPane as openSpec, specQuestions } from '../spec/lens'
 import { docsPoints, docsTaken, termsAside, termsPoints, termsTaken } from '../setup/setup'
+import { verdictsIn } from './verdicts'
 import { WORDS } from './words'
+
+// Claude's verdicts, read where the ledger's turn ends: a module of their own, so a test reads them
+// without the parts around.
+export { verdictsIn }
 
 // The ledger: what the parts' checks found and nobody answered yet goes to Claude by itself, in one
 // prompt, once the session is idle; Claude says of each point whether it fixed it or why it does not
@@ -90,7 +95,8 @@ export async function setAutonomy($: EngineInterface, next: Autonomy) {
 
 // What is open in every part and not yet sent goes to Claude in one prompt: not during a turn, not
 // while a prompt of the mod's waits for its turn (the gate's, a step's, the last one), so the turns
-// go one by one, and not past the rounds of the person's last prompt.
+// go one by one, and not past the rounds of the person's last prompt, nor the turns every part may
+// start by itself after it.
 export async function flush($: EngineInterface) {
   if (!isAutoNow() || isMainTurn || isFlushing || rounds >= ROUNDS || isWaiting()) return
   isFlushing = true
@@ -101,7 +107,8 @@ export async function flush($: EngineInterface) {
     for (const source of SOURCES)
       for (const p of await openIn($, source).catch(() => [])) if (!known.has(`${source}:${p.id}`) && (autonomy === 'full' || !p.isMinor)) picked.push({ ...p, source })
     if (picked.length === 0) return
-    if (await dispatch($, picked, { from: 'ledger' })) rounds += 1
+    if (!hasAutoLeft()) return void holdAuto()
+    if (await dispatch($, picked, { from: 'ledger' }, '', true)) rounds += 1
   } finally {
     isFlushing = false
   }
@@ -115,8 +122,9 @@ async function numbers($: EngineInterface, count: number) {
   return first
 }
 
-// The points go to Claude in one numbered prompt, kept as sent, and each part told what it gave.
-async function dispatch($: EngineInterface, picked: readonly (Point & { source: Source })[], owner: Owner, after = '') {
+// The points go to Claude in one numbered prompt, kept as sent, and each part told what it gave;
+// unasked, as one of the turns the parts may start by themselves.
+async function dispatch($: EngineInterface, picked: readonly (Point & { source: Source })[], owner: Owner, after = '', isAuto = false) {
   const first = await numbers($, picked.length)
   const entries = picked.map((p, i): Entry => ({ ...p, key: `${p.source}:${p.id}`, n: first + i, status: 'sent', batch: first }))
   // Kept as sent before the prompt goes: its turn may end before the send returns.
@@ -124,7 +132,9 @@ async function dispatch($: EngineInterface, picked: readonly (Point & { source: 
   const before = (await read($, ledgerAtom)).filter(e => keys.has(e.key))
   await update($, ledgerAtom, all => [...all.filter(e => !keys.has(e.key)), ...entries])
   const putBack = () => update($, ledgerAtom, all => [...all.filter(e => !(keys.has(e.key) && e.batch === first)), ...before])
-  const r = await send($, { ...owner, batch: first }, `${(await wordsIn($)).prompt(entries)}${after}`).catch(async (err: unknown) => {
+  const sent = { ...owner, batch: first }
+  const text = `${(await wordsIn($)).prompt(entries)}${after}`
+  const r = await (isAuto ? sendAuto($, sent, text) : send($, sent, text)).catch(async (err: unknown) => {
     await putBack()
     throw err
   })
@@ -200,14 +210,6 @@ export async function endLedgerTurn($: EngineInterface, owner: Owner, answer: st
   if (reason === 'answer') await flush($)
 }
 
-// The lines Claude ends with: `#3 fixed`, `#4 rejected: why`, in either language, bold or listed.
-export function verdictsIn(answer: string) {
-  const found = new Map<number, { isFixed: boolean; reason: string }>()
-  for (const m of answer.matchAll(/^[ \t>*\-`|]*#(\d+)[*`]*[ \t|]*[:.\-—–→]?[ \t|]*[*`]*(fixed|rejected|исправлено|исправил|отклонено|отклонил)[*`]*[ \t|]*[:.\-—–→]?[ \t|]*(.*)$/gim))
-    found.set(Number(m[1]), { isFixed: /^(fixed|исправ)/i.test(m[2]!), reason: m[3]!.replace(/[`*|\s]+$/g, '').trim() })
-  return found
-}
-
 // Rejected, a point waits for the person; one only likely, of a look that did not show it from the
 // code, is closed by Claude's word and stays in the log.
 // A point the mod put to the person itself, or one Claude gave no word on: no reason of Claude's to
@@ -224,7 +226,9 @@ export async function decideLine($: EngineInterface) {
   const n = (await read($, ledgerAtom)).filter(isDisputed).length + (await questionsIn($))
   const w = await wordsIn($)
   const { budget, isOver } = budgetNow()
-  const parts = [...(isOver ? [w.overBudget(budget)] : []), ...(n > 0 ? [w.band(n)] : [])]
+  // The turns the parts started by themselves since the person's prompt, once one more was held back.
+  const auto = autoNow()
+  const parts = [...(isOver ? [w.overBudget(budget)] : []), ...(auto.isHeld ? [w.autoHeld(auto.used, auto.max)] : []), ...(n > 0 ? [w.band(n)] : [])]
   return parts.length > 0 ? parts.join(' · ') : null
 }
 

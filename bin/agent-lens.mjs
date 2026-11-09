@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // bin/cli.mjs
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -9,7 +9,10 @@ import { join } from "node:path";
 var CONFIG = ".claude/agent-lens.json";
 var SETTINGS = ".claude/settings.json";
 var FILES = /\{files(?::([\w.,\s]+))?\}/g;
+var FAST_BUDGET_MS = 120000;
 var COMMAND_TIMEOUT_MS = 300000;
+var FAST_COMMAND_TIMEOUT_MS = FAST_BUDGET_MS;
+var FAST_TOTAL_MS = 180000;
 var OUTPUT_LINES = 60;
 var OUTPUT_CHARS = 4000;
 var ROOT = ".";
@@ -110,11 +113,16 @@ async function changedIn(exec, cwd, since) {
   const [diff, untracked] = await Promise.all([gitIn(exec, cwd, ["diff", base, "--name-only", "--relative", "--diff-filter=d"]), gitIn(exec, cwd, ["ls-files", "--others", "--exclude-standard"])]);
   return [...new Set([...namesOf(diff), ...namesOf(untracked)])];
 }
+var isTimeout = (err) => /tim(ed|e) ?out|timeout/i.test(String(err));
+var seconds = (ms) => `${Math.round(ms / 1000)}s`;
 async function runTier(exec, root, tier, opts) {
   const shell = await shellOf(exec, root);
   const failures = [];
   const timings = [];
   const skipped = [];
+  const commandMs = opts.commandMs ?? (opts.isFast ? FAST_COMMAND_TIMEOUT_MS : COMMAND_TIMEOUT_MS);
+  const totalMs = opts.totalMs ?? (opts.isFast ? FAST_TOTAL_MS : Infinity);
+  const start = await opts.now();
   for (const [folder, commands] of Object.entries(tier)) {
     const cwd = joinRel(root, folder);
     const files = opts.isFast && commands.some(takesFiles) ? await changedIn(exec, cwd, opts.since?.[folder]) : [];
@@ -125,10 +133,29 @@ async function runTier(exec, root, tier, opts) {
         continue;
       }
       const at = await opts.now();
-      const r = await exec(argvOf(shell, line), cwd, COMMAND_TIMEOUT_MS).catch((err) => ({ exitCode: -1, stdout: "", stderr: String(err) }));
-      timings.push({ folder, command, ms: await opts.now() - at, exitCode: r.exitCode });
+      const left = totalMs - (at - start);
+      if (left < 1000) {
+        timings.push({ folder, command, ms: 0, exitCode: -1, isCut: true });
+        failures.push({ folder, command, exitCode: -1, output: `not run: the ${opts.isFast ? "fast" : "full"} checks ran past their ${seconds(totalMs)} before it` });
+        continue;
+      }
+      const limit = Math.min(commandMs, left);
+      let isRejected = false;
+      const r = await exec(argvOf(shell, line), cwd, limit).catch((err) => {
+        isRejected = isTimeout(err);
+        const kept = err;
+        const text = (v) => typeof v === "string" ? v : "";
+        return { exitCode: -1, stdout: text(kept?.stdout), stderr: [text(kept?.stderr), String(err)].filter(Boolean).join(`
+`) };
+      });
+      const ms = await opts.now() - at;
+      const isCut = r.exitCode !== 0 && (isRejected || ms >= limit);
+      timings.push({ folder, command, ms, exitCode: r.exitCode, ...isCut ? { isCut } : {} });
+      const tail = tailOf(r.stdout, r.stderr);
+      const output = isCut ? `timed out: cut at ${seconds(limit)}${tail === "" ? "" : `
+${tail}`}` : tail;
       if (r.exitCode !== 0)
-        failures.push({ folder, command, exitCode: r.exitCode, output: tailOf(r.stdout, r.stderr) });
+        failures.push({ folder, command, exitCode: r.exitCode, output });
     }
   }
   return { failures, timings, skipped };
@@ -535,7 +562,7 @@ ${issues.map((i) => `  ${EN.issue(i)}`).join(`
     return `${at}: ${what[i.kind]}`;
   },
   gateTitle: "The gate: the fast checks at the turn’s end",
-  gateStatus: (g, max) => g.status === "green" ? "✓ green at the last turn’s end" : g.status === "base" ? "○ red as on this commit before the agent: not sent back (/setup-project baseline once fixed)" : g.status === "released" ? `✗ red after ${g.rounds} rounds: let go, yours to look at` : g.status === "answered" ? "○ red, held by Claude as not of its changes: let go (/setup-project baseline keeps it)" : `✗ red: sent back to Claude (round ${g.rounds} of ${max})`,
+  gateStatus: (g, max) => g.status === "green" ? "✓ green at the last turn’s end" : g.status === "base" ? "○ red as on this commit before the agent: not sent back (/setup-project baseline once fixed)" : g.status === "released" ? `✗ red after ${g.rounds} rounds: let go, yours to look at` : g.status === "answered" ? "○ red, held by Claude as not of its changes: let go (/setup-project baseline keeps it)" : g.status === "held" ? "✗ red: not sent back, as the turns agent-lens may start by itself after your prompt are spent (autoTurns)" : `✗ red: sent back to Claude (round ${g.rounds} of ${max})`,
   gateBand: (n) => `checks: ${n} red`,
   gateOff: (why) => `checks off: .claude/agent-lens.json does not read (${why})`,
   fastGone: (gone) => `the agent took out of the fast checks: ${gone.map((c) => `\`${c}\``).join(", ")}`,
@@ -807,7 +834,7 @@ ${issues.map((i) => `  ${RU.issue(i)}`).join(`
     return `${at}: ${what[i.kind]}`;
   },
   gateTitle: "Гейт: быстрые проверки в конце хода",
-  gateStatus: (g, max) => g.status === "green" ? "✓ зелёные в конце последнего хода" : g.status === "base" ? "○ красные так же, как на этом коммите до агента: назад не отправлены (/setup-project baseline, когда починишь)" : g.status === "released" ? `✗ красные после ${g.rounds} ${plural(g.rounds, "круга", "кругов", "кругов")}: отпущены, посмотри сам` : g.status === "answered" ? "○ красные, но Claude считает, что не из-за его правок: отпущены (/setup-project baseline запомнит)" : `✗ красные: отправлены Claude (круг ${g.rounds} из ${max})`,
+  gateStatus: (g, max) => g.status === "green" ? "✓ зелёные в конце последнего хода" : g.status === "base" ? "○ красные так же, как на этом коммите до агента: назад не отправлены (/setup-project baseline, когда починишь)" : g.status === "released" ? `✗ красные после ${g.rounds} ${plural(g.rounds, "круга", "кругов", "кругов")}: отпущены, посмотри сам` : g.status === "answered" ? "○ красные, но Claude считает, что не из-за его правок: отпущены (/setup-project baseline запомнит)" : g.status === "held" ? "✗ красные: назад не отправлены, ходы, которые agent-lens начинает сам после вашего запроса, кончились (autoTurns)" : `✗ красные: отправлены Claude (круг ${g.rounds} из ${max})`,
   gateBand: (n) => `проверки: ${n} ${plural(n, "красная", "красные", "красных")}`,
   gateOff: (why) => `проверки выключены: .claude/agent-lens.json не читается (${why})`,
   fastGone: (gone) => `агент убрал из быстрых проверок: ${gone.map((c) => `\`${c}\``).join(", ")}`,
@@ -1011,36 +1038,69 @@ var disk = {
   exists: (rel) => stat(join(root, rel)).then(() => true, () => false),
   list: (rel) => readdir(join(root, rel), { withFileTypes: true }).then((entries) => entries.filter((e) => e.isFile() || e.isDirectory()).map((e) => ({ name: e.name, kind: e.isFile() ? "file" : "dir" })), () => [])
 };
+var isWindows = process.platform === "win32";
+function killTree(pid, signal = "SIGKILL") {
+  if (!pid)
+    return;
+  if (isWindows) {
+    spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true, timeout: 1e4 });
+    return;
+  }
+  try {
+    process.kill(-pid, signal);
+  } catch {}
+}
 var live = new Set;
 for (const [signal, code] of [["SIGTERM", 143], ["SIGINT", 130]])
   process.once(signal, () => {
     for (const pid of live)
-      try {
-        process.kill(-pid, signal);
-      } catch {}
+      killTree(pid, signal);
     process.exit(code);
   });
+var PIPE_GRACE_MS = 2000;
 var exec = (argv, cwd, timeoutMs) => new Promise((resolve, reject) => {
   const isShown = argv[0] !== "git" && !(argv[0] === "sh" && argv[2] === "exit 0");
-  const isGroup = process.platform !== "win32";
-  const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ["ignore", "pipe", "pipe"], detached: isGroup });
-  if (isGroup && child.pid)
+  const child = spawn(argv[0], argv.slice(1), { cwd, stdio: ["ignore", "pipe", "pipe"], detached: !isWindows, windowsHide: true });
+  if (child.pid)
     live.add(child.pid);
   let stdout = "";
   let stderr = "";
+  let isTimedOut = false;
+  let isSettled = false;
   child.stdout.on("data", (d) => (stdout += d, isShown && process.stdout.write(d)));
   child.stderr.on("data", (d) => (stderr += d, isShown && process.stderr.write(d)));
+  let grace;
   const timer = setTimeout(() => {
-    try {
-      if (isGroup)
-        process.kill(-child.pid, "SIGKILL");
-      else
-        child.kill("SIGKILL");
-    } catch {}
+    isTimedOut = true;
+    killTree(child.pid);
+    setTimeout(() => settle(null), PIPE_GRACE_MS).unref();
   }, timeoutMs);
-  const done = () => (clearTimeout(timer), live.delete(child.pid));
-  child.on("error", (err) => (done(), reject(err)));
-  child.on("close", (code) => (done(), resolve({ exitCode: code ?? -1, stdout, stderr })));
+  const settle = (code) => {
+    if (isSettled)
+      return;
+    isSettled = true;
+    clearTimeout(timer);
+    clearTimeout(grace);
+    live.delete(child.pid);
+    child.stdout.destroy();
+    child.stderr.destroy();
+    if (isTimedOut)
+      reject(Object.assign(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s: ${argv.join(" ")}`), { stdout, stderr }));
+    else
+      resolve({ exitCode: code ?? -1, stdout, stderr });
+  };
+  child.on("error", (err) => {
+    if (isSettled)
+      return;
+    isSettled = true;
+    clearTimeout(timer);
+    live.delete(child.pid);
+    reject(err);
+  });
+  child.on("exit", (code) => {
+    grace = setTimeout(() => settle(code), PIPE_GRACE_MS);
+  });
+  child.on("close", (code) => settle(code));
 });
 async function check() {
   const issues = await issuesIn(disk);

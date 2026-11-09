@@ -220,6 +220,7 @@ const EN = {
     : g.status === 'base' ? '○ red as on this commit before the agent: not sent back (/setup-project baseline once fixed)'
     : g.status === 'released' ? `✗ red after ${g.rounds} rounds: let go, yours to look at`
     : g.status === 'answered' ? '○ red, held by Claude as not of its changes: let go (/setup-project baseline keeps it)'
+    : g.status === 'held' ? '✗ red: not sent back, as the turns agent-lens may start by itself after your prompt are spent (autoTurns)'
     : `✗ red: sent back to Claude (round ${g.rounds} of ${max})`,
   gateBand: (n: number) => `checks: ${n} red`,
   gateOff: (why: string) => `checks off: .claude/agent-lens.json does not read (${why})`,
@@ -519,6 +520,7 @@ const RU: typeof EN = {
     : g.status === 'base' ? '○ красные так же, как на этом коммите до агента: назад не отправлены (/setup-project baseline, когда починишь)'
     : g.status === 'released' ? `✗ красные после ${g.rounds} ${plural(g.rounds, 'круга', 'кругов', 'кругов')}: отпущены, посмотри сам`
     : g.status === 'answered' ? '○ красные, но Claude считает, что не из-за его правок: отпущены (/setup-project baseline запомнит)'
+    : g.status === 'held' ? '✗ красные: назад не отправлены, ходы, которые agent-lens начинает сам после вашего запроса, кончились (autoTurns)'
     : `✗ красные: отправлены Claude (круг ${g.rounds} из ${max})`,
   gateBand: n => `проверки: ${n} ${plural(n, 'красная', 'красные', 'красных')}`,
   gateOff: why => `проверки выключены: .claude/agent-lens.json не читается (${why})`,

@@ -4,7 +4,7 @@ import type { EngineInterface, Hook, MatchedHook, PluginOptions, TurnCompleteRea
 import type { Brief, Busy, Critic, CriticMode, Deciding, Failed, Hole, Lens, Overlap, Tab, Task, Verdict, TestCase } from '../../types/spec'
 import type { AbovePromptEvent, PaneHook } from '../core/hooks'
 import { langIn } from '../core/lang'
-import { isWaiting, ownerNow, send as sendPrompt } from '../core/outbox'
+import { hasAutoLeft, holdAuto, isWaiting, ownerNow, send as sendPrompt, sendAuto } from '../core/outbox'
 import { isAutoNow } from '../ledger/ledger'
 import { isOverBudget, ownAgent, spendOn } from '../core/spend'
 import { sentWithSkill, specSkill, tddSkill } from '../router/catalog'
@@ -536,8 +536,11 @@ async function decideByItself($: EngineInterface, change: string, brief: Brief) 
   const verdicts = (await decidingOf($, brief)).verdicts
   const open = brief.decisions.filter((point, i) => !verdicts[i] && !was.points.has(point))
   if (open.length === 0 || was.rounds >= DECIDE_ROUNDS) return
+  // None of the turns the parts may start by themselves is left: the points wait on the Decide tab.
+  if (!hasAutoLeft()) return void holdAuto()
   decidedByItself.set(change, { points: new Set([...was.points, ...open]), rounds: was.rounds + 1 })
-  await decideAll($, open)
+  // Not sent: the round and the points are its again.
+  if (!(await decideAll($, open, true))) decidedByItself.set(change, was)
 }
 
 // The points of the change in view Claude was sent to decide and left open as the person's: they
@@ -643,18 +646,21 @@ async function unsettle($: EngineInterface, index: number) {
 // Every point not decided yet goes to the session for Claude to decide: it writes each answer
 // into the change's files, or asks where it cannot decide alone, and the brief is made again from
 // those. The points show as Claude's to decide until then.
-async function decideAll($: EngineInterface, only?: readonly string[]) {
+// Unasked (`isAuto`, decided by itself), it is one of the turns the parts may start by themselves:
+// past them it is held back, not failed. Whether the points went.
+async function decideAll($: EngineInterface, only?: readonly string[], isAuto = false) {
   const lens = await read($, lensAtom)
   const brief = await read($, briefAtom)
-  if (!lens || !brief) return
+  if (!lens || !brief) return false
   const w = await wordsIn($)
   const verdicts = (await decidingOf($, brief)).verdicts
   const open = brief.decisions.flatMap((point, i) => (verdicts[i] || (only && !only.includes(point)) ? [] : [{ i, point }]))
-  if (open.length === 0) return
-  const r = await sendPrompt($, { from: 'spec' }, w.decideAllPrompt(lens.current, join(lens.root, 'changes', lens.current), open.map(x => x.point)))
+  if (open.length === 0) return false
+  const text = w.decideAllPrompt(lens.current, join(lens.root, 'changes', lens.current), open.map(x => x.point))
+  const r = await (isAuto ? sendAuto($, { from: 'spec' }, text) : sendPrompt($, { from: 'spec' }, text))
   if (r.drop !== undefined) {
-    await fail($, w.notSent(r.drop))
-    return
+    if (!isAuto || hasAutoLeft()) await fail($, w.notSent(r.drop))
+    return false
   }
   await update($, refreshingAtom, () => ({ change: lens.current, fingerprint: lens.fingerprint }))
   await keepDecided($, lens, open.map(x => ({ point: x.point, answer: w.byClaude })))
@@ -664,6 +670,7 @@ async function decideAll($: EngineInterface, only?: readonly string[]) {
     verdicts: { ...d.verdicts, ...Object.fromEntries(open.map(x => [String(x.i), { answer: w.byClaude, isSent: true, isByClaude: true }])) },
   }))
   await $.ui.toast(w.decideAllSent(open.length))
+  return true
 }
 
 // The decisions sent go to Claude again as they were: those settled here to write in, the rest to
@@ -973,9 +980,16 @@ const holesLeft = (critic: Critic | undefined) => {
 // each in the change's files. Kept as decided, so neither the brief nor the critic raises them again.
 // In auto mode the blockers alone go; the person's h sends the details as well. While the main loop
 // is in a turn they wait for its end.
+// Only the person's key sends them all; the auto rounds are of the turns the parts may start by
+// themselves: past them the blockers wait, unsent, for the next turn the model answers.
 async function closeHoles($: EngineInterface, change: string, isAll: boolean) {
   if (isMainTurn) {
     holesWaiting = change
+    return
+  }
+  if (!isAll && !hasAutoLeft()) {
+    holdAuto()
+    if (holesLeft((await read($, criticAtom))[change]).blockers.length > 0) holesWaiting = change
     return
   }
   const lens = await read($, lensAtom)
@@ -990,12 +1004,15 @@ async function closeHoles($: EngineInterface, change: string, isAll: boolean) {
   const going = new Set(holes)
   const marked = critic.holes.map(hole => (going.has(hole) ? { ...hole, isSent: true as const } : hole))
   await keepCritic($, lens.root, { ...critic, holes: marked, round, isSent: true, sent: [...(critic.sent ?? []), { round, holes }] })
-  const r = await sendPrompt($, { from: 'spec' }, w.closeHolesPrompt(change, join(lens.root, 'changes', change), holes))
+  const text = w.closeHolesPrompt(change, join(lens.root, 'changes', change), holes)
+  const r = await (isAll ? sendPrompt($, { from: 'spec' }, text) : sendAuto($, { from: 'spec' }, text))
   if (r.drop !== undefined) {
     // Taken back, unless a critic started since.
     const now = (await read($, criticAtom))[change]
     if (now?.isSent && now.round === round) await keepCritic($, lens.root, critic)
-    await fail($, w.notSent(r.drop))
+    // Held back past the turns the parts may start by themselves: they wait for the next answered turn.
+    if (!isAll && !hasAutoLeft()) holesWaiting = change
+    else await fail($, w.notSent(r.drop))
     return
   }
   await keepDecided($, { ...lens, current: change }, holes.map(hole => ({ point: `${hole.text} (${hole.where})`, answer: hole.fix })))

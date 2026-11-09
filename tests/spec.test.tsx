@@ -1289,6 +1289,12 @@ test('the critic in auto mode: what it finds goes to Claude to close, three roun
   expect(spawned).toHaveLength(4)
   await agentDone('critic-4', '[{"hole": "Hole 4", "where": "design.md", "fix": "Say it"}]')
   await settle()
+  // The three turns the parts may start by themselves after the person's prompt went: its holes wait
+  // for the next turn the model answers after the person's next prompt.
+  expect(submitted).toHaveLength(3)
+  await startTurn()
+  await turn()
+  await settle()
   expect(submitted).toHaveLength(4)
   expect(await again.find({ type: 'Text', text: /^→ sent to Claude to close · round 1 of 3$/ })).toBeDefined()
   await again.unmount()

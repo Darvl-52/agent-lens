@@ -114,6 +114,117 @@ export function isTerse(text: string): boolean {
   return words.length <= 4 && words.every(w => NODS.has(w))
 }
 
+// The words that open a request for work, at the start of a word: a short prompt with one of them
+// ("сделай авторизацию", "fix login") says what to do, one without says too little to route on.
+const WORK = /(?:^|[^\p{L}])(?:сдела|добав|почин|исправ|напиш|написа|реализ|убер|удал|перепиш|переде|отрефактор|рефактор|созда|подключ|настро|обнов|запуст|протестир|покр|fix|add|make|write|build|implement|create|remove|delete|refactor|debug|test|update|rewrite|set\s?up|migrate)/iu
+
+// Why a prompt goes on without the model, though no rule fired and it is no nod: under three words
+// that ask for no work, a slash command (one the engine knows does not get here), or a short reply to
+// the question Claude's last answer ends on. While Claude grills the developer the answers are the
+// model's to read, so this is not asked then.
+export type Skip = 'short' | 'command' | 'answer'
+
+export function skipOf(text: string, answer: string): Skip | undefined {
+  const trimmed = text.trim()
+  if (/^\/[\p{L}\p{N}_:-]+(?:\s|$)/u.test(trimmed)) return 'command'
+  const words = trimmed.split(/[\s,.!?;:()…]+/u).filter(Boolean)
+  if (words.length < 3 && !WORK.test(trimmed)) return 'short'
+  if (words.length <= 8 && asksBack(answer) && !WORK.test(trimmed)) return 'answer'
+
+  return undefined
+}
+
+// Whether Claude's last answer ends waiting on the person: its last line a question, or options to
+// choose from under a question.
+function asksBack(answer: string): boolean {
+  const lines = answer.trim().split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  const last = lines.at(-1) ?? ''
+  const options = lines.slice(-4).filter(l => /^(?:\d+[.)]|[A-DА-Г][.)])\s/u.test(l)).length
+
+  return /[?？][\s*_)»"']*$/.test(last) || (options >= 2 && /[?？]/.test(lines.slice(-6).join(' ')))
+}
+
+// An open question that asks for an opinion, ideas or a look over something, not for work: such a
+// prompt gets a skill only where one is plainly for that kind of review. A question that also says
+// to change something is work.
+const ADVICE = [
+  /можно\s+ли[^.?!]{0,80}(?:улучш|лучше|доработ|исправ|поправ|измен|упрост)/iu,
+  /что\s+(?:бы\s+)?(?:ещё\s+|еще\s+)?(?:можно\s+|стоит\s+|ты\s+бы\s+)?(?:улучш|доработ|измен|добав|поправ)/iu,
+  /как\s+(?:тебе|считаешь|думаешь|оцениваешь)/iu,
+  /что\s+(?:ты\s+)?(?:думаешь|скажешь|посоветуешь)/iu,
+  /тво[её]\s+мнение|посоветуй|подскажи[^.?!]{0,40}(?:идеи|как\s+лучше)/iu,
+  /(?:есть\s+(?:ли\s+)?|какие\s+(?:есть\s+)?)(?:идеи|мысли|предложения|улучшения|замечания)/iu,
+  /(?:посмотр|глян|изучи)[^?!]{0,120}(?:скажи|подскажи|расскажи|оцени)/iu,
+  /what\s+do\s+you\s+think|your\s+(?:opinion|take|thoughts)|any\s+(?:ideas|suggestions|thoughts|feedback)/iu,
+  /(?:could|can|should)\s+[^.?!]{0,60}be\s+(?:improved|better|simplified)|what\s+would\s+you\s+(?:improve|change|add)|how\s+(?:can|could|would)\s+[^.?!]{0,60}improve/iu,
+  /(?:take|have)\s+a\s+look[^.?!]{0,80}(?:tell|let\s+me\s+know|suggest)/iu,
+]
+const DO_IT = /(?:^|[\s,;.])(?:и|затем|потом|then|and)\s+(?:сразу\s+)?(?:сделай|поправь|исправь|улучши|реализуй|внеси|перепиши|добавь|fix|implement|apply|make|change|rewrite|add)(?![\p{L}])/iu
+
+export const isAdvice = (text: string) => ADVICE.some(re => re.test(text)) && !DO_IT.test(text)
+
+// A skill whose description says it reviews, audits or critiques: the one kind an advice question may
+// want.
+export const isReviewSkill = (skill: Skill) => /review|audit|critique|critic|assess|evaluat|feedback|ревью|аудит|оцен|критик|разбор/iu.test(skill.description)
+
+// A short hash of a string, to key the verdicts of a session by.
+export function hashOf(text: string): string {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 2654435761)
+    h2 = Math.imul(h2 ^ c, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+
+  return (h2 >>> 0).toString(36) + (h1 >>> 0).toString(36)
+}
+
+// A skill Claude loaded on the model's sure pick for so many prompts of a project that share a word is
+// offered as a rule: the next such prompt costs no model call.
+export const LEARN_AFTER = 3
+// Words too common to make a rule of: a rule on them would fire on any prompt.
+const COMMON = new Set(
+  'this that with from have what please into then them there here also just when where which would could should about after before these those code file files можешь пожалуйста чтобы этот этой этого эти который которые нужно надо давай теперь потом тоже ещё если когда какой какие было будет есть'.split(' '),
+)
+
+// The words of a prompt a rule could be made on: letters only, four or more, the work verbs and the
+// common words left out.
+const wordsOf = (prompt: string) => [...new Set(prompt.toLowerCase().split(/[^\p{L}]+/u).filter(w => w.length >= 4 && !COMMON.has(w) && !WORK.test(w)))]
+
+// A rule a skill has earned: the word (the start the prompts' words share) found in LEARN_AFTER or more
+// of the prompts Claude took it for; none where a rule for the skill already fires on that word or the
+// person said no to the skill's offer.
+export type Offer = { skill: string; word: string; count: number }
+
+export function offersOf(taken: readonly { skill: string; prompt: string }[], rules: readonly Rule[], dismissed: readonly string[]): Offer[] {
+  const offers: Offer[] = []
+  for (const skill of [...new Set(taken.map(t => t.skill))]) {
+    if (dismissed.includes(skill)) continue
+    const prompts = taken.filter(t => t.skill === skill).map(t => wordsOf(t.prompt))
+    if (prompts.length < LEARN_AFTER) continue
+    const byStem = new Map<string, { words: string[]; count: number }>()
+    for (const words of prompts)
+      for (const stem of new Set(words.map(w => w.slice(0, 4)))) {
+        const was = byStem.get(stem) ?? { words: [], count: 0 }
+        byStem.set(stem, { words: [...was.words, ...words.filter(w => w.startsWith(stem))], count: was.count + 1 })
+      }
+    const best = [...byStem.entries()].filter(([, v]) => v.count >= LEARN_AFTER).sort((a, b) => b[1].count - a[1].count)[0]
+    if (best === undefined) continue
+    const [stem, { words, count }] = best
+    // The longest start every one of its words shares.
+    let word = words[0] ?? stem
+    for (const w of words) while (!w.startsWith(word)) word = word.slice(0, -1)
+    if (word.length < 4) word = stem
+    const said = rules.some(r => r.skill === skill && r.when.some(when => patternOf(when)?.test(word)))
+    if (!said) offers.push({ skill, word, count })
+  }
+
+  return offers
+}
+
 // The rules, hints and skills left out, from the store and from the project's file merged: the
 // project's rules first, its hint over the person's for the same skill.
 export function merge(own: Setup, project: Setup): Setup {
@@ -163,7 +274,7 @@ export const SYSTEM = `You route a developer's request in Claude Code. You decid
 
 "kind":
 - "work": it asks Claude to do a piece of work: build, change, fix, debug, test, review, plan, design, write a spec or a document.
-- "question": it asks to explain, clarify, check or tell something, however long and however much about code or the work under way ("почему так?", "а где это задаётся?", "можно ли…", "что будет, если…"). A question that also asks to change something is work.
+- "question": it asks to explain, clarify, check or tell something, however long and however much about code or the work under way ("почему так?", "а где это задаётся?", "можно ли…", "что будет, если…"). An open request for an opinion, ideas or a look over something ("посмотри и скажи, что можно улучшить", "what do you think of…", "any ideas for…") is a question too: Claude answers it from its own reading. A question that also asks to change something is work.
 - "continue": it answers Claude or goes on with the same work already under way: a choice between options Claude gave, an answer to Claude's questions, a correction, "да, делай", "и ещё кнопку туда же". A follow-up that starts a different kind of work ("now write a spec for this", "теперь отревьюй") is work.
 - "chat": small talk, thanks, a yes or no.
 
@@ -174,7 +285,7 @@ export const SYSTEM = `You route a developer's request in Claude Code. You decid
 A request that says to skip the questions ("без вопросов", "сразу делай", "no questions") is spec or go.
 "gaps", with grill alone: the open decisions, under 15 words.
 
-"picks", for work in spec or go: the skills for the main thing it asks to deliver. A skill fits when its process is the first thing Claude would do for this request, as its description says when it is used. A request that names a topic ("tests", "docs", "review", "grill") while asking for other work leaves that topic's skill out. Each pick has a "fit": "sure" when the request plainly asks for the skill's kind of work, "maybe" when it might. An empty list beats a wrong pick. Skills marked [project] are the project's own: where one fits, pick it over a general skill for the same kind of work (its spec skill over a general spec skill). Skills listed as already loaded stay out. At most ${MAX_PICKS}.
+"picks", for work in spec or go: the skills for the main thing it asks to deliver. A skill fits when its process is the first thing Claude would do for this request, as its description says when it is used. A request that names a topic ("tests", "docs", "review", "grill") while asking for other work leaves that topic's skill out. A skill that only shares a word with the request (improve, skill, plugin, design) does not fit: its description must say it is for this very work. Each pick has a "fit": "sure" when the request plainly asks for the skill's kind of work, "maybe" when it might; only sure picks reach Claude. An empty list beats a wrong pick. Skills marked [project] are the project's own: where one fits, pick it over a general skill for the same kind of work (its spec skill over a general spec skill). Skills listed as already loaded stay out. At most ${MAX_PICKS}.
 
 Where the project uses OpenSpec and the request is about one of its changes, name the change in "args" for a skill that works on a change.
 
@@ -335,12 +446,25 @@ export function stageSkills(stage: Stage, skills: readonly Skill[], project: { h
 // any code; a skill already loaded is followed again for this request. Then the work's skills: in
 // `auto`, a sure one is loaded before Claude starts and a maybe one offered; in `suggest`, every one
 // is offered. Either way Claude can say one does not fit and go on.
-export function directiveOf(mode: Exclude<Mode, 'off'>, picks: readonly Pick[], stage?: { stage: Stage; gaps?: string; loaded: readonly string[]; afterGrilling?: boolean }): string {
-  const line = (p: Pick) =>
-    `- \`${p.skill}\`${p.args ? ` with args \`${p.args}\`` : ''}${p.why ? `: ${p.why.replace(/^rule: /, 'the developer set it for prompts that say ')}` : ''}`
+export function directiveOf(
+  mode: Exclude<Mode, 'off'>,
+  picks: readonly Pick[],
+  stage?: { stage: Stage; gaps?: string; loaded: readonly string[]; afterGrilling?: boolean },
+  skills: readonly Skill[] = [],
+): string {
+  // A rule's pick says the developer's words; the model's says what the skill is for in the skill's
+  // own description, never the model's retelling of it.
+  const about = (p: Pick) => {
+    if (p.by === 'rule') return p.why.replace(/^rule: /, 'the developer set it for prompts that say ')
+    const description = skills.find(s => s.name === p.skill)?.description.replace(/\s+/g, ' ').trim() ?? ''
+
+    return description.length > 240 ? `${description.slice(0, 239)}…` : description
+  }
+  const line = (p: Pick) => `- \`${p.skill}\`${p.args ? ` with args \`${p.args}\`` : ''}${about(p) ? `: ${about(p)}` : ''}`
   const staged = picks.filter(p => p.isStage)
-  const work = picks.filter(p => !p.isStage)
-  const sure = mode === 'auto' ? work.filter(p => p.fit !== 'maybe') : []
+  // A maybe pick is the model's guess: it stays on the pane, and Claude is not told it.
+  const work = picks.filter(p => !p.isStage && p.fit !== 'maybe')
+  const sure = mode === 'auto' ? work : []
   const maybe = work.filter(p => !sure.includes(p))
   const s = (n: number) => (n > 1 ? 's' : '')
   const loadedNote = (names: string[]) => (names.some(n => stage?.loaded.includes(n)) ? ' (loaded before: follow it again for this request)' : '')

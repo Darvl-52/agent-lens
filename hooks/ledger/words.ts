@@ -17,6 +17,8 @@ const EN = {
   title: 'To decide',
   band: (n: number) => `${n} to decide`,
   overBudget: (budget: number) => `agent-lens spent its ${budget} tokens: by hand till the session ends`,
+  // The turns the parts started by themselves since the person's prompt: the rest waits for the next.
+  autoHeld: (used: number, max: number) => `auto ${used}/${max}: the rest waits for your next prompt`,
   none: 'Nothing waits for you: what the checks found went to Claude, and Claude took it.',
   noneByHand: 'Nothing waits for you here: by hand, the findings wait on their own panes.',
   noWord: 'Claude ended with no line for it.',
@@ -45,6 +47,7 @@ const RU: Words = {
   title: 'Вам решить',
   band: n => `${n} вам решить`,
   overBudget: budget => `agent-lens потратил свои ${budget} токенов: до конца сессии всё вручную`,
+  autoHeld: (used, max) => `авто ${used}/${max}: остальное ждёт вашего следующего промпта`,
   none: 'Ничего не ждёт вас: найденное ушло Claude, и Claude это принял.',
   noneByHand: 'Здесь ничего не ждёт вас: вручную находки ждут в своих pane.',
   noWord: 'Claude закончил ответ без строки про этот пункт.',

@@ -1,6 +1,6 @@
 {
   "name": "agent-lens",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "description": "Work with the agent in one place: each edit checked against your CLAUDE.md as it is made and each turn's diff reviewed, the branch through lenses (/changes); the OpenSpec change read for you (/spec); the skill each prompt needs loaded for it (/router).",
   "types": "./types/index.d.ts",
   "author": {
@@ -36,6 +36,12 @@
         "full"
       ]
     },
+    "autoTurns": {
+      "type": "number",
+      "title": "Turns started unasked per prompt",
+      "description": "How many main turns the parts may start by themselves (findings, holes, notes) after each prompt of yours; past them the rest waits for your next prompt. What you send by a key is not counted. 0: no limit",
+      "default": 3
+    },
     "live": {
       "type": "string",
       "title": "Rules while Claude edits",
@@ -52,6 +58,12 @@
       "title": "Model for the edit check",
       "description": "The model that checks each edit against the rules: an alias like haiku or a full model id",
       "default": "haiku"
+    },
+    "reviewModel": {
+      "type": "string",
+      "title": "Model for the review",
+      "description": "The model that reviews each turn's diff and the agent that reads the branch through the lenses: an alias like sonnet or a full model id",
+      "default": "sonnet"
     },
     "includeUserRules": {
       "type": "boolean",
@@ -112,7 +124,7 @@
     "routerUseModel": {
       "type": "boolean",
       "title": "Route with a model",
-      "description": "Where none of your rules fits, ask a small model which skill fits the prompt (about a second per prompt)",
+      "description": "Where none of your rules fits, ask a small model which skill fits the prompt: the prompt waits for it, mostly one to two seconds and never more than three; short replies, slash commands and answers to Claude's questions skip it",
       "default": true
     },
     "routerModel": {

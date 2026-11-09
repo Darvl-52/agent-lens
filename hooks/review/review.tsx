@@ -4,17 +4,18 @@ import type { EngineInterface, Hook, MatchedHook, ModelEffort, ModelUsage, Plugi
 import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode, ShellRun, Spent, Tab } from '../../types/review'
 import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
-import { send } from '../core/outbox'
+import { hasAutoLeft, holdAuto, send, sendAuto } from '../core/outbox'
 import { flush, type Point, toDecide } from '../ledger/ledger'
 import { spendOn } from '../core/spend'
-import { nestedRepos } from '../core/repos'
+import { forgetNestedRepos, forgetRepos, nestedRepos } from '../core/repos'
 import { userFilePath } from '../core/user'
 import { isOn as isPartOn } from '../parts/parts'
 import { isStepDoc } from '../setup/setup'
 import { specInView } from '../spec/lens'
 import { below, canonical, capped, changedSpan, diffText, fileDiff, fileText, filesText, fingerprintOf, hash, hunkPatch, joinPath, keptFindings, nameOf, parentOf, parseFindings, parseNotes, parseStatus, parseUnified, samePath, shellText, whereIn, withWhere } from './diff'
 import type { Change, Violation } from './rules'
-import { caughtOf, describeEdit, describeWrite, isRuleFile, LIVE_SYSTEM, lineNear, noteFor, parseViolations, refusalFor, RULE_NAMES } from './rules'
+import { caughtOf, clipRules, describeEdit, describeWrite, isRuleFile, LIVE_SYSTEM, lineNear, modelOf, noteFor, parseViolations, refusalFor, REVIEW_MODEL, RULE_NAMES } from './rules'
+import { isReadOnly } from './shell'
 import { WORDS } from './words'
 
 const beforeAtom = atom({ plugin: 'agent-lens', key: 'review.before' } as const, {} as Record<string, string | null>)
@@ -50,8 +51,6 @@ const caughtAtom = atom({ plugin: 'agent-lens', key: 'review.caught' } as const,
 export const PANE = 'agent-lens-review'
 const TABS: readonly Tab[] = ['changes', 'findings', 'walkthrough', 'ask']
 const MODES: readonly Mode[] = ['turn', 'session', 'uncommitted']
-// Reading code wants care more than speed: the session's mid-sized model.
-const MODEL = 'sonnet'
 const TIMEOUT_MS = 180_000
 // Each edit is checked as it is made by a small model, quick and cheap: a call per edit.
 const LIVE_TIMEOUT_MS = 30_000
@@ -120,6 +119,12 @@ const CONTEXTS_KEPT = 4
 // What was uncommitted being taken before the turn's first shell command: the commands run side by
 // side wait on the one taking, so none is counted before it.
 let shellTaking: Promise<void> | undefined
+// What the shell left uncommitted, by repository, as the last command running alone saw it once it
+// ran: the next command's before, so git is not asked again in between. An edit, or a turn's start
+// or end, drops it: what is uncommitted may have changed by then.
+let dirtyLeft: Map<string, Set<string>> | undefined
+// The shell commands running, a subagent's too: one beside another sees what the other wrote.
+let shellsRunning = 0
 // The plugin's settings, as `/config` holds them.
 let settings = settingsOf({})
 // What the check of each edit found for Claude, by loop, until a tool result or the turn's end
@@ -146,8 +151,7 @@ let conversation = 0
 
 function settingsOf(options: PluginOptions) {
   const live: Live = options.live === 'block' || options.live === 'off' ? options.live : 'warn'
-  const model = typeof options.liveModel === 'string' && options.liveModel.trim() !== '' ? options.liveModel.trim() : 'haiku'
-  return { live, liveModel: model, includeUserRules: options.includeUserRules === true }
+  return { live, liveModel: modelOf(options.liveModel, 'haiku'), reviewModel: modelOf(options.reviewModel, REVIEW_MODEL), includeUserRules: options.includeUserRules === true }
 }
 
 async function wordsIn($: EngineInterface) {
@@ -189,13 +193,18 @@ function repoOf($: EngineInterface, path: string) {
 // The project's own repository first, then the others by name; files by their path in each.
 const byGroup = (a: FileDiff, b: FileDiff) => (a.group === b.group ? a.rel.localeCompare(b.rel) : a.group === '' ? -1 : b.group === '' ? 1 : a.group.localeCompare(b.group))
 
-// What changed since `before` was taken: each file as it was against what is on disk now.
+// What changed since `before` was taken: each file as it was against what is on disk now. A file
+// kept by its blob and the same now is not read back; one whose blob is gone is let be.
 async function snapshotDiff($: EngineInterface, before: Readonly<Record<string, string | null>>) {
   const root = await $.session.root()
   const files: FileDiff[] = []
-  for (const [path, was] of Object.entries(before)) {
+  for (const [path, kept] of Object.entries(before)) {
     const now = await readNow($, path)
     if (now === undefined) continue
+    const blob = blobOf(kept)
+    if (blob && now !== null && (await blobId(now, blob.sha.length).catch(() => '')) === blob.sha) continue
+    const was = await keptText($, kept)
+    if (was === undefined) continue
     const f = fileDiff(path, whereIn(path, root, await repoOf($, path)), was, now)
     if (f.hunks.length > 0) files.push(f)
   }
@@ -205,6 +214,92 @@ async function snapshotDiff($: EngineInterface, before: Readonly<Record<string, 
 function git($: EngineInterface, repo: string, args: string[]) {
   return $.process.run([...GIT, '-C', repo, ...args], { timeoutMs: 30_000 }).catch(() => undefined)
 }
+
+// What `before` keeps of a file as it was: null where it was not there; its text; or, for a text
+// past INLINE_LIMIT in a repository, the blob git keeps it as (`git hash-object -w`, or the one
+// committed), read back as asked: the session's values stay small however many files it touches.
+// A blob is marked by a NUL, which no text file starts with; a text that does is kept with one more.
+const BLOB = '\0blob:'
+const INLINE_LIMIT = 4_000
+// A text past this stays whole, as reading it back may come cut short.
+const BLOB_LIMIT = 256_000
+// The texts of the blobs last read back, newest last, up to this many characters in all.
+const BLOB_TEXTS_LIMIT = 2_000_000
+const blobTexts = new Map<string, string>()
+
+const inline = (text: string | null) => (text?.startsWith('\0') ? `\0${text}` : text)
+const blobOf = (kept: string | null | undefined) => {
+  if (!kept?.startsWith(BLOB)) return undefined
+  const at = kept.indexOf(':', BLOB.length)
+  return at < 0 ? undefined : { sha: kept.slice(BLOB.length, at), repo: kept.slice(at + 1) }
+}
+const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+function holdText(sha: string, text: string) {
+  blobTexts.delete(sha)
+  blobTexts.set(sha, text)
+  let size = [...blobTexts.values()].reduce((n, t) => n + t.length, 0)
+  for (const [k, t] of blobTexts) {
+    if (size <= BLOB_TEXTS_LIMIT || k === sha) break
+    blobTexts.delete(k)
+    size -= t.length
+  }
+}
+
+// The id git gives `text` as a blob, by the hash its ids are made with: SHA-1, or SHA-256 by their length.
+async function blobId(text: string, length: number) {
+  const body = new TextEncoder().encode(text)
+  const head = new TextEncoder().encode(`blob ${body.length}\0`)
+  const all = new Uint8Array(head.length + body.length)
+  all.set(head)
+  all.set(body, head.length)
+  const digest = await crypto.subtle.digest(length === 64 ? 'SHA-256' : 'SHA-1', all)
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// A file as it was, from what `before` keeps of it; undefined where its blob cannot be read back.
+async function keptText($: EngineInterface, kept: string | null | undefined): Promise<string | null | undefined> {
+  if (kept === undefined || kept === null || !kept.startsWith('\0')) return kept
+  const blob = blobOf(kept)
+  if (!blob) return kept.slice(1)
+  const held = blobTexts.get(blob.sha)
+  if (held !== undefined) return held
+  const r = await git($, blob.repo, ['cat-file', 'blob', blob.sha])
+  if (r?.exitCode !== 0 || r.isStdoutTruncated) return undefined
+  holdText(blob.sha, r.stdout)
+  return r.stdout
+}
+
+// The files taken, kept in `before` where it has none of them yet: a long text by its blob, which
+// `ids` names in one call of git a repository, one id a line. An id that is not the text's, as a
+// file changed since it was read, keeps the text.
+type Taken = { path: string; text: string | null }
+async function keepTaken($: EngineInterface, taken: readonly Taken[], ids: (repo: string, paths: string[]) => string[]) {
+  const kept = new Map<string, string | null>()
+  const byRepo = new Map<string, Taken[]>()
+  for (const t of taken) {
+    const repo = t.text !== null && t.text.length > INLINE_LIMIT && t.text.length <= BLOB_LIMIT ? await repoOf($, t.path) : null
+    if (repo) byRepo.set(repo, [...(byRepo.get(repo) ?? []), t])
+    else kept.set(t.path, inline(t.text))
+  }
+  for (const [repo, list] of byRepo) {
+    const r = await git($, repo, ids(repo, list.map(t => t.path)))
+    const said = r?.exitCode === 0 ? r.stdout.trim().split(/\r?\n/) : []
+    for (const [k, t] of list.entries()) {
+      const sha = said.length === list.length ? (said[k] ?? '').trim() : ''
+      const isSame = SHA.test(sha) && (await blobId(t.text!, sha.length).catch(() => '')) === sha
+      kept.set(t.path, isSame ? `${BLOB}${sha}:${repo}` : inline(t.text))
+    }
+  }
+  if (kept.size === 0) return
+  await update($, beforeAtom, b => {
+    const added = [...kept].filter(([path]) => !(path in b))
+    return added.length === 0 ? b : { ...b, ...Object.fromEntries(added) }
+  })
+}
+// The file on disk, written to the repository's objects as it is; the file as last committed.
+const onDisk = (_repo: string, paths: string[]) => ['hash-object', '-w', '--no-filters', '--', ...paths]
+const committed = (repo: string, paths: string[]) => ['rev-parse', ...paths.map(p => `HEAD:${below(p, repo) ?? ''}`)]
 
 // Every repository the session edited a file in, and the project's own.
 async function sessionRepos($: EngineInterface) {
@@ -328,22 +423,11 @@ async function ruleFilesFor($: EngineInterface, paths: readonly string[]) {
   return found.filter(f => f.text.trim() !== '' && !imported.has(f.path) && (settings.includeUserRules || !user || !samePath(f.path, user)))
 }
 
-// A rule file past its limit is cut, but its security rules, the section /setup-project writes last,
-// are read whole: the rest gives way to them.
-const SECURITY_SECTION = /^##[ \t]+(security|безопасность)[ \t]*$[\s\S]*?(?=^##[ \t]|(?![\s\S]))/im
-function clipRules(text: string) {
-  if (text.length <= RULE_FILE_LIMIT) return text
-  const security = text.match(SECURITY_SECTION)?.[0]
-  if (!security) return text.slice(0, RULE_FILE_LIMIT)
-  const rest = text.replace(security, '')
-  return `${rest.slice(0, Math.max(0, RULE_FILE_LIMIT - security.length))}\n[... cut]\n\n${security}`
-}
-
 const rulesText = (found: readonly { path: string; text: string }[], shown: (path: string) => string) => {
   let text = ''
   for (const rules of found) {
     if (text.length > RULES_LIMIT) break
-    text += `=== ${shown(rules.path)} ===\n${clipRules(rules.text.replace(/\r\n/g, '\n'))}\n\n`
+    text += `=== ${shown(rules.path)} ===\n${clipRules(rules.text.replace(/\r\n/g, '\n'), RULE_FILE_LIMIT)}\n\n`
   }
   return text
 }
@@ -426,9 +510,11 @@ async function spend($: EngineInterface, u: ModelUsage, part = 'review') {
 
 // The rules and the context of a diff, built once per version of it and language: the files on
 // disk and the git listing are read once, and every call on the diff sends the same text, which the
-// prompt cache then holds.
+// prompt cache then holds. Kept by what the context reads beside the files: the request, the earlier
+// ones and the commands, hashed, as two requests of one length are not one.
 function blocksOf($: EngineInterface, diff: Diff, lang: string) {
-  const key = `${lang}:${diff.mode}:${diff.fingerprint}:${diff.files.length}:${diff.request.length}`
+  const asked = hash([diff.request, ...(diff.earlier ?? []), ...(diff.shell ?? []).map(s => `${s.command}\0${s.output}`)].join('\0\0'))
+  const key = `${lang}:${diff.mode}:${diff.fingerprint}:${diff.files.length}:${asked}`
   let held = contexts.get(key)
   if (!held) {
     held = (async () => ({ rules: await rulesFor($, diff.files), context: await contextFor($, diff) }))()
@@ -446,7 +532,7 @@ async function complete($: EngineInterface, diff: Diff, ask: string, maxTokens: 
   const w = await wordsIn($)
   const { rules, context } = await blocksOf($, diff, await langIn($))
   const r = await $.model.complete({
-    model: MODEL,
+    model: settings.reviewModel,
     system: w.system,
     prompt: [{ text: rules, cache: true }, { text: context, cache: true }, { text: ask }],
     maxTokens,
@@ -499,7 +585,9 @@ async function reviewDiff($: EngineInterface, whole: Diff) {
     }
     // A second, doubting look at what the first found, over the same cached text: it drops a
     // finding that an earlier request, a command run or a file listed shows to be no problem.
-    const checked = findings.length === 0 ? undefined : await complete($, diff, w.verifyPrompt(findings.map(f => ({ where: findingAt(f), text: f.text }))), 4000, 'medium')
+    // Notes alone (none at all among them) are minor: not worth a second call to doubt them.
+    const isMinor = findings.every(f => f.severity === 'note')
+    const checked = isMinor ? undefined : await complete($, diff, w.verifyPrompt(findings.map(f => ({ where: findingAt(f), text: f.text }))), 4000, 'medium')
     const kept = await withLineText($, diff, (checked === undefined ? undefined : keptFindings(checked, findings)) ?? findings)
     await update($, reviewsAtom, all => ({ ...all, [diff.fingerprint]: kept }))
     const at = await $.clock.now()
@@ -672,10 +760,16 @@ async function carrySeen($: EngineInterface, diff: Diff | null) {
   if (!diff || lines.size === 0) return
   const seen = new Set(await read($, seenAtom))
   const before = await read($, beforeAtom)
-  const carried = diff.files.flatMap(f => {
-    // The file's lines before the session; a file not kept by then is taken as having them all.
+  // The file's text before the session, read back only where a piece not looked at takes lines away.
+  const texts = new Map<string, string | null | undefined>()
+  for (const f of diff.files) {
     const key = keyIn(before, f.path)
-    const was = key in before ? before[key] : undefined
+    if (key in before && f.hunks.some(h => !seen.has(h.id) && h.lines.some(l => l.kind === '-'))) texts.set(f.path, await keptText($, before[key]))
+  }
+  const carried = diff.files.flatMap(f => {
+    // The file's lines before the session; a file not kept by then, or not read back, is taken as
+    // having them all.
+    const was = texts.get(f.path)
     const old = typeof was === 'string' ? new Set(was.split(/\r?\n/)) : null
     const had = (text: string) => was === undefined || (old?.has(text) ?? false)
     return f.hunks
@@ -753,6 +847,7 @@ async function takeTurn($: EngineInterface): Promise<TurnTaken> {
     return []
   })
   shellTaking = undefined
+  dirtyLeft = undefined
   return taken
 }
 
@@ -793,14 +888,23 @@ const keyIn = (kept: Readonly<Record<string, unknown>>, path: string) => Object.
 // A file is kept by one key however the edit tools and git name it.
 // `room`: the most characters it is kept up to, else it is let be; resolves to what it took.
 async function remember($: EngineInterface, named: string, room = Infinity) {
-  const path = keyIn(await read($, beforeAtom), named)
-  if (path in (await read($, turnBeforeAtom)) && path in (await read($, beforeAtom))) return 0
+  const taken = await take($, named, room)
+  if (taken?.isNew) await keepTaken($, [taken], onDisk)
+  return taken?.size ?? 0
+}
+
+// The file taken for the turn; `isNew` where the session has yet to keep it, which is left to the
+// caller (`keepTaken`), so many are written to git in one call.
+async function take($: EngineInterface, named: string, room: number) {
+  const before = await read($, beforeAtom)
+  const path = keyIn(before, named)
+  const isNew = !(path in before)
+  if (path in (await read($, turnBeforeAtom)) && !isNew) return undefined
   const was = await readNow($, path)
-  if (was === undefined || (was?.length ?? 0) > room) return 0
+  if (was === undefined || (was?.length ?? 0) > room) return undefined
   // Only the first taking of a file counts: an edit made since is not what it was.
-  await update($, turnBeforeAtom, b => (path in b ? b : { ...b, [path]: was }))
-  await update($, beforeAtom, b => (path in b ? b : { ...b, [path]: was }))
-  return was?.length ?? 0
+  await update($, turnBeforeAtom, b => (path in b ? b : { ...b, [path]: inline(was) }))
+  return { path, text: was, isNew, size: was?.length ?? 0 }
 }
 
 // Every file uncommitted in `repo`, by path: modified, staged, deleted or untracked.
@@ -812,7 +916,10 @@ async function uncommittedIn($: EngineInterface, repo: string) {
 // A shell command edits files no tool call names. Before the turn's first, what is uncommitted is
 // taken as an edit would take it, and named: what is uncommitted after and was not, the shell did.
 async function beforeShell($: EngineInterface) {
-  if ((await read($, turnDirtyAtom)) !== null) return
+  if ((await read($, turnDirtyAtom)) !== null) return undefined
+  // What it found uncommitted in the session's repositories, where this call took it: the command's
+  // own before, as `dirtyNow` says it, so git is not asked twice.
+  let found: Map<string, Set<string>> | undefined
   shellTaking ??= (async () => {
     const dirty: Record<string, string[]> = {}
     // Each file goes into the session's values whole: so much of them, and none past a size.
@@ -820,15 +927,23 @@ async function beforeShell($: EngineInterface) {
     const edited = await sessionRepos($)
     for (const repo of edited) {
       dirty[repo] = await uncommittedIn($, repo)
-      for (const path of dirty[repo].slice(0, SHELL_LIMIT)) if (room > 0) room -= await remember($, path, Math.min(room, SHELL_TAKE.file))
+      const taken: Taken[] = []
+      for (const path of dirty[repo].slice(0, SHELL_LIMIT)) {
+        const t = room > 0 ? await take($, path, Math.min(room, SHELL_TAKE.file)) : undefined
+        room -= t?.size ?? 0
+        if (t?.isNew) taken.push(t)
+      }
+      await keepTaken($, taken, onDisk)
     }
     // A repository of its own in the project that the session has not edited is only named: a file
     // uncommitted there after the command and not before, the shell changed, from what is committed.
     const others = (await nestedRepos($, await $.session.root())).filter(repo => !edited.some(r => samePath(r, repo)))
     await Promise.all(others.map(async repo => (dirty[repo] = await uncommittedIn($, repo))))
     await update($, turnDirtyAtom, d => d ?? dirty)
+    found = new Map(edited.map(repo => [repo, new Set((dirty[repo] ?? []).map(p => canonical(p)))]))
   })()
   await shellTaking
+  return found
 }
 
 // After a turn that ran the shell: each file uncommitted now and not before it, and edited by no
@@ -837,15 +952,18 @@ async function afterShell($: EngineInterface, dirty: TurnTaken['dirty'], turnBef
   const edited: Record<string, string | null> = { ...turnBefore }
   for (const [repo, was] of Object.entries(dirty ?? {})) {
     const found = (await uncommittedIn($, repo)).filter(path => !was.includes(path) && !(keyIn(edited, path) in edited)).slice(0, SHELL_LIMIT)
+    const taken: Taken[] = []
     for (const named of found) {
       const head = await git($, repo, ['show', `HEAD:${below(named, repo) ?? ''}`])
       // Cut short, it is not what the file was.
       if (head?.isStdoutTruncated) continue
       const before = head?.exitCode === 0 ? head.stdout : null
-      const path = keyIn(await read($, beforeAtom), named)
-      if (!(path in edited)) edited[path] = before
-      await update($, beforeAtom, b => (path in b ? b : { ...b, [path]: before }))
+      const kept = await read($, beforeAtom)
+      const path = keyIn(kept, named)
+      if (!(path in edited)) edited[path] = inline(before)
+      if (!(path in kept)) taken.push({ path, text: before })
     }
+    await keepTaken($, taken, committed)
   }
   return edited
 }
@@ -987,7 +1105,7 @@ async function settleTurn($: EngineInterface, agentId: string | undefined, reaso
   }
   sentBack = true
   // Not awaited: the prompt runs once the session is idle, after this turn's end.
-  void send($, { from: 'review', tag: 'notes' }, textOf(delivered).join('\n\n'), {})
+  void sendAuto($, { from: 'review', tag: 'notes' }, textOf(delivered).join('\n\n'), {})
     .then(r => (r.drop === undefined ? markTold($, delivered) : putBack(MAIN, delivered)))
     .catch(() => putBack(MAIN, delivered))
 }
@@ -1081,6 +1199,7 @@ export async function startReview($: EngineInterface) {
   // A reload runs this again with nothing in flight: a review the old module was running when it
   // went would hold `busy` for good, and every review after it would wait on it.
   await update($, busyAtom, () => [])
+  forgetRepos()
   await registerCommand($)
 }
 
@@ -1095,8 +1214,10 @@ export async function restartReview($: EngineInterface) {
   sentBack = false
   reviewNext = undefined
   shellTaking = undefined
+  dirtyLeft = undefined
   contexts.clear()
   refusals.clear()
+  forgetRepos()
 }
 
 export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Parameters<Hook<'turn.start'>>[1], next: Parameters<Hook<'turn.start'>>[2]) {
@@ -1108,6 +1229,8 @@ export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Paramet
     await update($, turnDirtyAtom, () => null)
     await update($, turnShellAtom, () => [])
     shellTaking = undefined
+    dirtyLeft = undefined
+    forgetNestedRepos()
     await update($, turnRequestAtom, () => e.text)
     if (e.text.trim() !== '') await update($, requestsAtom, r => [...r, e.text])
   }
@@ -1117,27 +1240,48 @@ export async function turnStart($: Parameters<Hook<'turn.start'>>[0], e: Paramet
 // Every edit, a subagent's too, is taken before it runs: what the file was is what the turn
 // and the session are compared with.
 export async function beforeWrite($: Parameters<MatchedHook<'tool.call', { tool: 'Write' }>>[0], e: Parameters<MatchedHook<'tool.call', { tool: 'Write' }>>[1], next: Parameters<MatchedHook<'tool.call', { tool: 'Write' }>>[2]) {
+  dirtyLeft = undefined
   await remember($, e.file_path).catch(() => {})
   return next(e)
 }
 
 export async function beforeEdit($: Parameters<MatchedHook<'tool.call', { tool: 'Edit' }>>[0], e: Parameters<MatchedHook<'tool.call', { tool: 'Edit' }>>[1], next: Parameters<MatchedHook<'tool.call', { tool: 'Edit' }>>[2]) {
+  dirtyLeft = undefined
   await remember($, e.file_path).catch(() => {})
   return next(e)
 }
 
 export async function beforeNotebookEdit($: Parameters<MatchedHook<'tool.call', { tool: 'NotebookEdit' }>>[0], e: Parameters<MatchedHook<'tool.call', { tool: 'NotebookEdit' }>>[1], next: Parameters<MatchedHook<'tool.call', { tool: 'NotebookEdit' }>>[2]) {
+  dirtyLeft = undefined
   await remember($, e.notebook_path).catch(() => {})
   return next(e)
 }
 
 export async function aroundShell($: Parameters<MatchedHook<'tool.call', { tool: 'Bash' }>>[0], e: Parameters<MatchedHook<'tool.call', { tool: 'Bash' }>>[1], next: Parameters<MatchedHook<'tool.call', { tool: 'Bash' }>>[2]) {
-  await beforeShell($).catch(() => {})
-  const was = isLiveOn() ? await dirtyNow($).catch(() => undefined) : undefined
-  const ran = await next(e)
-  await noteShell($, e.command, ran).catch(() => {})
-  if (was && ran.deny === undefined) await checkShellWrites($, e.agentId ?? MAIN, was).catch(() => {})
-  return ran
+  // A command that plainly writes nothing (`ls`, `grep`, `git log`) is not looked around: git is not
+  // asked what is uncommitted before and after it.
+  if (isReadOnly(e.command)) {
+    const ran = await next(e)
+    await noteShell($, e.command, ran).catch(() => {})
+    return ran
+  }
+  const isAlone = shellsRunning === 0
+  shellsRunning++
+  try {
+    const taken = await beforeShell($).catch(() => undefined)
+    const left = isAlone ? (taken ?? dirtyLeft) : undefined
+    dirtyLeft = undefined
+    const was = isLiveOn() ? (left ?? (await dirtyNow($).catch(() => undefined))) : undefined
+    const ran = await next(e)
+    await noteShell($, e.command, ran).catch(() => {})
+    if (was && ran.deny === undefined) {
+      const after = await checkShellWrites($, e.agentId ?? MAIN, was).catch(() => undefined)
+      if (after && shellsRunning === 1) dirtyLeft = after
+    }
+    return ran
+  } finally {
+    shellsRunning--
+  }
 }
 
 const isLiveOn = () => settings.live !== 'off' && isPartOn('live')
@@ -1145,19 +1289,22 @@ const isLiveOn = () => settings.live !== 'off' && isPartOn('live')
 // What is uncommitted in each repository the session works in, by repository.
 async function dirtyNow($: EngineInterface) {
   const out = new Map<string, Set<string>>()
-  for (const repo of await sessionRepos($)) out.set(repo, new Set((await uncommittedIn($, repo)).map(canonical)))
+  for (const repo of await sessionRepos($)) out.set(repo, new Set((await uncommittedIn($, repo)).map(p => canonical(p))))
   return out
 }
 
 // A shell command that wrote files (`sed -i`, `cat >`, `tee`) is checked against the rules as an
 // edit is: each file it left uncommitted that was not, by what changed since its commit. A file
-// already uncommitted before it is left to the review of the turn.
+// already uncommitted before it is left to the review of the turn. Resolves to what is uncommitted
+// after it, as `dirtyNow` says it.
 async function checkShellWrites($: EngineInterface, loop: string, was: Map<string, Set<string>>) {
+  const after = new Map<string, Set<string>>()
+  for (const repo of was.keys()) after.set(repo, new Set((await uncommittedIn($, repo)).map(p => canonical(p))))
   let left = SHELL_CHECKS
   for (const [repo, before] of was) {
-    for (const path of await uncommittedIn($, repo)) {
-      if (left <= 0) return
-      if (before.has(canonical(path))) continue
+    for (const path of after.get(repo) ?? []) {
+      if (left <= 0) return after
+      if (before.has(path)) continue
       const now = await readNow($, path)
       if (typeof now !== 'string') continue
       const head = await git($, repo, ['show', `HEAD:${below(path, repo) ?? ''}`])
@@ -1168,6 +1315,7 @@ async function checkShellWrites($: EngineInterface, loop: string, was: Map<strin
       checkInBackground($, loop, describeEdit(path, span.was, span.now))
     }
   }
+  return after
 }
 
 type ToolCallEvent = Parameters<Hook<'tool.call'>>[1]
@@ -1267,6 +1415,13 @@ export async function classicStop($: Parameters<Hook<'classic.Stop'>>[0], e: Par
   if (delivered.length === 0) return result
   if (e.stop_hook_active || result.block !== undefined) {
     putBack(MAIN, delivered)
+    return result
+  }
+  // None of the turns the parts may start by themselves is left: the turn ends, its notes wait for
+  // the next tool result.
+  if (!hasAutoLeft()) {
+    putBack(MAIN, delivered)
+    holdAuto()
     return result
   }
   await markTold($, delivered)

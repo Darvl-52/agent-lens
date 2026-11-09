@@ -340,7 +340,7 @@ function tasksRules(rules: string) {
 
 // The section of CODING_STANDARDS.md the step of the security rules writes: told by its heading, in
 // either language, and that heading alone: `### Cookie security` is not the step done.
-export const hasSecurityRules = (standards: string) => /^##[ \t]+(security|безопасность)[ \t]*\r?$/im.test(standards)
+export const hasSecurityRules = (standards: string) => /^##[ \t]+(?:security|безопасность)(?![\p{L}\p{N}_])[^\n]*\r?$/imu.test(standards)
 
 // The line of CLAUDE.md that has the agent read those rules before it writes: one naming both, and
 // when. A pointer that only says the file holds them sends no one to it in time.

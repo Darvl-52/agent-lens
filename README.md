@@ -65,10 +65,22 @@ look; the lenses' findings; the docs agent's blockers; glossary terms the docs a
 `full` also sends review notes and the docs agent's minor findings.
 
 Claude checks each point against the code and ends its answer with a line per point: `#3 fixed` or
-`#4 rejected: why` (a table row `| #3 | fixed |` reads too). The mod reads these lines. At most two
-such rounds go after each of your prompts, since every fix is a new diff the checks read again. The
-ledger's prompt waits while another prompt of the mod waits for its turn, so the turns go one by
-one.
+`#4 rejected: why` (a table row `| #3 | fixed |` reads too). In Russian each form Claude writes
+reads: `исправлено`, `исправлен`, `исправил`, `отклонено`, `отклонён`, `отклонила`. The mod reads
+these lines. At most two such rounds go after each of your prompts, since every fix is a new diff
+the checks read again. The ledger's prompt waits while another prompt of the mod waits for its turn,
+so the turns go one by one.
+
+### Turns started by itself
+
+The setting **Turns started unasked per prompt** (`autoTurns`, default `3`, `0` = no limit) caps
+the main turns the parts start by themselves after each prompt of yours: the ledger's points, the
+gate's red, the review's notes, a setup step's fix, the critic's holes, the spec's open points.
+Past the cap nothing is lost: the points stay where they were and go after your next prompt, and
+the row says `auto 3/3: the rest waits for your next prompt`. Where classic hooks run, the gate and
+the review do not keep a turn going past the cap either: the red waits on `/setup-project`, the
+notes for the next tool result. What you send by a key (`fix`, `j`, `f`, `d`) is never counted.
+`/agent-lens` shows the count.
 
 ### To decide
 
@@ -95,7 +107,9 @@ prompts started. Past it, the mod is by hand: the ledger stops, the spec critic 
 Claude stops deciding the spec's open points. The review of each turn, the gate and the push gate
 go on, as they do by hand. The row says
 `agent-lens spent its N tokens: by hand till the session ends`. `/clear` or `/resume` starts a new
-count. `/agent-lens` shows what each part spent.
+count. `/agent-lens` shows what each part spent, the turns started by itself, and per part the
+errors it let go this session with the last one (`review: 3 errors, last: …`), so a part that keeps
+failing is seen, not silent.
 
 ### Other links between the parts
 
@@ -110,7 +124,8 @@ It works with one repository, a folder of clones, submodules or no git at all, o
 
 ### The review after each turn
 
-**What.** A model (`sonnet`) reviews the diff against your requests and the project's rules: likely
+**What.** A model (`sonnet`, or the one the setting **Model for the review**, `reviewModel`, names)
+reviews the diff against your requests and the project's rules: likely
 bugs, broken rules, debugging left in, changes nobody asked for, behaviour changed with no test. A
 second, doubting look drops findings the session shows to be no problem.
 
@@ -134,7 +149,8 @@ finding or `f` for all; `not a bug` puts one aside. The row says `reviewing…`,
 3. **Walkthrough.** The change in reading order. `g` makes it again.
 4. **Ask.** A question about the diff, or about one hunk. Esc closes the pane.
 
-**What it costs.** The review, hunk notes, walkthrough and answers run on `sonnet` and count against
+**What it costs.** The review, hunk notes, walkthrough and answers run on `sonnet` (the review on
+`reviewModel`) and count against
 your plan or API spend. The review runs once per turn with edits; the rest only when you open its
 tab. Rules and files are cached, so calls on one diff within five minutes read them from the cache.
 A diff keeps 2,000 lines per file and 20,000 in all; a file over 4 MiB is left out.
@@ -143,7 +159,9 @@ A diff keeps 2,000 lines per file and 20,000 in all; a file over 4 MiB is left o
 
 **What.** A small model (`haiku`) checks each Edit, Write and NotebookEdit against the rules for that
 file, and each file a shell command wrote (`sed -i`, `cat >`, `tee`) by what changed since its
-commit. It judges rules about what files contain (style, naming, comments, structure, banned
+commit. A command that plainly only reads (`ls`, `grep`, `git log`, with no redirect into a file)
+is not looked around: git is not asked what is uncommitted before and after it. It judges rules
+about what files contain (style, naming, comments, structure, banned
 patterns), not rules about git or workflow.
 
 **When.** The setting **Rules while Claude edits** decides:
@@ -175,7 +193,8 @@ change's Markdown (`/spec` reads it), and the docs a `/setup-project` step write
 `CODING_STANDARDS.md` from the file's folder up to the project, then those Claude Code read above
 it, with their `@` imports (a file pulled in by `@` is read once). `~/.claude/CLAUDE.md` only if
 the settings say so. Each file is read up to 16,000 characters, its `## Security` section always
-whole; 48,000 in all.
+whole (a heading with more words, `## Security rules` or `## Безопасность (OWASP)`, counts too;
+`### Cookie security` does not); 48,000 in all.
 
 ### The branch through lenses
 
@@ -185,7 +204,7 @@ A project adds its own in `LENSES.md`; your `~/.claude/review-lenses.md` joins i
 so. `/changes lenses` reads the branch from where it forks from the default branch, plus what is
 uncommitted (`/changes lenses <base>` for another base), in every repository of the project.
 
-A general-purpose agent on `sonnet` reads the code. It is told the session's requests, the OpenSpec
+A general-purpose agent on `sonnet` (or `reviewModel`) reads the code. It is told the session's requests, the OpenSpec
 change in view, the commit messages since the base, and points settled before. It reports one
 finding per kind of mistake with its places, evidence and confidence (`confirmed` or `likely`). It
 pushes back instead on taste, unreachable edge cases, "could be general", tests for logic-less code,
@@ -235,7 +254,13 @@ on each edit and at each turn's end, and a docs agent reads edits to them agains
 **What.** At the end of a main turn that changed the project, the fast checks of
 `.claude/agent-lens.json` run. What is red goes back to Claude with the end of its output, and the
 same turn goes on to fix it. After three rounds the turn ends and the row says `checks: N red`. A
-turn sent back that changes nothing is let go: Claude has said the red is not its own.
+turn sent back that changes nothing is let go: Claude has said the red is not its own. Past the
+turns the parts may start by themselves after your prompt (`autoTurns`), the red is not sent back:
+`/setup-project` says `red: not sent back`, and your next prompt starts the rounds again.
+
+The gate runs in the turn's Stop hook, so its time is capped: each fast command at 120 s, the fast
+tier at 180 s in all. A command cut at its time, or not run because the tier's time ran out, is red
+and says `timed out` or `not run`, never taken for green.
 
 **When.** In any project with fast checks in `.claude/agent-lens.json`, set up or not, except while
 `/setup-project` steps run. If the file does not parse, the row says
@@ -243,7 +268,9 @@ turn sent back that changes nothing is let go: Claude has said the red is not it
 
 **What you do.** Usually nothing. If the checks were red before the agent, run
 `/setup-project baseline` on that commit, and that red is not sent back. The same file runs in CI,
-for colleagues without the mod (Node 20 or later; each exits 1 on a failure):
+for colleagues without the mod (Node 20 or later; each exits 1 on a failure). A command past its
+time is killed with everything it started, on Windows too (`taskkill /T`), and a process it left
+holding the output does not hold the run:
 
 ```sh
 npx -y github:Darvl-52/agent-lens check          # the check of the docs
@@ -324,11 +351,17 @@ the turn starts and tells Claude to load it. **What you do:** nothing, or add ru
 any case). Otherwise a small model (`haiku`) reads the prompt, the exchange before it, the OpenSpec
 changes in progress and the skills, project skills first. It says in a sentence what the request
 asks for before it picks. Only a prompt that asks for work gets a skill, not a question, a nod or
-small talk. Each pick is `sure` or `maybe`: in `auto` Claude is told to load a sure one, and a maybe
-one is only offered. A skill already loaded is not picked again until `/clear`, `/resume` or a
-compaction. Prompts naming a skill or a slash command, and prompts from other plugins, are left
-alone. If the model fails or takes over 6 seconds, the prompt goes as typed and the status line says
-why; after two failures in a row it rests for five minutes.
+small talk. A question asking for an opinion, ideas or a look over something gets no suggestion,
+only a sure pick of a skill made for reviewing. Each pick is `sure` or `maybe`: in `auto` Claude is
+told to load a sure one; a maybe one shows on the pane only, and Claude is not told it. The line
+under a pick is the skill's own description, not the model's retelling. A skill already loaded is
+not picked again until `/clear`, `/resume` or a compaction. Prompts naming a skill or a slash
+command, and prompts from other plugins, are left alone.
+
+**The wait.** The prompt waits for the model, mostly one to two seconds. The model is not asked at
+all for a prompt under three words that asks for no work, a slash command, or a short reply to the
+question Claude's last answer ends on. If the model fails or takes over 3 seconds, the prompt goes
+as typed and the status line says why; after two failures in a row it rests for five minutes.
 
 **Where the work starts.** For work, the model also says whether it is settled:
 
@@ -345,9 +378,13 @@ spec is written from what it settled, or, without OpenSpec, the work starts. Say
 it for good.
 
 **It learns from Claude.** When the turn ends, each pick is marked loaded (✓) or not (✗) in the
-pane. A sure pick Claude went on without is kept, with its prompt, across sessions and projects:
-the model reads the last of these as misses, and a skill Claude often leaves is picked only for its
-own kind of work.
+pane. What Claude did is kept per project, across sessions: a sure pick Claude went on without is
+kept with its prompt, and the model reads the last of these as misses; a skill Claude often leaves
+is picked only for its own kind of work. One project's prompts never reach the model in another;
+the counts per skill over every project are kept beside, for a skill with no track here yet. A
+skill Claude loaded on the model's sure pick for 3 prompts here that share a word is offered on the
+pane as a rule (`skill was loaded for 3 prompts here that say «word»: make it a rule?`): `+` makes
+it, so the next such prompt costs no model call; `×` and it is not offered again in this project.
 
 ```
 /router add tdd test, тест, /red.?green/      run tdd when a prompt says one of these
@@ -380,7 +417,9 @@ tells Claude to load the skill, `suggest` says it may fit, `off` routes nothing.
 The pane where you control the mod. `1`–`7` turn a part on or off for every session; a part off
 does none of its work, and its command says where to turn it on (with the review off, the edit
 check is off too). `a` switches the autonomy, `d` opens To decide, `l` the lenses pane, `g` shows
-the guard's limits. Below, "Spent this session" lists tokens per part, and the budget if one is set.
+the guard's limits. Below, "Spent this session" lists tokens per part, the budget if one is set,
+the turns the parts started by themselves since your prompt (`used/max`), and a dim row per part
+that let errors go this session: `review: 3 errors, last: …`.
 
 ## Commands
 
@@ -424,8 +463,10 @@ In `/plugin`, select agent-lens, then Configure.
 | Language | `en` | Language of every part and its model's answers: `en` or `ru`. `lang` overrides it. |
 | Token budget of the session | `0` | Fresh tokens the mod may spend in a session. `0`: no budget. |
 | Autonomy | `auto` | `manual`, `auto` or `full`, as under Autonomy. `a` in `/agent-lens` switches it. |
+| Turns started unasked per prompt | `3` | Main turns the parts may start by themselves after each prompt of yours, as under Turns started by itself. `0`: no limit. |
 | Rules while Claude edits | `warn` | `warn`, `block` or `off`. |
 | Model for the edit check | `haiku` | An alias or a full model id. |
+| Model for the review | `sonnet` | The review of each turn and the lenses' agent: an alias or a full model id. |
 | Include ~/.claude/CLAUDE.md | off | Also check edits and reviews against your personal `CLAUDE.md`. |
 | Include ~/.claude/review-lenses.md | off | Also read the branch through your personal lenses. |
 | Lenses | `offer` | `off`, `offer` or `auto`, as under The branch through lenses. |
@@ -433,7 +474,7 @@ In `/plugin`, select agent-lens, then Configure.
 | Guard over each agent's turn | `on` | `off`: no limits. `/changes guard` overrides it. |
 | Guard: minutes per turn | `60` | Hard limit in minutes of the agent's own work; the soft one is half. |
 | Guard: tool calls per turn | `150` | Hard limit in tool calls; the soft one is half. |
-| Route with a model | on | Off: only your rules route, no model calls. |
+| Route with a model | on | Off: only your rules route, no model calls. The prompt waits for it, 3 s at most. |
 | Model for routing | `haiku` | An alias or a full model id. |
 
 ## Limitations

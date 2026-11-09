@@ -3,7 +3,7 @@ import type { EngineInterface, Hook, TurnCompleteReason } from 'claude-code'
 
 import type { Baseline, DocIssue, Finding, Gate, Judge, Run, StepId, StepState, Term, TermCheck, TermVerdict } from '../../types/setup'
 import type { PaneHook, StopNext } from '../core/hooks'
-import { expectTurn, isPerson, isWaiting, type Owner, PERSON, send, turnOwner } from '../core/outbox'
+import { expectTurn, hasAutoLeft, holdAuto, isPerson, isWaiting, type Owner, PERSON, send, sendAuto, turnOwner } from '../core/outbox'
 import { flush, isAutoNow, type Point, toDecide } from '../ledger/ledger'
 import { ownAgent } from '../core/spend'
 import { langIn } from '../core/lang'
@@ -30,6 +30,8 @@ const gateAtom = atom({ plugin: 'agent-lens', key: 'setup.gate' } as const, null
 const rulesOfferAtom = atom({ plugin: 'agent-lens', key: 'setup.rulesOffer' } as const, null)
 const termsAtom = atom({ plugin: 'agent-lens', key: 'setup.terms' } as const, null)
 const questionsAtom = atom({ plugin: 'agent-lens', key: 'setup.questions' } as const, null)
+// What keeps the gate from reading .claude/agent-lens.json, for the row; null where it reads it.
+const configAtom = atom({ plugin: 'agent-lens', key: 'setup.configBroken' } as const, null)
 // What is known of the terms git finds nowhere in a project, each by its glossary and the term.
 const termsKey = (root: string) => `setup:terms:${root}`
 const termKey = (t: Term) => `${t.file}\n${t.term}`
@@ -201,6 +203,14 @@ function diskOf($: EngineInterface, root: string): Disk {
 // The host's commands, as the checks run them.
 function execOf($: EngineInterface): Exec {
   return (argv, cwd, timeoutMs) => $.process.run(argv, { cwd, timeoutMs })
+}
+
+// The config read at the session's start, after an edit to it and at a turn's end, rather than on
+// each draw of the row: a config the gate cannot read holds the agent to nothing, and is said so.
+async function readConfig($: EngineInterface) {
+  const text = await readRel($, await $.session.root(), CONFIG)
+  const broken = text === undefined || text.trim() === '' ? undefined : parseConfig(text).issues.find(i => i.kind === 'checks-shape' && /^(not JSON|not a JSON object|checks)/.test(i.detail ?? ''))
+  await update($, configAtom, () => (broken ? (broken.detail ?? '') : null))
 }
 
 async function configIn($: EngineInterface, root: string) {
@@ -615,7 +625,7 @@ async function settleStep($: EngineInterface, issues: DocIssue[] | null, by: Own
     await settle({ status: 'failed', isFixSent: true })
     return
   }
-  await sendFix($, step, failing)
+  await sendFix($, step, failing, true)
 }
 
 // What fails of a step: the check of its files, and its own. The step of permissions checks the
@@ -625,11 +635,14 @@ async function failingOf($: EngineInterface, root: string, step: StepId, issues:
   return [...(issues ?? []).filter(i => CHECKED[step](i.file) && i.kind !== 'stale-map' && step !== 'permissions'), ...(await stepIssues($, root, step))]
 }
 
-async function sendFix($: EngineInterface, step: StepId, failing: DocIssue[]) {
+// Unasked (`isAuto`, at the step's end), it is one of the turns the parts may start by themselves:
+// past them the step stops on its check, and the person's f sends the fix.
+async function sendFix($: EngineInterface, step: StepId, failing: DocIssue[], isAuto = false) {
   const w = await wordsIn($)
   // Only to the current step: one skipped meanwhile has nothing to fix.
   if (!(await changeRun($, now => (now.current === step ? setStep(now, step, { status: 'sent', isFixSent: true }) : undefined)))) return
-  const r = await send($, { from: 'setup', tag: step }, w.prompts.fix(w.steps[step], failing))
+  const text = w.prompts.fix(w.steps[step], failing)
+  const r = await (isAuto ? sendAuto($, { from: 'setup', tag: step }, text) : send($, { from: 'setup', tag: step }, text))
   if (r.drop !== undefined) await changeStep($, step, { status: 'failed', error: r.drop })
 }
 
@@ -662,6 +675,7 @@ export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason, isO
   // Taken now: the next turn may start, and take its own, while this one's gate runs.
   const turn = gateTurn
   gateTurn = null
+  if (isOnNow) void readConfig($).catch(() => {})
   if (!isOnNow) turnBefore = null
   else if (reason === 'answer') {
     if (!isStopSeen) void gateAfterTurn($, turn).catch(() => {})
@@ -683,7 +697,10 @@ async function stopStep($: EngineInterface, by: Owner) {
 export function afterSetupEdit($: EngineInterface, path: string) {
   gateTurn?.edited.push(path)
   if (DOC_PATH.test(path)) void checkProject($).catch(() => {})
-  if (/(?:^|[\\/])\.claude[\\/]agent-lens\.json$/.test(path)) void askOnFast($).catch(() => {})
+  if (/(?:^|[\\/])\.claude[\\/]agent-lens\.json$/.test(path)) {
+    void readConfig($).catch(() => {})
+    void askOnFast($).catch(() => {})
+  }
 }
 
 // The fast checks as the turn found them: the agent taking one out, or changing it, is the person's
@@ -768,6 +785,13 @@ async function runGate($: EngineInterface, turn: GateTurn | null) {
     chain.rounds = 0
     return undefined
   }
+  // None of the turns the parts may start by themselves is left: the red is the person's to see.
+  if (!hasAutoLeft()) {
+    holdAuto()
+    await update($, gateAtom, (): Gate => ({ status: 'held', rounds: chain.rounds, failures: red }))
+    chain.rounds = 0
+    return undefined
+  }
   chain.rounds += 1
   await update($, gateAtom, (): Gate => ({ status: 'red', rounds: chain.rounds, failures: red }))
   // What was red before the agent, as far as it is known: on this commit, on another, or never taken.
@@ -795,8 +819,11 @@ async function gateAfterTurn($: EngineInterface, turn: GateTurn | null) {
   // Its prompt sent already waits for its turn, which goes on with this chain.
   if (isWaiting('setup', 'gate')) return
   gatePrompt = { text, chain: turn.chain }
-  const r = await send($, { from: 'setup', tag: 'gate' }, text)
-  if (r.drop !== undefined) gatePrompt = null
+  const r = await sendAuto($, { from: 'setup', tag: 'gate' }, text)
+  if (r.drop === undefined) return
+  gatePrompt = null
+  // Held back past the turns the parts may start by themselves: the row says it did not go back.
+  if (!hasAutoLeft()) await update($, gateAtom, (g): Gate | null => (g ? { ...g, status: 'held', rounds: Math.max(0, g.rounds - 1) } : g))
 }
 
 // The files the docs agent watches: all of them in a project set up; elsewhere CLAUDE.md, kept
@@ -964,6 +991,7 @@ export async function startSetup($: EngineInterface) {
   const steps = kept && (Object.fromEntries(STEPS.map(s => [s, kept.steps[s] ?? { status: 'skipped', needs: newStep }])) as Run['steps'])
   await update($, runAtom, () => (kept && steps ? { ...kept, steps } : null))
   await checkProject($).catch(() => {})
+  await readConfig($).catch(() => {})
   unfound = []
   later.clear()
   unjudged.clear()
@@ -1107,9 +1135,8 @@ export async function setupLine($: EngineInterface) {
   const run = await read($, runAtom)
   const stopped = run?.current && run.steps[run.current].status === 'failed' ? [w.stepBand(STEPS.indexOf(run.current) + 1)] : []
   // A config the gate cannot read holds the agent to nothing: said, not left off quietly.
-  const config = await readRel($, await $.session.root(), CONFIG).catch(() => undefined)
-  const broken = config === undefined || config.trim() === '' ? undefined : parseConfig(config).issues.find(i => i.kind === 'checks-shape' && /^(not JSON|not a JSON object|checks)/.test(i.detail ?? ''))
-  const parts = [...(broken ? [w.gateOff(broken.detail ?? '')] : []), ...stopped, ...(n > 0 ? [w.band(n)] : []), ...(asked > 0 ? [w.termsBand(asked)] : []), ...(gate && (gate.status === 'red' || gate.status === 'released' || gate.status === 'answered') ? [w.gateBand(gate.failures.length)] : [])]
+  const broken = await read($, configAtom)
+  const parts = [...(broken !== null ? [w.gateOff(broken)] : []), ...stopped, ...(n > 0 ? [w.band(n)] : []), ...(asked > 0 ? [w.termsBand(asked)] : []), ...(gate && (gate.status === 'red' || gate.status === 'released' || gate.status === 'answered' || gate.status === 'held') ? [w.gateBand(gate.failures.length)] : [])]
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
