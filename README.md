@@ -192,9 +192,12 @@ change's Markdown (`/spec` reads it), and the docs a `/setup-project` step write
 **Which rules.** `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` and
 `CODING_STANDARDS.md` from the file's folder up to the project, then those Claude Code read above
 it, with their `@` imports (a file pulled in by `@` is read once). `~/.claude/CLAUDE.md` only if
-the settings say so. Each file is read up to 16,000 characters, its `## Security` section always
-whole (a heading with more words, `## Security rules` or `## Безопасность (OWASP)`, counts too;
-`### Cookie security` does not); 48,000 in all.
+the settings say so. A file past 16,000 characters is read by its `##` sections: `## Security`
+always (a heading with more words, `## Security rules` or `## Безопасность (OWASP)`, counts too;
+`### Cookie security` does not), those that name the edited file's paths from the root in
+backticks (`src/api/`, `src/**/*.test.ts`, `*.tsx`; a path counts where its first folder is the
+root's, so a bare `Makefile` or `try/catch` names none), what comes before the first section, then
+those that name no path; 48,000 in all.
 
 ### The branch through lenses
 
@@ -483,6 +486,13 @@ In `/plugin`, select agent-lens, then Configure.
 - The baseline hides a new failure inside a command that was already red on that commit.
 - A file a shell command modifies that was already uncommitted before the command is not checked
   edit by edit. The turn's review reads it.
+- Two sessions in one folder: a file is a session's when its edit tools wrote it, a shell command
+  of it left the file uncommitted (with the check of each edit on), or the file changed while one of
+  its shell commands ran. A file the other session wrote meanwhile is neither reviewed nor sent
+  here, but one both wrote, or the other wrote while this one's shell ran, still is, and so is
+  whatever the other writes while a command of this session runs in the background. A file this session wrote
+  some other way (an MCP tool) outside its shell commands is taken for the other's. The fast checks
+  run on the whole project, so a red the other session caused reaches this one too.
 - MCP pushes are recognised by tool name only.
 - The budget counts fresh tokens, not money.
 - Claude Code may turn a step's questions into AskUserQuestion prompts for you. The steps ask only

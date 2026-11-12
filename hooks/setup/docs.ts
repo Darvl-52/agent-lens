@@ -4,13 +4,11 @@ import { CONFIG, DENY, parseConfig, permissionIssues, SETTINGS } from './checks'
 // The files the agent and the person both work by, each with one job and a size it may not pass:
 // the check of them, as `openspec validate --strict` checks a change. No model is asked.
 
-// The most lines each may hold; a file not named here has no limit of its own.
+// The most lines each may hold. CLAUDE.md alone has one, as it is read into every turn; the others
+// grow as the project needs, and the docs agent sends back a line that says nothing new or more
+// than it needs.
 export const LIMITS: Record<string, number> = {
   'CLAUDE.md': 120,
-  'ARCHITECTURE.md': 150,
-  'CODING_STANDARDS.md': 300,
-  'docs/agents/workflow.md': 120,
-  'LENSES.md': 150,
 }
 
 // The glossary's old names, which Matt's skills no longer read, and the names they read now.

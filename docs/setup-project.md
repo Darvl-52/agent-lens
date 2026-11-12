@@ -25,17 +25,19 @@ next `/setup-project` once the run is done) brings it in.
 
 ## The files and what each holds
 
-One fact lives in one file. Each file has one job and a size limit.
+One fact lives in one file, and each file has one job. Only `CLAUDE.md` has a size limit; the
+others grow as the project needs, and the docs agent sends back a line that says nothing new or
+more than it needs.
 
 | File | Holds | Not | Size |
 | --- | --- | --- | --- |
 | `CLAUDE.md` | Pointers to the files below, and the few rules every turn needs | Anything another file holds | 120 lines |
 | `GLOSSARY.md` | The project's own terms: a definition each, the words to avoid | Paths, code, decisions, general terms | (format) |
-| `ARCHITECTURE.md` | The map: modules, their bounds, who calls whom, where the data lives | Detail the code says better | 150 lines |
+| `ARCHITECTURE.md` | The map: modules, their bounds, who calls whom, where the data lives | Detail the code says better | |
 | `docs/adr/NNNN-*.md` | A decision that is hard to reverse, surprising, and a real trade-off; and why | Decisions that are none of the three | short |
-| `CODING_STANDARDS.md` | Rules an edit can be checked against; the security rules under `## Security` | Style a linter enforces; wishes | 300 lines |
-| `LENSES.md` | Kinds of mistake this project's reviews catch, beyond the mod's own, with where to look | A rule of one edit (that is a standard) | 150 lines |
-| `docs/agents/workflow.md` | How work goes, step by step, which skill at each, where the person decides | Project facts | 120 lines |
+| `CODING_STANDARDS.md` | Rules an edit can be checked against; the security rules under `## Security` | Style a linter enforces; wishes | |
+| `LENSES.md` | Kinds of mistake this project's reviews catch, beyond the mod's own, with where to look | A rule of one edit (that is a standard) | |
+| `docs/agents/workflow.md` | How work goes, step by step, which skill at each, where the person decides | Project facts | |
 | `openspec/config.yaml` | `context`: pointers to the files above; `rules`: per artifact | Copies of their text | |
 | `.claude/agent-lens.json` | The checks in two tiers (by folder in a monorepo); how the project is brought up | The commands copied into `CLAUDE.md` or CI | |
 | `.claude/settings.json` | What the agent may and may not run | | |

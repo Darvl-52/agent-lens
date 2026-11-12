@@ -4,6 +4,7 @@ import type { EngineInterface, Hook, TurnCompleteReason } from 'claude-code'
 import type { Baseline, DocIssue, Finding, Gate, Judge, Run, StepId, StepState, Term, TermCheck, TermVerdict } from '../../types/setup'
 import type { PaneHook, StopNext } from '../core/hooks'
 import { expectTurn, hasAutoLeft, holdAuto, isPerson, isWaiting, type Owner, PERSON, send, sendAuto, turnOwner } from '../core/outbox'
+import { type Own, ownOf } from '../core/own'
 import { flush, isAutoNow, type Point, toDecide } from '../ledger/ledger'
 import { ownAgent } from '../core/spend'
 import { langIn } from '../core/lang'
@@ -142,6 +143,8 @@ let gatePrompt: { text: string; chain: GateChain } | null = null
 // CLAUDE.md alone elsewhere. What the docs agent is shown the turn changed, whatever wrote them
 // (Write, Edit, or the shell, which no edit hook sees).
 let turnBefore: Promise<Record<string, string>> | null = null
+// What the main turn wrote, taken at its end: a doc another session edited meanwhile is not this one's.
+let turnOwn: Own | null = null
 // While /setup-project's steps go, the files as the run found them, each as it was before the first
 // turn that changed it (undefined: not there): the docs agent reads them once, at the run's end.
 const runBefore = new Map<string, string | undefined>()
@@ -664,8 +667,9 @@ export function startSetupTurn($: EngineInterface) {
 
 // A main turn ended. With the setup turned off since it started, nothing is sent from its end: it is
 // only let go. A step's own turn stopped before its answer waits for the person.
-export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason, isOnNow = true) {
+export function endSetupTurn($: EngineInterface, reason: TurnCompleteReason, own: Own, isOnNow = true) {
   isMainTurn = false
+  turnOwn = own
   const by = turnBy
   if (isFindingsTurn) {
     isFindingsTurn = false
@@ -850,13 +854,17 @@ const clipped = (text: string) => (text.length > EDIT_LIMIT ? `${text.slice(0, E
 async function startJudge($: EngineInterface) {
   // A turn whose start was not seen (a reload under it) has nothing to compare with.
   const snapshot = turnBefore
+  const own = turnOwn
   turnBefore = null
+  turnOwn = null
   if (!snapshot) return
   const turn = await snapshot
   const root = await $.session.root()
   const isProject = await isSetUp($)
   const after = await watched($)
-  const changed = [...new Set([...Object.keys(turn), ...Object.keys(after)])].filter(rel => turn[rel] !== after[rel])
+  const differ = [...new Set([...Object.keys(turn), ...Object.keys(after)])].filter(rel => turn[rel] !== after[rel])
+  const mine = own ? new Set(await ownOf($, own, differ.map(rel => joinPath(root, rel)))) : undefined
+  const changed = differ.filter(rel => !mine || mine.has(joinPath(root, rel)))
   for (const rel of changed) if (!runBefore.has(rel)) runBefore.set(rel, turn[rel])
   // Steps still to go write more of the files: read once the run has ended, not after each.
   if (isRunning(await read($, runAtom))) return
@@ -876,7 +884,7 @@ async function startJudge($: EngineInterface) {
   const edits = edited
     .map(rel => {
       const [then, now] = [before.get(rel), after[rel]]
-      const head = `=== ${rel} ===${LIMITS[rel] !== undefined && now !== undefined ? ` (${lineCount(now)} lines of its ${LIMITS[rel]})` : ''}`
+      const head = `=== ${rel} ===${now !== undefined ? ` (${lineCount(now)} lines${LIMITS[rel] !== undefined ? ` of its ${LIMITS[rel]}` : ''})` : ''}`
       if (then === undefined) return `${head}\nWritten anew:\n<<<\n${clipped(now ?? '')}\n>>>`
       if (now === undefined) return `${head}\nDeleted.`
       const { added, removed } = diffLines(then, now)

@@ -6,6 +6,7 @@ import type { StopNext } from './core/hooks'
 import { clearFaults, failed } from './core/faults'
 import { configureLang, restoreLang } from './core/lang'
 import { clearOutbox, configureOutbox, endTurn, isPerson, noteSubmit, startTurn, turnOwner } from './core/outbox'
+import { markEdit, markShell, startOwn, takeOwn } from './core/own'
 import { clearSpend, configureSpend, spendAgent, spendOn } from './core/spend'
 import { clearLedger, configureLedger, decideLine, endLedgerTurn, openDecide, PANE as DECIDE_PANE, pane as decidePane, restoreLedger, startLedgerTurn } from './ledger/ledger'
 import { checkedGuard, clearGuard, configureGuard, endGuardTurn, guardAfter, guardBefore, guardCommand, guardLines, restoreGuard, startGuardTurn } from './guard/guard'
@@ -158,6 +159,7 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined) {
       // Whose prompt started it, the person's or a part's: each part judges only its own turns.
       startLedgerTurn(startTurn(e.text))
+      startOwn()
       if (isOn('spec')) startSpecTurn()
       if (isOn('setup')) startSetupTurn($)
     }
@@ -174,10 +176,12 @@ export const register: Register = (on, options) => {
     // A turn whose start this module missed (a reload) ends as the switches are now.
     const began = (part: Part) => begun.get(e.agentId ?? MAIN)?.includes(part) ?? isOn(part)
     const owner = turnOwner()
+    // What the main turn wrote, taken before anything is awaited: the next turn's start empties it.
+    const own = e.agentId === undefined ? takeOwn() : undefined
     await endRouterTurn($, e.agentId, e.answer, e.reason, isPerson(owner)).catch(failed('router'))
     if (e.agentId === undefined) {
       if (began('spec')) endSpecTurn($, e.reason)
-      if (began('setup')) endSetupTurn($, e.reason, isOn('setup'))
+      if (began('setup') && own) endSetupTurn($, e.reason, own, isOn('setup'))
     } else {
       endSpecAgent($, e.agentId, e.answer)
       void endSetupAgent($, e.agentId, e.answer).catch(failed('setup'))
@@ -185,7 +189,7 @@ export const register: Register = (on, options) => {
     }
     await endGuardTurn($, e.agentId).catch(failed('guard'))
     const result = await next(e)
-    if (began('review')) await endReviewTurn($, e.agentId, e.reason, isOn('review')).catch(failed('review'))
+    if (began('review')) await endReviewTurn($, e.agentId, e.reason, own, isOn('review')).catch(failed('review'))
     // What the turn cost: a subagent's is the part's that started it; a main turn its prompt
     // started is the part's too, as the main model pays for it.
     if (e.agentId !== undefined) spendAgent(e.agentId, e.usage)
@@ -207,10 +211,18 @@ export const register: Register = (on, options) => {
 
   // Every edit, a subagent's too, is taken before it runs: what the file was is what the turn and
   // the session are compared with.
-  on('tool.call', { tool: 'Write' }, ($, e, next) => (isOn('review') ? beforeWrite($, e, next) : next(e))).catch(($, e, next) => next(e))
-  on('tool.call', { tool: 'Edit' }, ($, e, next) => (isOn('review') ? beforeEdit($, e, next) : next(e))).catch(($, e, next) => next(e))
-  on('tool.call', { tool: 'NotebookEdit' }, ($, e, next) => (isOn('review') ? beforeNotebookEdit($, e, next) : next(e))).catch(($, e, next) => next(e))
-  on('tool.call', { tool: 'Bash' }, ($, e, next) => (isOn('review') ? aroundShell($, e, next) : next(e))).catch(($, e, next) => next(e))
+  // What this session writes, whatever parts are on: a file another session wrote meanwhile is not its.
+  on('tool.call', { tool: 'Write' }, ($, e, next) => (markEdit(e.file_path), isOn('review') ? beforeWrite($, e, next) : next(e))).catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'Edit' }, ($, e, next) => (markEdit(e.file_path), isOn('review') ? beforeEdit($, e, next) : next(e))).catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'NotebookEdit' }, ($, e, next) => (markEdit(e.notebook_path), isOn('review') ? beforeNotebookEdit($, e, next) : next(e))).catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const end = markShell(await $.clock.now(), e.run_in_background === true)
+    try {
+      return await (isOn('review') ? aroundShell($, e, next) : next(e))
+    } finally {
+      end(await $.clock.now().catch(() => Infinity))
+    }
+  }).catch(($, e, next) => next(e))
 
   // Then the guard holds the call to its loop's limits; each edit is checked against the rules, and
   // the spec read again where the edit was to it.

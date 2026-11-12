@@ -19,7 +19,7 @@ const SEP = /[\\/]/
 const isWindows = (path: string) => /^[A-Za-z]:/.test(path) || path.includes('\\')
 const sepOf = (path: string) => (isWindows(path) ? '\\' : '/')
 const isRoot = (path: string) => path === '/' || /^[A-Z]:\\$/.test(path)
-const fold = (path: string) => (isWindows(path) ? path.toLowerCase() : path)
+export const fold = (path: string) => (isWindows(path) ? path.toLowerCase() : path)
 // Git Bash names a drive as a folder at the root: `/d/proj` for `D:\proj`.
 const MSYS = /^\/([A-Za-z])(?=\/|$)/
 

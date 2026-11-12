@@ -5,6 +5,7 @@ import type { Busy, CaughtRule, Diff, FileDiff, Finding, Hunk, Line, Live, Mode,
 import type { AbovePromptEvent, PaneHook, StopNext } from '../core/hooks'
 import { langIn } from '../core/lang'
 import { hasAutoLeft, holdAuto, send, sendAuto } from '../core/outbox'
+import { markEdit, type Own, ownOf } from '../core/own'
 import { flush, type Point, toDecide } from '../ledger/ledger'
 import { spendOn } from '../core/spend'
 import { forgetNestedRepos, forgetRepos, nestedRepos } from '../core/repos'
@@ -423,18 +424,25 @@ async function ruleFilesFor($: EngineInterface, paths: readonly string[]) {
   return found.filter(f => f.text.trim() !== '' && !imported.has(f.path) && (settings.includeUserRules || !user || !samePath(f.path, user)))
 }
 
-const rulesText = (found: readonly { path: string; text: string }[], shown: (path: string) => string) => {
+// The rules of `found` for a check of `files`, each file as it fits.
+async function rulesText($: EngineInterface, found: readonly { path: string; text: string }[], files: readonly string[]) {
+  const root = await $.session.root()
+  const shown = shownFrom(root)
+  const touched = files.map(f => shown(f).replace(/\\/g, '/'))
+  const big = found.some(f => f.text.length > RULE_FILE_LIMIT)
+  const tops = new Set(big ? (await $.fs.list(root).catch(() => [])).map(e => e.name) : [])
   let text = ''
   for (const rules of found) {
     if (text.length > RULES_LIMIT) break
-    text += `=== ${shown(rules.path)} ===\n${clipRules(rules.text.replace(/\r\n/g, '\n'), RULE_FILE_LIMIT)}\n\n`
+    text += `=== ${shown(rules.path)} ===\n${clipRules(rules.text.replace(/\r\n/g, '\n'), RULE_FILE_LIMIT, touched, tops)}\n\n`
   }
   return text
 }
 
 async function rulesFor($: EngineInterface, files: readonly FileDiff[]) {
   const w = await wordsIn($)
-  const text = rulesText(await ruleFilesFor($, files.map(f => f.path)), shownFrom(await $.session.root()))
+  const paths = files.map(f => f.path)
+  const text = await rulesText($, await ruleFilesFor($, paths), paths)
   return text === '' ? w.noRules : `${w.rulesHeading}\n\n${text}`
 }
 
@@ -823,6 +831,7 @@ export async function openPane($: EngineInterface, tab?: Tab) {
 // What a turn leaves for its diff: the files as they were, what was uncommitted before its first
 // shell command, the commands, the request.
 type TurnTaken = {
+  own: Own
   before: Readonly<Record<string, string | null>>
   dirty: Readonly<Record<string, readonly string[]>> | null
   shell: ShellRun[]
@@ -832,8 +841,8 @@ type TurnTaken = {
 
 // Taken at the turn's end and emptied in one write each, before anything is awaited: the next turn
 // may start, and edit, while this one's diff is read from the disk.
-async function takeTurn($: EngineInterface): Promise<TurnTaken> {
-  const taken: TurnTaken = { before: {}, dirty: null, shell: [], request: requestOf(await read($, turnRequestAtom)), requests: await requestsOf($) }
+async function takeTurn($: EngineInterface, own: Own): Promise<TurnTaken> {
+  const taken: TurnTaken = { own, before: {}, dirty: null, shell: [], request: requestOf(await read($, turnRequestAtom)), requests: await requestsOf($) }
   await update($, turnBeforeAtom, b => {
     taken.before = b
     return {}
@@ -854,7 +863,16 @@ async function takeTurn($: EngineInterface): Promise<TurnTaken> {
 // After a turn that edited files, what it changed becomes the last turn's diff and is reviewed,
 // unless it touched a line or two.
 async function afterTurn($: EngineInterface, taken: TurnTaken) {
-  const before = await afterShell($, taken.dirty, taken.before)
+  const before = await ownOnly($, taken.own, await afterShell($, taken.dirty, taken.before))
+  // The session's diff counts from what the turn found of its own, not of a file another wrote.
+  const kept = await read($, beforeAtom)
+  const fresh: Taken[] = []
+  for (const [named, was] of Object.entries(before)) {
+    const path = keyIn(kept, named)
+    const text = path in kept ? undefined : await keptText($, was)
+    if (text !== undefined) fresh.push({ path, text })
+  }
+  if (fresh.length > 0) await keepTaken($, fresh, committed)
   await resolveCaught($)
   const { shell, request, requests } = taken
   const at = requests.lastIndexOf(request)
@@ -881,6 +899,13 @@ async function afterTurn($: EngineInterface, taken: TurnTaken) {
   if (!isSmall(codeOf(turn))) await reviewDiff($, turn)
 }
 
+// The files of the turn this session wrote: one another session in the folder wrote meanwhile is
+// not reviewed here, nor are its findings sent to this Claude.
+async function ownOnly($: EngineInterface, own: Own, files: Readonly<Record<string, string | null>>) {
+  const mine = new Set(await ownOf($, own, Object.keys(files)))
+  return Object.fromEntries(Object.entries(files).filter(([path]) => mine.has(path)))
+}
+
 // The key `path` is kept by in `kept`: one there that is the same path spelled otherwise (Windows
 // folds case: the model's `D:\Proj\a.ts` is git's `D:\proj\a.ts`), else its one spelling.
 const keyIn = (kept: Readonly<Record<string, unknown>>, path: string) => Object.keys(kept).find(k => samePath(k, path)) ?? canonical(path)
@@ -899,7 +924,13 @@ async function take($: EngineInterface, named: string, room: number) {
   const before = await read($, beforeAtom)
   const path = keyIn(before, named)
   const isNew = !(path in before)
-  if (path in (await read($, turnBeforeAtom)) && !isNew) return undefined
+  const turnWas = await read($, turnBeforeAtom)
+  if (path in turnWas) {
+    if (!isNew) return undefined
+    // Taken for the turn alone before its shell ran: that is what the session counts from too.
+    const text = await keptText($, turnWas[path])
+    return text === undefined ? undefined : { path, text, isNew, size: 0 }
+  }
   const was = await readNow($, path)
   if (was === undefined || (was?.length ?? 0) > room) return undefined
   // Only the first taking of a file counts: an edit made since is not what it was.
@@ -927,13 +958,11 @@ async function beforeShell($: EngineInterface) {
     const edited = await sessionRepos($)
     for (const repo of edited) {
       dirty[repo] = await uncommittedIn($, repo)
-      const taken: Taken[] = []
       for (const path of dirty[repo].slice(0, SHELL_LIMIT)) {
+        // For the turn alone: the session keeps it once the turn's end finds it its own.
         const t = room > 0 ? await take($, path, Math.min(room, SHELL_TAKE.file)) : undefined
         room -= t?.size ?? 0
-        if (t?.isNew) taken.push(t)
       }
-      await keepTaken($, taken, onDisk)
     }
     // A repository of its own in the project that the session has not edited is only named: a file
     // uncommitted there after the command and not before, the shell changed, from what is committed.
@@ -958,10 +987,8 @@ async function afterShell($: EngineInterface, dirty: TurnTaken['dirty'], turnBef
       // Cut short, it is not what the file was.
       if (head?.isStdoutTruncated) continue
       const before = head?.exitCode === 0 ? head.stdout : null
-      const kept = await read($, beforeAtom)
-      const path = keyIn(kept, named)
+      const path = keyIn(await read($, beforeAtom), named)
       if (!(path in edited)) edited[path] = inline(before)
-      if (!(path in kept)) taken.push({ path, text: before })
     }
     await keepTaken($, taken, committed)
   }
@@ -984,7 +1011,7 @@ async function noteShell($: EngineInterface, command: string, ran: ToolCallResul
 // or to a file no rule applies to, is let be.
 async function inspect($: EngineInterface, change: Change) {
   if (isRuleFile(change.file) || isSpecPath(change.file) || isStepDoc(await $.session.root(), change.file)) return []
-  const rules = rulesText(await ruleFilesFor($, [change.file]), shownFrom(await $.session.root()))
+  const rules = await rulesText($, await ruleFilesFor($, [change.file]), [change.file])
   if (rules === '') return []
   const r = await $.model.complete({
     model: settings.liveModel,
@@ -1273,11 +1300,12 @@ export async function aroundShell($: Parameters<MatchedHook<'tool.call', { tool:
     dirtyLeft = undefined
     const was = isLiveOn() ? (left ?? (await dirtyNow($).catch(() => undefined))) : undefined
     const ran = await next(e)
-    await noteShell($, e.command, ran).catch(() => {})
+    // Read before anything else is awaited: a file another session writes after is not this command's.
     if (was && ran.deny === undefined) {
       const after = await checkShellWrites($, e.agentId ?? MAIN, was).catch(() => undefined)
       if (after && shellsRunning === 1) dirtyLeft = after
     }
+    await noteShell($, e.command, ran).catch(() => {})
     return ran
   } finally {
     shellsRunning--
@@ -1296,10 +1324,13 @@ async function dirtyNow($: EngineInterface) {
 // A shell command that wrote files (`sed -i`, `cat >`, `tee`) is checked against the rules as an
 // edit is: each file it left uncommitted that was not, by what changed since its commit. A file
 // already uncommitted before it is left to the review of the turn. Resolves to what is uncommitted
-// after it, as `dirtyNow` says it.
+// after it, as `dirtyNow` says it. Each it left is the session's own, whatever its time of change
+// says (`cp -p`, `tar x` keep an old one); with the check off, nothing lists them, and the time of
+// change alone tells.
 async function checkShellWrites($: EngineInterface, loop: string, was: Map<string, Set<string>>) {
   const after = new Map<string, Set<string>>()
   for (const repo of was.keys()) after.set(repo, new Set((await uncommittedIn($, repo)).map(p => canonical(p))))
+  for (const [repo, now] of after) for (const path of now) if (!was.get(repo)?.has(path)) markEdit(path)
   let left = SHELL_CHECKS
   for (const [repo, before] of was) {
     for (const path of after.get(repo) ?? []) {
@@ -1399,8 +1430,9 @@ export function checkAfter($: EngineInterface, e: ToolCallEvent, ran: ToolCallDo
 
 // The turn's end waits for the checks of its edits, so what they caught is told to Claude and
 // looked for again before the turn's diff is read.
-export async function endReviewTurn($: EngineInterface, agentId: string | undefined, reason: string, isOnNow = true) {
-  const taken = agentId === undefined ? await takeTurn($).catch(() => undefined) : undefined
+// `own`: what the main turn wrote, taken as it ended.
+export async function endReviewTurn($: EngineInterface, agentId: string | undefined, reason: string, own: Own | undefined, isOnNow = true) {
+  const taken = agentId === undefined && own ? await takeTurn($, own).catch(() => undefined) : undefined
   await settleTurn($, agentId, reason, isOnNow).catch(() => {})
   if (taken) void afterTurn($, taken).catch(() => {})
 }

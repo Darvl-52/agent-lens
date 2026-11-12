@@ -28,16 +28,70 @@ Judge only rules about what files contain: code style, naming, comments, structu
 Report a violation only when the NEW text clearly breaks a rule. Text the change removed or kept as it was is not a violation. When unsure, report nothing.
 Answer with JSON only: {"violations":[{"rule":"the rule, quoted briefly","evidence":"the offending new text, short, copied exactly","fix":"what to change, one sentence"}]}. No violations: {"violations":[]}.`
 
-// A rule file past `limit` is cut, but its security rules, the section /setup-project writes last,
-// are read whole: the rest gives way to them. Its heading may say more after its word (`## Security
-// rules`, `## Безопасность (OWASP)`); `## Securityfoo` and `### Cookie security` are no such section.
-const SECURITY_SECTION = /^##[ \t]+(?:security|безопасность)(?![\p{L}\p{N}_])[^\n]*$[\s\S]*?(?=^##[ \t]|(?![\s\S]))/imu
-export function clipRules(text: string, limit: number) {
+// A rule file past `limit` is read by its sections (`## `), each whole, so it may grow as long as the
+// project needs: the security rules /setup-project writes, always; then the sections of `files`, the
+// files the check is of; then what comes before the first section; then those that name no file. A
+// section names its files by paths from the root in backticks (`src/api/`, `src/**/*.test.ts`,
+// `*.tsx`); one whose files are none of these is left out, and said to be. The security heading may
+// say more after its word (`## Security rules`, `## Безопасность (OWASP)`); `## Securityfoo` and
+// `### Cookie security` are no such section.
+const SECURITY_HEADING = /^##[ \t]+(?:security|безопасность)(?![\p{L}\p{N}_])[^\n]*$/iu
+const KIND = /^\*(\.[\w-]+)+$/
+
+// The paths and globs in backticks: a kind of file (`*.tsx`), or a path whose first folder `tops`,
+// the root's, has, so `try/catch`, `@types/node` or `/setup-project` are none.
+const filesNamed = (text: string, tops: ReadonlySet<string>) =>
+  [...text.matchAll(/`([^`\n]+)`/g)]
+    .map(m => m[1]!.trim().replace(/^\.?\//, ''))
+    .filter(t => KIND.test(t) || (/^[\w.@*-]+(\/[\w.@*-]*)+$/.test(t) && (t.startsWith('**/') || tops.has(t.split('/')[0]!))))
+
+// Whether a path named in the rules is of `file`, both from the root.
+function isOf(named: string, file: string) {
+  const glob = KIND.test(named) ? `**/${named}` : named
+  const body = glob
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*\//g, '\0')
+    .replace(/\*\*/g, '\x01')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\0/g, '(?:.*/)?')
+    .replace(/\x01/g, '.*')
+  const tail = glob.endsWith('/') ? '.*' : glob.includes('*') ? '' : '(?:/.*)?'
+  return new RegExp(`^${body}${tail}$`).test(file)
+}
+
+const SECURITY = 0
+const OF_FILE = 1
+const OF_NONE = 2
+const OF_OTHERS = 3
+
+export function clipRules(text: string, limit: number, files: readonly string[] = [], tops: ReadonlySet<string> = new Set()) {
   if (text.length <= limit) return text
-  const security = text.match(SECURITY_SECTION)?.[0]
-  if (!security) return text.slice(0, limit)
-  const rest = text.replace(security, '')
-  return `${rest.slice(0, Math.max(0, limit - security.length))}\n[... cut]\n\n${security}`
+  const parts = text.split(/^(?=##[ \t])/m)
+  const head = /^##[ \t]/.test(parts[0]!) ? '' : parts.shift()!
+  if (parts.length === 0) return `${text.slice(0, limit)}\n[... cut]`
+  const rankOf = (s: string) => {
+    if (SECURITY_HEADING.test(s.split('\n')[0]!)) return SECURITY
+    const named = filesNamed(s, tops)
+    if (named.length === 0) return OF_NONE
+    return files.some(f => named.some(n => isOf(n, f))) ? OF_FILE : OF_OTHERS
+  }
+  const sections = parts.map(s => ({ s, rank: rankOf(s), isKept: false }))
+  let room = limit
+  const keep = (rank: number, isForced = false) => {
+    for (const section of sections.filter(x => x.rank === rank))
+      if (isForced || section.s.length <= room) {
+        section.isKept = true
+        room -= section.s.length
+      }
+  }
+  keep(SECURITY, true)
+  keep(OF_FILE)
+  const shownHead = head.trim() === '' || head.length <= room ? head : `${head.slice(0, Math.max(0, room))}\n[... cut]\n\n`
+  room -= shownHead.length
+  keep(OF_NONE)
+  const left = sections.filter(x => !x.isKept).map(x => x.s.split('\n')[0]!.trim())
+  const body = sections.filter(x => x.isKept).map(x => x.s)
+  return `${shownHead}${body.join('').trimEnd()}${left.length > 0 ? `\n\n[... left out, of other files or past the limit: ${left.join('; ')}]` : ''}\n`
 }
 
 // A drive letter or a backslash means a Windows path: compared without case.

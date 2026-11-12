@@ -152,13 +152,13 @@ test('a rule file cut short keeps its security section whole, its heading saying
   for (const heading of ['## Security', '## Security rules', '## Безопасность', '## Безопасность (OWASP)', '## SECURITY: OWASP top 10']) {
     const text = `# Standards\n\n${filler}\n${heading}\n\n- Never log a token.\n\n## Naming\n\n- camelCase.\n${filler}`
     const clipped = clipRules(text, 4_000)
-    expect([heading, clipped.endsWith(`${heading}\n\n- Never log a token.\n\n`)]).toEqual([heading, true])
-    expect(clipped.length).toBeLessThanOrEqual(4_000 + 20)
+    expect([heading, clipped.includes(`${heading}\n\n- Never log a token.\n\n`)]).toEqual([heading, true])
+    expect(clipped.length).toBeLessThanOrEqual(4_000 + 100)
   }
-  // A heading the word only begins, or one level down, is no security section: the file is cut.
+  // A heading the word only begins, or one level down, is no security section: it gives way.
   for (const heading of ['## Securityfoo', '### Cookie security', '## Безопасностьх']) {
     const text = `# Standards\n\n${filler}\n${heading}\n\n- Never log a token.\n`
-    expect([heading, clipRules(text, 4_000)]).toEqual([heading, text.slice(0, 4_000)])
+    expect([heading, clipRules(text, 4_000).includes('Never log a token.')]).toEqual([heading, false])
   }
   expect(clipRules('short', 4_000)).toBe('short')
 })

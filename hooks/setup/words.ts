@@ -10,10 +10,10 @@ type Ctx = { skills: string[]; hasOpenspec: boolean; ci: string[]; deny: string[
 // The files and what each holds, as the docs agent is told them.
 const ROLES = `- CLAUDE.md: pointers to the files below, and the few rules every turn needs. 120 lines at most.
 - GLOSSARY.md: the project's own domain terms, a definition of a sentence or two each and the words to avoid. No paths, code or decisions.
-- ARCHITECTURE.md: the map: modules, their bounds, who calls whom, where the data lives. 150 lines at most.
+- ARCHITECTURE.md: the map: modules, their bounds, who calls whom, where the data lives.
 - docs/adr/NNNN-slug.md: one decision each that is hard to reverse, surprising, and the result of a trade-off, and why.
-- CODING_STANDARDS.md: rules for code a reviewer can check an edit against, the project's security rules among them. 300 lines at most.
-- LENSES.md: the kinds of mistake this project's reviews catch, beyond the mod's own lenses, each with where to look for it; not rules of one edit, which go to CODING_STANDARDS.md. 150 lines at most.
+- CODING_STANDARDS.md: rules for code a reviewer can check an edit against, the project's security rules among them; a section of the rules of one part of the code names its paths from the root in backticks (\`src/api/\`, \`*.tsx\`), as of a long file the check of an edit reads only the sections of its file and those that name none.
+- LENSES.md: the kinds of mistake this project's reviews catch, beyond the mod's own lenses, each with where to look for it; not rules of one edit, which go to CODING_STANDARDS.md.
 - docs/agents/workflow.md: how work goes, step by step, and where the person decides.`
 
 // What the step of the security rules goes through, the kinds AI-written code fails most first
@@ -251,7 +251,7 @@ Find the artifact of the config's schema that writes the tasks (\`tasks\` in mos
     `Read what this turn changed in the files the agent and the person of the project at ${root} work by, and report what should not be there. The files and what each holds:
 ${ROLES}
 
-For each change, check it against the code (read it): is it true of the code now; is it in the file it belongs in; does it change what an agent does or would it change nothing (a no-op, a wish, a truism); does it repeat what another of the files already says; does it pass what its file may hold. A blocker: untrue, in the wrong file, or repeated. A minor one: a no-op, or wordier than it needs. CLAUDE.md is read into every turn of every agent, so it must not grow: each line added to it is a pointer, or a rule every turn needs; anything else is a blocker, and its fix names the file it belongs in (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, an ADR, a skill of the project). Report only what the change added or altered, not what was there before; none is a good answer. Do not change any file.
+For each change, check it against the code (read it): is it true of the code now; is it in the file it belongs in; does it change what an agent does or would it change nothing (a no-op, a wish, a truism); does it repeat what another of the files already says; does it pass what its file may hold; does the file grow by more than what is new. No file but CLAUDE.md has a size limit, so each grows only by what it did not say before. A blocker: untrue, in the wrong file, repeated, or growth the file does not need: a line added where rewording one already there would say it, a rule a broader one already holds, or a line longer than it needs; its fix names the line to merge it into, or says it shorter. A minor one: a no-op. CLAUDE.md is read into every turn of every agent, so it must not grow: each line added to it is a pointer, or a rule every turn needs; anything else is a blocker, and its fix names the file it belongs in (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, an ADR, a skill of the project). Report only what the change added or altered, not what was there before; none is a good answer. Do not change any file.
 
 ${edits}
 
@@ -318,7 +318,7 @@ Done when every piece of every file found has its home. End with a table: the pi
 
 Read the code: its entry points, its modules and what each owns, its data, how they call each other. Then write, adding to each file where it is there:
 - \`GLOSSARY.md\` at the root: the project's own domain terms and nothing else. The form: \`# {Context}\` and a sentence or two on what it is; \`## Language\`; for each term \`**Term**:\` on a line, a definition of one or two sentences on the next (what it is, not what it does), and \`_Avoid_: other words\` where the code or people use other words for it. No paths, no code, no decisions, no general programming terms.
-- \`ARCHITECTURE.md\` at the root, 150 lines at most: the modules and what each owns, their bounds, who calls whom, where the data lives, where to start reading. Name each module by its path in backticks. Leave out what the code says better.
+- \`ARCHITECTURE.md\` at the root: the modules and what each owns, their bounds, who calls whom, where the data lives, where to start reading. Name each module by its path in backticks. Leave out what the code says better.
 - \`docs/adr/NNNN-slug.md\`, numbered on from the last number in docs/adr/ (0001 where there is none): one for each decision the code shows that is hard to reverse, would surprise a reader, came from a real trade-off, and no ADR records yet. A \`# title\` and one to three sentences: the context, the decision, why. None where none qualifies.
 Where the project has parts with domains of their own (repositories or packages), write a GLOSSARY.md in each part's folder and a GLOSSARY-MAP.md at the root that links them. Where a term or a decision is not clear from the code, ask me instead of guessing. End with what you wrote, file by file.`,
     standards: (n: number, _: Ctx): string =>
@@ -331,7 +331,7 @@ Sort each rule:
 - a judgement (consistency across files, the right layer, a name that says what it is): it goes to \`CODING_STANDARDS.md\`.
 Each rule in a line or two: what, why (the mistake it prevents, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\`, \`stylelint: <rule>\`, or \`review\`).
 
-Write the rules the code keeps throughout yourself: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, 300 lines at most, grouped by area. ${askEn('of a rule the code keeps only in part, where its files disagree, and of a rule you would move from CODING_STANDARDS.md to the linter')} Then run the lint script and say what the new rules found. End with a table: the rule, where it went (the linter or the file), where the code shows it, and the rules you left out and why.`,
+Write the rules the code keeps throughout yourself: to the linter's config, and to \`CODING_STANDARDS.md\` at the root, grouped by area, a section of the rules of one part of the code naming its paths in backticks. ${askEn('of a rule the code keeps only in part, where its files disagree, and of a rule you would move from CODING_STANDARDS.md to the linter')} Then run the lint script and say what the new rules found. End with a table: the rule, where it went (the linter or the file), where the code shows it, and the rules you left out and why.`,
     security: (n: number, _: Ctx): string =>
       `${leadEn(n, 'the security rules for the code the agent writes')}
 
@@ -349,7 +349,7 @@ Write each rule as this project keeps it: by its own query layer, sanitizer, acc
 
 Each rule in a line or two: what, why (the attack it stops, in a clause), where it shows (a path), and how it is checked (\`eslint: <rule>\` or \`review\`). A mechanical one goes to the linter's config where a linter and the plugin for it are already installed (with eslint-plugin-react, \`react/no-danger\` and \`react/jsx-no-script-url\`); install no package for it, and leave it to \`review\` otherwise.
 
-Write the rules, under a \`## Security\` heading in \`CODING_STANDARDS.md\` at the root, by \`### Frontend\`, \`### Backend\` and \`### Any code\` where the project has both sides, keeping the file within 300 lines; what went to the linter gets a line under that heading.
+Write the rules, under a \`## Security\` heading in \`CODING_STANDARDS.md\` at the root, by \`### Frontend\`, \`### Backend\` and \`### Any code\` where the project has both sides; what went to the linter gets a line under that heading.
 
 The agent has to have these before it writes, not only be told of them after: add this line to \`CLAUDE.md\`, as every turn and every subagent reads that file. Where there is no such file, do not create it: the step of how work goes writes it with this line.
 ${SECURITY_LINE.en}
@@ -365,7 +365,7 @@ A lens is a kind of mistake, as a habit to check, and where to look for it: one 
    - GitHub: the comments lie in three places, \`gh api repos/<o>/<r>/pulls/<n>/comments\` (on lines of code), \`gh api repos/<o>/<r>/pulls/<n>/reviews\` (the review's text), \`gh api repos/<o>/<r>/issues/<n>/comments\` (general); those whose \`user.type\` is not \`Bot\`.
    Over ten comments, hand the gathering and the sorting to a subagent on sonnet and take its table. Where neither CLI reads the project's requests, read its history instead (\`git log\`): commits that fix, revert or finish another, and what that one missed.
 2. Sort each comment. Whether it is fair: check it against the code; where the reviewer got a fact wrong, it goes to what to push back on, with why it is not so and its link, and to no lens. Else its lens: one of the mod's, one already in LENSES.md, or a new one. A rule one edit can be checked against is no lens: it goes to CODING_STANDARDS.md or the linter.
-3. \`LENSES.md\` at the root, 150 lines at most, added to where it is there:
+3. \`LENSES.md\` at the root, added to where it is there:
    - a line on where the lenses came from: how many comments, on how many requests, over what time;
    - \`## Lenses\`: each \`N. **Its name** (how many comments). What goes wrong, as a habit to check. Look at: where, by this project's paths.\`, the most frequent first. A kind one of the mod's lenses names takes the mod's name and only what this project adds, its examples and where to look: the review reads the two as one lens.
    - \`## What to push back on\`: what reviewers asked for that the code shows is not so, each with why and its link.
@@ -406,7 +406,7 @@ Write the deny rules above and the allow rules yourself. What else to deny is mi
       ]
       return `${leadEn(n, 'how work goes, and CLAUDE.md')}
 
-Write \`docs/agents/workflow.md\` (adding to it where it is there), 120 lines at most, the way work goes in this project, saying at each step where I decide:
+Write \`docs/agents/workflow.md\` (adding to it where it is there), the way work goes in this project, saying at each step where I decide:
 ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 Then, in the same file:
 - When a task is done here: the full tier of \`.claude/agent-lens.json\` green, and the smoke test where it has one; a line each for what else the project has (stories, accessibility checks).
@@ -548,7 +548,7 @@ const RU: typeof EN = {
     `Прочитай, что этот ход поменял в файлах, по которым работают агент и человек в проекте ${root}, и сообщи, чему там не место. Файлы и что в каждом:
 ${ROLES}
 
-Каждое изменение сверь с кодом (прочитай его): верно ли оно для кода сейчас; в том ли файле, где ему место; меняет ли оно то, что делает агент, или ничего не меняет (пустая фраза, пожелание, очевидность); не повторяет ли то, что уже сказано в другом из этих файлов; не выходит ли за то, что может держать его файл. Блокер: неверно, не в том файле или повтор. Мелочь: пустая фраза или многословнее, чем нужно. CLAUDE.md читается в каждый ход каждого агента, поэтому ему нельзя разрастаться: каждая добавленная в него строка — указатель или правило, нужное каждому ходу; всё остальное — блокер, и его fix называет файл, где ему место (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, ADR, скилл проекта). Сообщай только о том, что изменение добавило или поменяло, а не о том, что было раньше; если ничего нет, так и ответь. Файлы не меняй. Пиши по-русски.
+Каждое изменение сверь с кодом (прочитай его): верно ли оно для кода сейчас; в том ли файле, где ему место; меняет ли оно то, что делает агент, или ничего не меняет (пустая фраза, пожелание, очевидность); не повторяет ли то, что уже сказано в другом из этих файлов; не выходит ли за то, что может держать его файл; не растёт ли файл больше, чем на новое. Лимит размера есть только у CLAUDE.md, поэтому каждый файл растёт лишь на то, чего в нём ещё не было. Блокер: неверно, не в том файле, повтор или рост, который файлу не нужен: добавлена строка там, где хватило бы переформулировать уже имеющуюся, правило, которое уже покрывает более общее, или строка длиннее, чем нужно; его fix называет строку, с которой её слить, или говорит её короче. Мелочь: пустая фраза. CLAUDE.md читается в каждый ход каждого агента, поэтому ему нельзя разрастаться: каждая добавленная в него строка — указатель или правило, нужное каждому ходу; всё остальное — блокер, и его fix называет файл, где ему место (GLOSSARY.md, CODING_STANDARDS.md, docs/agents/workflow.md, ADR, скилл проекта). Сообщай только о том, что изменение добавило или поменяло, а не о том, что было раньше; если ничего нет, так и ответь. Файлы не меняй. Пиши по-русски.
 
 ${edits}
 
@@ -609,7 +609,7 @@ ${ROLES}
 
 Прочитай код: точки входа, модули и чем владеет каждый, данные, кто кого вызывает. Потом напиши, дополняя файл, если он уже есть:
 - \`GLOSSARY.md\` в корне: только термины предметной области проекта. Вид: \`# {Контекст}\` и одно-два предложения, что это; \`## Language\`; для каждого термина \`**Термин**:\` на строке, определение в одно-два предложения на следующей (что это, а не что делает) и \`_Avoid_: другие слова\`, где код или люди называют это иначе. Без путей, кода, решений и общих понятий программирования.
-- \`ARCHITECTURE.md\` в корне, не больше 150 строк: модули и чем владеет каждый, их границы, кто кого вызывает, где живут данные, с чего начинать читать. Каждый модуль назови его путём в обратных кавычках. Не пиши то, что лучше скажет код.
+- \`ARCHITECTURE.md\` в корне: модули и чем владеет каждый, их границы, кто кого вызывает, где живут данные, с чего начинать читать. Каждый модуль назови его путём в обратных кавычках. Не пиши то, что лучше скажет код.
 - \`docs/adr/NNNN-slug.md\` с номерами дальше последнего в docs/adr/ (0001, если там пусто): по одному на каждое решение, которое видно в коде, трудно отменить, удивит читателя, принято из реального выбора и ещё не записано ни в одном ADR. \`# заголовок\` и одно-три предложения: контекст, решение, почему. Ни одного, если таких нет.
 Если у проекта есть части со своим доменом (репозитории или пакеты), напиши GLOSSARY.md в папке каждой части и GLOSSARY-MAP.md в корне со ссылками на них. Где термин или решение по коду не ясны, спроси меня, а не угадывай. В конце скажи, что написал, по файлам.`,
     standards: n =>
@@ -622,7 +622,7 @@ ${ROLES}
 - на суждение (согласованность между файлами, верный слой, имя, которое говорит, что это): идёт в \`CODING_STANDARDS.md\`.
 Каждое правило в одну-две строки: что, почему (какую ошибку предотвращает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\`, \`stylelint: <правило>\` или \`ревью\`).
 
-Правила, которые код держит везде, запиши сам: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, не больше 300 строк, по разделам. ${askRu('о правиле, которое код держит лишь местами, где его файлы расходятся, и о правиле, которое ты бы перенёс из CODING_STANDARDS.md в линтер')} Потом запусти скрипт линта и скажи, что нашли новые правила. В конце — таблица: правило, куда ушло (линтер или файл), где его видно в коде, и какие правила ты не взял и почему.`,
+Правила, которые код держит везде, запиши сам: в конфиг линтера и в \`CODING_STANDARDS.md\` в корне, по разделам; раздел правил одной части кода называет её пути в обратных кавычках. ${askRu('о правиле, которое код держит лишь местами, где его файлы расходятся, и о правиле, которое ты бы перенёс из CODING_STANDARDS.md в линтер')} Потом запусти скрипт линта и скажи, что нашли новые правила. В конце — таблица: правило, куда ушло (линтер или файл), где его видно в коде, и какие правила ты не взял и почему.`,
     security: n =>
       `${leadRu(n, 'правила безопасности для кода, который пишет агент')}
 
@@ -640,7 +640,7 @@ ${KINDS_RU}
 
 Каждое правило в одну-две строки: что, почему (какую атаку останавливает, одной фразой), где видно (путь) и чем проверяется (\`eslint: <правило>\` или \`ревью\`). Механическое идёт в конфиг линтера, если линтер и плагин для него уже установлены (с eslint-plugin-react это \`react/no-danger\` и \`react/jsx-no-script-url\`); пакетов для этого не ставь, иначе оставь правило на \`ревью\`.
 
-Запиши правила под заголовком \`## Безопасность\` в \`CODING_STANDARDS.md\` в корне, по \`### Фронтенд\`, \`### Бэкенд\` и \`### Любой код\`, если в проекте есть обе стороны, не выходя за 300 строк; то, что ушло в линтер, отметь там одной строкой.
+Запиши правила под заголовком \`## Безопасность\` в \`CODING_STANDARDS.md\` в корне, по \`### Фронтенд\`, \`### Бэкенд\` и \`### Любой код\`, если в проекте есть обе стороны; то, что ушло в линтер, отметь там одной строкой.
 
 Агент должен знать эти правила до того, как пишет, а не только услышать о них потом: добавь эту строку в \`CLAUDE.md\`, его читает каждый ход и каждый сабагент. Если такого файла нет, не создавай его: шаг о том, как идёт работа, напишет его с этой строкой.
 ${SECURITY_LINE.ru}
@@ -656,7 +656,7 @@ ${SECURITY_LINE.ru}
    - GitHub: замечания лежат в трёх местах, \`gh api repos/<o>/<r>/pulls/<n>/comments\` (строки кода), \`gh api repos/<o>/<r>/pulls/<n>/reviews\` (текст ревью), \`gh api repos/<o>/<r>/issues/<n>/comments\` (общие); берутся те, где \`user.type\` не \`Bot\`.
    Больше 10 замечаний — выгрузку и разбор отдай сабагенту на sonnet, себе возьми таблицу. Если ни один CLI не читает запросы проекта, читай вместо них историю (\`git log\`): коммиты, которые исправляют, откатывают или доделывают другой, и что тот упустил.
 2. Разбери каждое замечание. Справедливо ли — проверь по коду; если ревьюер ошибся фактом, оно идёт в «На что возражать» с сутью, почему это не так, и ссылкой, и ни в какую линзу. Иначе его линза: одна из линз мода, уже записанная в LENSES.md или новая. Правило, по которому проверяется одна правка, — не линза: ему место в CODING_STANDARDS.md или в линтере.
-3. \`LENSES.md\` в корне, не больше 150 строк, дополняя его, если он есть:
+3. \`LENSES.md\` в корне, дополняя его, если он есть:
    - строка о том, откуда линзы: сколько замечаний, в скольких запросах, за какой срок;
    - \`## Линзы\`: каждая \`N. **Её имя** (сколько замечаний). Что идёт не так, как проверяемая привычка. Смотреть: где, путями этого проекта.\`, самые частые первыми. Класс, который называет линза мода, берёт её имя и только то, что добавляет этот проект, — его примеры и где смотреть: ревью читает их как одну линзу.
    - \`## На что возражать\`: о чём просили ревьюеры, а код показывает, что это не так, — каждое с причиной и ссылкой.
@@ -697,7 +697,7 @@ ${askRu('о команде, про которую не уверен, что он
       ]
       return `${leadRu(n, 'как идёт работа, и CLAUDE.md')}
 
-Напиши \`docs/agents/workflow.md\` (дополни, если он уже есть), не больше 120 строк, как идёт работа в этом проекте, и на каждом шаге скажи, где решаю я:
+Напиши \`docs/agents/workflow.md\` (дополни, если он уже есть), как идёт работа в этом проекте, и на каждом шаге скажи, где решаю я:
 ${steps.map((t, i) => `${i + 1}. ${t}`).join('\n')}
 Потом в том же файле:
 - Когда задача здесь готова: полная ступень из \`.claude/agent-lens.json\` зелёная и смоук-тест, где он есть; по строке на то, что ещё есть в проекте (сторис, проверки доступности).

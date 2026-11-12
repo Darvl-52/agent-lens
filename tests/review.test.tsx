@@ -212,6 +212,8 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
   const head = new Map(disk)
   // What each Bash call does to the disk, in turn.
   const shells: ((disk: Map<string, string>) => void)[] = []
+  // When a file last changed, where a test says: else its time is not known.
+  const mtimes = new Map<string, number>()
   // Repositories of their own inside the project, as dev-env holds its clones: by their folder.
   const nested: string[] = []
   const repoOfPath = (path: string) => nested.find(r => path === r || path.startsWith(`${r}/`))
@@ -245,6 +247,10 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
         names.set(name!, rest.length > 0 ? 'dir' : 'file')
       }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
+  })
+  on('fs.stat', ($, e) => {
+    const at = mtimes.get(posix(e.path))
+    return at === undefined ? { deny: 'unknown' } : { value: { kind: 'file' as const, size: 1, mtimeMs: at, isLink: false } }
   })
   // What was read, file by file; how often the language was.
   const reads: string[] = []
@@ -399,6 +405,13 @@ const project = async ($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], 
     clock,
     reads,
     nest: (repo: string) => nested.push(repo),
+    // A file written now, as another session in the folder or this one's shell writes it.
+    touch: (path: string, text: string) => {
+      disk.set(path, text)
+      mtimes.set(path, clock.now())
+    },
+    // A file's time of change set back, as `cp -p` or a formatter that keeps it leaves it.
+    age: (path: string, at: number) => mtimes.set(path, at),
     langReads: () => langReads,
   }
 }
@@ -808,6 +821,40 @@ test('what a shell command changes is in the turn and the session, as it was bef
   await pane.unmount()
 })
 
+// Two terminals in one folder: what the other session wrote while this one's turn ran is not this
+// one's, and is neither reviewed here nor sent to this Claude.
+test('a file another session wrote during the turn, outside this one’s shell commands, is not in its review', async ($, on) => {
+  const { asked, clock, touch, age, native, review } = await project($, on, { 'src/app.ts': APP, 'src/words.ts': 'a\nb\n', 'src/cart.ts': 'export const total = 0\n' })
+  await $.turn.start({ text: 'add the label', turnId: 'label' })
+  // This session's edit tool: its own whatever the file's time says.
+  await $.tool.call({ tool: 'Write', file_path: native('/proj/src/app.ts'), content: DARK })
+  age('/proj/src/app.ts', 1)
+  await clock.advance(5_000)
+  // The other session, before this one's first command: a file it changed, uncommitted before it.
+  touch('/proj/src/cart.ts', 'export const total = 1\n')
+  await clock.advance(5_000)
+  await $.tool.call({ tool: 'Bash', command: 'sed -i … src/words.ts' })
+  touch('/proj/src/words.ts', 'a\nb\nlabel\nmore\nand more\n')
+  await clock.advance(5_000)
+  // And after it, a file new to git.
+  touch('/proj/src/other.ts', 'export const other = 1\n')
+  await clock.advance(1)
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 'label', reason: 'answer', usage: { ...USAGE, model: 'test' } })
+  await clock.advance(10)
+  const prompt = asked.find(a => /Review the diff/.test(a.prompt))!.prompt
+  expect(prompt).toMatch(/=== src\/words\.ts ===[\s\S]*\+label/)
+  expect(prompt).toContain('=== src/app.ts ===')
+  expect(prompt).not.toContain('src/other.ts ===')
+  expect(prompt).not.toContain('export const total = 1')
+  // Nor are the other's files in this session's diff.
+  await review()
+  const pane = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
+  await pane.select({ key: 'mode', value: 'session' })
+  const labels = await Promise.all([0, 1, 2].map(async i => (await pane.find({ key: `file-${i}` }))?.props.label))
+  expect(labels).toEqual(['src/app.ts', 'src/words.ts', undefined])
+  await pane.unmount()
+})
+
 test('a shell command in a repository of its own inside the project, edited by no tool before, is in the turn', async ($, on) => {
   const { asked, nest, shellTurn } = await project($, on, { 'src/app.ts': APP, '__front/src/cart.ts': 'export const total = 0\n' })
   nest('/proj/__front')
@@ -1124,6 +1171,26 @@ test('the security rules at the end of long standards reach the check of each ed
   await turn('say why', { 'src/app.ts': COMMENTED })
   expect(checked).toHaveLength(1)
   expect(checked[0]!.promptBlocks?.[0]?.text).toContain('Never assign innerHTML.')
+})
+
+// Standards past what a rule file is read up to are read by sections: those of the edited file and
+// those that name none, so the file may grow without its rules going unread.
+test('long standards reach the check of an edit by the sections of its file', async ($, on) => {
+  const many = (what: string) => Array.from({ length: 120 }, (_, i) => `- ${what} rule ${i + 1}: a rule of this part, why it holds, where it shows, and what checks it.`).join('\n')
+  const standards = `# Coding standards\n\nRead the section of your part.\n\n## Server\n\nFor \`server/\`.\n\n${many('Server')}\n\n## Frontend\n\nFor \`src/**\` and \`*.tsx\`.\n\n${many('Frontend')}\n\n## Errors\n\n- Errors go out through AppError, never a bare \`try/catch\`; await, not \`.then\`; types from \`@types/node\`.\n\n## Tests\n\nFor \`/src/**/*.test.ts\`: one behaviour each.\n\n## Security\n\n- Never assign innerHTML.\n`
+  const { checked, turn } = await project($, on, { 'src/app.ts': APP, 'server/main.ts': 'export {}\n', 'CODING_STANDARDS.md': standards })
+  await turn('say why', { 'src/app.ts': COMMENTED })
+  expect(checked).toHaveLength(1)
+  const read = checked[0]!.promptBlocks?.[0]?.text ?? ''
+  expect(read).toContain('Read the section of your part.')
+  expect(read).toContain('Frontend rule 120:')
+  expect(read).toContain('Errors go out through AppError, never a bare')
+  expect(read).toContain('Never assign innerHTML.')
+  expect(read).not.toContain('Server rule 1:')
+  expect(read).not.toContain('one behaviour each')
+  // Read in the file's order, what leads it first.
+  expect(read).toMatch(/^=== CODING_STANDARDS\.md ===\n# Coding standards\n\nRead the section of your part\.\n\n## Frontend/)
+  expect(read).toContain('[... left out, of other files or past the limit: ## Server; ## Tests]')
 })
 
 test('an edit to the OpenSpec change is not checked against the rules: /spec reads it', async ($, on) => {
@@ -1525,7 +1592,7 @@ test('block checks a notebook cell as it checks a file', { options: { live: 'blo
 
 test('/changes rules says which rule file is past what the check reads', async ($, on) => {
   const { review } = await project($, on, { 'CLAUDE.md': `# Project\n${'No comments in code.\n'.repeat(1000)}`, 'src/app.ts': APP })
-  expect((await review('rules')).text).toMatch(/CLAUDE\.md \(21010 characters: the check reads the first 16000, and the Security section whole\)/)
+  expect((await review('rules')).text).toMatch(/CLAUDE\.md \(21010 characters, past 16000: the check of an edit reads the sections of its file, those that name no file, and the Security section\)/)
 })
 
 test('/agent-lens shows what each part spent this session', async ($, on) => {

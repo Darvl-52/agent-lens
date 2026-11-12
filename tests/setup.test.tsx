@@ -14,6 +14,9 @@ const issuesOf = (files: Record<string, string>, missing: string[] = []) => chec
 test('the files are held to their size, the paths they name, and the forms of the glossary and the ADRs', () => {
   expect(issuesOf({ 'GLOSSARY.md': GLOSSARY, 'CLAUDE.md': 'Read `ARCHITECTURE.md` first.\n' })).toEqual([])
   expect(issuesOf({ 'CLAUDE.md': `${'line\n'.repeat(121)}` })).toEqual([['CLAUDE.md', 'size', '121/120']])
+  // CLAUDE.md alone is read into every turn: the others grow as the project needs.
+  for (const file of ['CODING_STANDARDS.md', 'ARCHITECTURE.md', 'LENSES.md', 'docs/agents/workflow.md'])
+    expect(issuesOf({ [file]: Array.from({ length: 900 }, (_, i) => `- Line ${i}.`).join('\n') }).filter(i => i[1] === 'size')).toEqual([])
   // A glossary CLAUDE.md imports is read into every turn with it: it counts.
   expect(issuesOf({ 'CLAUDE.md': `${'line\n'.repeat(60)}@GLOSSARY.md\n`, 'GLOSSARY.md': `# Ordering\n\n${'x\n'.repeat(60)}` }).filter(i => i[1] === 'size')).toEqual([['CLAUDE.md', 'size', '123/120 with @GLOSSARY.md']])
   // A path a file names that is not there; a command, a glob or a placeholder is no path.
@@ -706,7 +709,7 @@ test('docs written through the shell, as Claude often writes them, have the docs
   await w.settle()
   expect(w.spawned).toHaveLength(1)
   expect(w.spawned[0]).toMatch(/=== CLAUDE\.md === \(3 lines of its 120\)\nAdded:\n\+ Always be careful\.\n\n/)
-  expect(w.spawned[0]).toMatch(/=== docs\/adr\/0001-static\.md ===\nWritten anew:\n<<<\n# Static/)
+  expect(w.spawned[0]).toMatch(/=== docs\/adr\/0001-static\.md === \(\d+ lines\)\nWritten anew:\n<<<\n# Static/)
 })
 
 test('outside a project set up, a CLAUDE.md that grows is read by the docs agent; one edited in place is not', async ($, on) => {
